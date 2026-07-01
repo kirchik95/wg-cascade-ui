@@ -1,0 +1,14 @@
+[Unit]
+Description=Cascade server-side split-tunnel (RU direct) — re-applies state on boot
+After=wg-quick@wg-cl.service wg-quick@wg-do.service network-online.target
+Wants=network-online.target
+Requires=wg-quick@wg-cl.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/wg-ui/split-server.sh apply
+ExecStop=/opt/wg-ui/split-server.sh down
+
+[Install]
+WantedBy=multi-user.target
