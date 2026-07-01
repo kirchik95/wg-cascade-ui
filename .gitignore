@@ -1,0 +1,28 @@
+# ── secrets — NEVER commit ───────────────────────────────────────────────
+# (on the server these live in /etc/wg-ui/, not here — this is belt & braces)
+*.pem
+*.key
+*.env
+wg-ui.env
+# ── client registry / operational data ───────────────────────────────────
+clients.json
+names.json
+*.db
+audit.log
+# ── generated split-tunnel data ──────────────────────────────────────────
+ru-zone.cache
+split-allowedips.txt
+split-direct.txt
+split-extra.txt
+split-meta.json
+split-server.state
+*.bak
+# ── session scratch / captures ───────────────────────────────────────────
+cookie.txt
+csrf.txt
+shot_*.png
+v_*.html
+# ── python / macOS ───────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.DS_Store

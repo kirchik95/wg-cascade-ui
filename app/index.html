@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="csrf" content="__CSRF__"><link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#0b0e14" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="WG Cascade"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/svg+xml" href="/icon.svg"><title>WG Cascade</title><script>(function(){var t;try{t=localStorage.getItem('wgui-theme')}catch(e){}if(!t)t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';document.documentElement.dataset.theme=t})();</script><link rel="stylesheet" href="/app.css"></head><body>
+<div class="wrap">
+<header>
+<h1>WG&nbsp;Cascade <span class="sub">client status</span></h1>
+<div class="meta">
+<span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
+<button class="pill btn" id="lang" onclick="toggleLang()" data-tip="Language / Язык">RU</button>
+<button class="pill btn" id="theme" onclick="toggleTheme()" data-tip="Toggle theme">☀</button>
+<a class="pill btn" href="/logout" data-tip="Sign out">logout</a>
+</div>
+</header>
+<div class="bento">
+<div class="cascade card" id="cascade"></div>
+<div class="tline" id="tline"></div>
+<div class="card chartcard">
+<div class="charth"><div class="t">Throughput<span>last 5 min</span></div><div class="now" id="chartnow"></div></div>
+<svg class="spark" id="spark" viewBox="0 0 600 56" preserveAspectRatio="none"></svg>
+</div>
+<div class="card hosttile" id="hostbar"></div>
+</div>
+<div class="sech"><div class="lt">Clients <b id="csum"></b></div>
+<div class="sech-act"><button class="ghost" onclick="openSplitSettings()" data-tip="Split-tunnel policy (what bypasses the cascade)">Split</button><button class="ghost" onclick="openUsage()" data-tip="Traffic history and monthly usage">Usage</button><button class="ghost" onclick="openAudit()" data-tip="Audit log — recent admin actions">Log</button><button class="ghost" onclick="doExport()" data-tip="Download a backup (configs + keys)">Backup</button><button class="primary" onclick="openAdd()" data-tip="Generate a new client config">+ Add client</button></div></div>
+<div class="cards bento2" id="cards"></div>
+<footer><span id="upd">…</span><span>read-only status · writes via secure helper</span></footer>
+</div>
+<div class="mbg" id="mbg" onclick="if(event.target===this)closeModal()"><div class="modal" id="modal"></div></div>
+<div id="toast"></div>
+<script>
+
+function setThemeBtn(){var b=document.getElementById('theme');if(b)b.textContent=
+document.documentElement.dataset.theme==='light'?'\u263e':'\u2600';}
+function toggleTheme(){var h=document.documentElement;h.dataset.theme=h.dataset.theme==='light'?'dark':'light';
+try{localStorage.setItem('wgui-theme',h.dataset.theme)}catch(e){}setThemeBtn();}
+setThemeBtn();
+</script><script src="/app.js"></script></body></html>
