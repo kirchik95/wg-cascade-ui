@@ -12,8 +12,9 @@ from urllib.parse import urlparse, parse_qs
 
 USER        = os.environ.get("WGUI_USER", "admin")
 SALT        = os.environ.get("WGUI_SALT", "")
-PASS_SHA    = os.environ.get("WGUI_PASS_SHA256", "")
-SECRET      = os.environ.get("WGUI_SESSION_SECRET", "change-me").encode()
+PASS_SHA    = os.environ.get("WGUI_PASS_SHA256", "")          # legacy scheme, fallback
+PASS_PBKDF2 = os.environ.get("WGUI_PASS_PBKDF2", "")          # "iterations$hexdigest", preferred
+SECRET      = os.environ.get("WGUI_SESSION_SECRET", "").encode()
 PORT        = int(os.environ.get("WGUI_PORT", "443"))
 CERT        = os.environ.get("WGUI_CERT", "/etc/wg-ui/cert.pem")
 KEY         = os.environ.get("WGUI_KEY", "/etc/wg-ui/key.pem")
@@ -29,17 +30,42 @@ ADMIN       = ["sudo", "-n", "/usr/bin/python3", "/opt/wg-ui/wg-admin.py"]
 DB          = os.environ.get("WGUI_DB", "/var/lib/wg-ui/history.db")
 SPLIT_STATE = os.environ.get("WGUI_SPLIT_STATE", "/etc/wg-ui/split-server.state")
 AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/lib/wg-ui/audit.log")
+GEN_FILE    = os.environ.get("WGUI_GEN", "/var/lib/wg-ui/session.gen")
+MAX_CONN    = int(os.environ.get("WGUI_MAX_CONN", "64"))
 
 # ---------------------------------------------------------------- auth helpers
 def creds_ok(u, p):
-    ph = hashlib.sha256((SALT + p).encode()).hexdigest()
-    return hmac.compare_digest(u, USER) and hmac.compare_digest(ph, PASS_SHA)
+    if PASS_PBKDF2:
+        try:
+            it, hx = PASS_PBKDF2.split("$", 1)
+            dk = hashlib.pbkdf2_hmac("sha256", p.encode(), SALT.encode(), int(it)).hex()
+            good = hmac.compare_digest(dk, hx)
+        except Exception:
+            good = False
+    else:   # legacy: single salted SHA-256 (kept so existing env files still work)
+        ph = hashlib.sha256((SALT + p).encode()).hexdigest()
+        good = hmac.compare_digest(ph, PASS_SHA) and bool(PASS_SHA)
+    return hmac.compare_digest(u, USER) and good
 
 def _b64e(b): return base64.urlsafe_b64encode(b).decode().rstrip("=")
 def _b64d(s): return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
+def session_gen():
+    """Server-side session generation; bumping it invalidates every issued token."""
+    try:
+        with open(GEN_FILE) as f:
+            return int(f.read().strip() or 0)
+    except Exception:
+        return 0
+
+def bump_session_gen():
+    g = session_gen() + 1
+    with open(GEN_FILE, "w") as f:
+        f.write(str(g))
+    return g
+
 def make_token(user, exp):
-    msg = ("%s|%d" % (user, exp)).encode()
+    msg = ("%s|%d|%d" % (user, exp, session_gen())).encode()
     return _b64e(msg) + "." + _b64e(hmac.new(SECRET, msg, hashlib.sha256).digest())
 
 def check_token(tok):
@@ -48,13 +74,41 @@ def check_token(tok):
         msg = _b64d(m)
         if not hmac.compare_digest(_b64d(s), hmac.new(SECRET, msg, hashlib.sha256).digest()):
             return None
-        user, exp = msg.decode().split("|", 1)
+        user, exp, gen = msg.decode().split("|")
+        if int(gen) != session_gen():
+            return None
         return user if int(exp) > int(time.time()) else None
     except Exception:
         return None
 
 def csrf_for(user):
-    return hmac.new(SECRET, ("csrf|" + user).encode(), hashlib.sha256).hexdigest()[:32]
+    msg = "csrf|%s|%d" % (user, session_gen())
+    return hmac.new(SECRET, msg.encode(), hashlib.sha256).hexdigest()[:32]
+
+# per-IP login throttle: max LOGIN_MAX failures per LOGIN_WIN, then locked out
+LOGIN_MAX, LOGIN_WIN = 5, 900
+_fails = {}                 # ip -> [fail_ts, ...]
+_fails_lock = threading.Lock()
+
+def login_blocked(ip):
+    now = time.time()
+    with _fails_lock:
+        ts = [t for t in _fails.get(ip, []) if now - t < LOGIN_WIN]
+        if ts:
+            _fails[ip] = ts
+        else:
+            _fails.pop(ip, None)
+        return len(ts) >= LOGIN_MAX
+
+def login_failed(ip):
+    with _fails_lock:
+        if len(_fails) > 1000:      # bound memory under scanner floods
+            _fails.clear()
+        _fails.setdefault(ip, []).append(time.time())
+
+def login_ok(ip):
+    with _fails_lock:
+        _fails.pop(ip, None)
 
 # ------------------------------------------------------------- data collection
 def _dump(iface):
@@ -106,7 +160,7 @@ def clients_status():
                     "age": age, "online": bool(en and 0 <= age < ONLINE_S),
                     "rx": lv["rx"] if lv else 0, "tx": lv["tx"] if lv else 0,
                     "mrx": m.get("rx", 0), "mtx": m.get("tx", 0),
-                    "split": c.get("split", False), "expires": c.get("expires", 0),
+                    "expires": c.get("expires", 0),
                     "spark": sp.get(c["pubkey"], [])[-24:]})
     out.sort(key=lambda x: (not x["online"], not x["enabled"], x["name"].lower()))
     return out
@@ -155,14 +209,19 @@ def host():
     except Exception:
         return None
 
+EGRESS_URLS = ["https://api.ipify.org", "https://icanhazip.com"]
+
 def _probe_egress():
-    try:
-        r = subprocess.run(["curl", "-s", "--max-time", "8", "--interface", SRC_IP,
-                            "https://api.ipify.org"], capture_output=True, text=True, timeout=10)
-        ip = r.stdout.strip()
-        return (ip == EXIT_IP), (ip or None)
-    except Exception:
-        return False, None
+    for url in EGRESS_URLS:      # fallback so one dead IP service can't fake "degraded"
+        try:
+            r = subprocess.run(["curl", "-s", "--max-time", "8", "--interface", SRC_IP, url],
+                               capture_output=True, text=True, timeout=10)
+            ip = r.stdout.strip()
+            if ip:
+                return (ip == EXIT_IP), ip
+        except Exception:
+            pass
+    return False, None
 
 def _sampler():
     i = 0
@@ -263,9 +322,9 @@ def status():
     return {"now": int(time.time()), "tunnel": tunnel(), "host": host(), "rud": rud_on(),
             "peers": clients_status(), "thr": throughput()}
 
-def call_admin(argv):
+def call_admin(argv, timeout=30):
     try:
-        r = subprocess.run(ADMIN + argv, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(ADMIN + argv, capture_output=True, text=True, timeout=timeout)
         line = (r.stdout.strip().splitlines() or [""])[-1]
         return json.loads(line) if line else {"ok": False, "error": "no output from helper"}
     except Exception as e:
@@ -384,6 +443,11 @@ def asset(name):
         return f.read()
 
 
+CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+       "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
+       "connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; "
+       "frame-ancestors 'none'; form-action 'self'")
+
 class H(BaseHTTPRequestHandler):
     server_version = "wgui"
     timeout = 20
@@ -404,6 +468,9 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Strict-Transport-Security", "max-age=15552000")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", CSP)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -490,16 +557,32 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/login":
+            ip = self.client_address[0]
+            if login_blocked(ip):
+                return self._send(303, b"", None, {"Location": "/login?e=2"})
             form = parse_qs(self._body().decode("utf-8", "replace"))
             u = form.get("username", [""])[0]
             p = form.get("password", [""])[0]
             if creds_ok(u, p):
+                login_ok(ip)
                 tok = make_token(u, int(time.time()) + SESSION_TTL)
                 cookie = ("wgui_session=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d"
                           % (tok, SESSION_TTL))
                 return self._send(303, b"", None, {"Location": "/", "Set-Cookie": cookie})
+            login_failed(ip)
             time.sleep(1.0)
             return self._send(303, b"", None, {"Location": "/login?e=1"})
+        if path == "/logout-all":
+            user = self._user()
+            if not user:
+                return self._json(401, {"ok": False, "error": "auth"})
+            if not hmac.compare_digest(self.headers.get("X-CSRF", ""), csrf_for(user)):
+                return self._json(403, {"ok": False, "error": "bad csrf token"})
+            try:
+                bump_session_gen()
+            except Exception as e:
+                return self._json(500, {"ok": False, "error": "cannot bump session gen: %s" % e})
+            return self._json(200, {"ok": True})
         if path == "/api/admin":
             user = self._user()
             if not user:
@@ -531,8 +614,6 @@ class H(BaseHTTPRequestHandler):
                 argv = ["delete", pub]
             elif op == "getconf":
                 argv = ["getconf", pub]
-            elif op == "split":
-                argv = ["setsplit", pub, "1" if b.get("split") else "0"]
             elif op == "splitinfo":
                 argv = ["splitinfo"]
             elif op == "splitsave":
@@ -540,13 +621,13 @@ class H(BaseHTTPRequestHandler):
                 if not isinstance(ents, list) or len(ents) > 500:
                     return self._json(400, {"ok": False, "error": "bad entries"})
                 argv = ["splitsave", "1" if b.get("refresh") else "0"] + [str(e)[:255] for e in ents]
-            elif op == "splitbulk":
-                argv = ["splitbulk", "1" if b.get("split") else "0"]
             elif op == "splitserver":
                 argv = ["splitserver", "1" if b.get("split") else "0"]
             else:
                 return self._json(400, {"ok": False, "error": "unknown op"})
-            res = call_admin(argv)
+            # split ops run build-split (RU-zone download, up to 90 s) + ipset reload —
+            # the default 30 s would kill the helper mid-operation
+            res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
             return self._json(200 if res.get("ok") else 400, res)
         self._send(404, b"not found")
 
@@ -554,6 +635,13 @@ class H(BaseHTTPRequestHandler):
         pass
 
 def main():
+    # Fail fast on a missing/placeholder signing key: with a guessable SECRET
+    # anyone can mint a valid session cookie, so refusing to start is safer
+    # than serving. Same for a missing password hash.
+    if len(SECRET) < 24 or SECRET.startswith(b"change-me") or SECRET.startswith(b"replace-with"):
+        raise SystemExit("wg-ui: WGUI_SESSION_SECRET is unset, too short (<24) or a placeholder — refusing to start")
+    if not (PASS_PBKDF2 or PASS_SHA):
+        raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
     threading.Thread(target=_sampler, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -562,6 +650,26 @@ def main():
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
+        _sem = threading.BoundedSemaphore(MAX_CONN)
+
+        # Cap concurrent handler threads: each connection (incl. half-open TLS
+        # from scanners) holds a thread for up to `timeout` seconds; unbounded
+        # threads on a 1 GB box is a trivial DoS. Excess connections are dropped.
+        def process_request(self, request, client_address):
+            if not self._sem.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                self._sem.release()
+                raise
+
+        def process_request_thread(self, request, client_address):
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self._sem.release()
 
         def get_request(self):
             # Accept raw TCP and wrap WITHOUT handshaking, so the main accept

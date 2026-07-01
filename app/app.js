@@ -49,7 +49,8 @@ const RU={
  "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL",
  "You":"Вы","Internet":"Интернет","egress checked":"выход проверен","total":"всего",
  "cascade up":"каскад работает","tunnel up · no exit":"туннель есть · нет выхода","tunnel down":"туннель упал",
- "RU → direct":"РФ → напрямую","logout":"выход","disabled":"выключен","load avg":"загрузка","uptime":"аптайм",
+ "RU → direct":"РФ → напрямую","logout":"выход","logout all":"выйти везде","Sign out on all devices":"Выйти на всех устройствах",
+ "disabled":"выключен","load avg":"загрузка","uptime":"аптайм",
  "read-only status · writes via secure helper":"только чтение · запись через защищённый хелпер",
  "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Add client":"+ Клиент",
  "Add client":"Добавить клиента","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
@@ -131,6 +132,7 @@ function renderCascade(t,rud){
   +'<div class="hop"><div class="hicon '+cls+'" data-tip="Exit node · Amsterdam, NL · '+exitIP+'">'+ic('srv',22)+'</div><div class="hname">DO</div><div class="hsub">exit · NL</div></div>'
   +'<div class="link '+(t.state==='up'?'flow':cls)+'"></div>'
   +'<div class="hop"><div class="hicon '+(t.state==='up'?'live':cls)+'" data-tip="Traffic exits the internet with the DO IP">'+ic('net',22)+'</div><div class="hname">Internet</div><div class="hsub mono">'+exitIP+'</div></div>';
+  applyI18n(document.getElementById('cascade'));
  }
  const lbl={up:'cascade up',degraded:'tunnel up · no exit',down:'tunnel down'}[t.state];
  document.getElementById('tline').innerHTML='<span class="st '+cls+'">● '+tr(lbl)+'</span>'
@@ -147,7 +149,7 @@ function renderHost(h){
   +'<div class="ht-cpu"><span>CPU</span><b id="vcpu">0</b><span>%</span><div class="ht-bar"><i id="cpubar"></i></div></div>'
   +'<div class="ht-row"><span>RAM</span><b id="hbram"></b></div>'
   +'<div class="ht-row"><span>load avg</span><b id="hbload"></b></div>'
-  +'<div class="ht-row"><span>uptime</span><b id="hbup"></b></div>';}
+  +'<div class="ht-row"><span>uptime</span><b id="hbup"></b></div>';applyI18n(el);}
  const cc=h.cpu>=85?'bad':(h.cpu>=60?'warn':'');
  const bar=document.getElementById('cpubar');
  bar.style.width=Math.min(100,h.cpu)+'%';
@@ -160,7 +162,7 @@ function renderHost(h){
 }
 function spark(series){
  const W=600,H=56,pad=3;
- if(series.length<2)return '<text x="8" y="32" class="ph">collecting throughput…</text>';
+ if(series.length<2)return '<text x="8" y="32" class="ph">'+tr('collecting throughput…')+'</text>';
  const max=Math.max(1,...series.map(s=>Math.max(s.down,s.up)));
  const n=series.length,X=i=>pad+(W-2*pad)*i/(n-1),Y=v=>H-pad-(H-2*pad)*v/max;
  const ln=k=>series.map((s,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(s[k]).toFixed(1)).join(' ');
@@ -206,7 +208,8 @@ async function tick(){
   thrPills(d.thr.cur);
   document.getElementById('spark').innerHTML=spark(d.thr.series);
   document.getElementById('upd').textContent=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
-  applyI18n();
+  /* translate only what this tick re-rendered — a full-body TreeWalker every 5s is wasted work */
+  applyI18n(document.getElementById('cards'));applyI18n(document.getElementById('tline'));
  }catch(e){document.getElementById('upd').textContent=tr('reconnecting…')}
 }
 /* admin */
@@ -333,10 +336,9 @@ function openRename(pub,name){_act=pub;openModal(
 async function doRename(){const n=document.getElementById('rn').value.trim();const r=await admin({op:'rename',pubkey:_act,name:n});
  if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';return}closeModal();tick();}
 async function toggleEn(pub,en){const r=await admin({op:'enabled',pubkey:pub,enabled:!en});if(!r||!r.ok)toast((r&&r.error)||'failed');tick();}
-async function toggleSplit(pub,cur){const r=await admin({op:'split',pubkey:pub,split:!cur});
- if(!r||!r.ok){toast((r&&r.error)||'failed');return}tick();
- if(r.split){showResult(r);toast('Split-tunnel ON — re-import this config on the device');}
- else toast('Full tunnel restored — re-import the config on the device');}
+async function logoutAll(){
+ try{await fetch('/logout-all',{method:'POST',headers:{'X-CSRF':CSRF}})}catch(e){}
+ location.href='/login';}
 function confirmDel(pub,name){_act=pub;openModal(
  '<div class="mtitle">'+ic('trash',18)+' Delete '+esc(name)+'?</div>'
  +'<p class="mtext">This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.</p>'

@@ -23,6 +23,10 @@ instead of through the cascade.
   unprivileged `wgui` user and can only *read*. Every write (add/rename/enable/
   delete/split) goes through `wg-admin.py`, a narrow root helper invoked via
   `sudo` that validates all input (name/pubkey regex) before touching WireGuard.
+- **Auth hardening.** PBKDF2 password hash, per-IP login throttling, capped
+  handler threads, HSTS/CSP headers, revocable sessions ("logout all" bumps a
+  server-side generation counter), and a fail-fast start if the session-signing
+  secret is missing or a placeholder.
 - **TLS handshake runs in the worker thread**, not the accept loop — a half-open
   connection from an internet scanner can't wedge the whole server.
 
@@ -39,7 +43,8 @@ app/                    # deployed verbatim to /opt/wg-ui/ on the entry node
 deploy/
   wg-ui.service         # systemd unit (secrets via EnvironmentFile, none inline)
   wg-ui.env.example     # env template — copy to /etc/wg-ui/wg-ui.env and fill in
-deploy.sh               # scp app/ → server, restart, health-check
+tests/                  # stdlib unit tests (validation, tokens, split-set math)
+deploy.sh               # preflight (py_compile + tests) → rsync app/ → restart → health-check, auto-rollback
 ```
 
 ## Secrets & data (never in this repo)
@@ -48,11 +53,11 @@ All sensitive and stateful files live on the server, outside the code dir:
 
 | Path | What |
 | --- | --- |
-| `/etc/wg-ui/wg-ui.env` | `WGUI_SALT`, `WGUI_PASS_SHA256`, `WGUI_SESSION_SECRET` |
+| `/etc/wg-ui/wg-ui.env` | `WGUI_SALT`, `WGUI_PASS_PBKDF2` (or legacy `WGUI_PASS_SHA256`), `WGUI_SESSION_SECRET` |
 | `/etc/wg-ui/{cert,key}.pem` | TLS cert/key (self-signed) |
 | `/etc/wg-ui/clients.json`, `names.json` | client registry |
 | `/etc/wg-ui/split-*`, `ru-zone.cache` | generated split-tunnel data |
-| `/var/lib/wg-ui/history.db`, `audit.log` | traffic history + audit trail |
+| `/var/lib/wg-ui/history.db`, `audit.log`, `session.gen` | traffic history + audit trail + session generation |
 
 See `deploy/wg-ui.env.example` for how to generate the auth values.
 

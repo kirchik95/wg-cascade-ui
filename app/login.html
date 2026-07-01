@@ -18,5 +18,7 @@ setThemeBtn();
 var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти"};
 var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),ns=[],n;while(n=w.nextNode())ns.push(n);
 ns.forEach(function(t){var k=t.nodeValue.trim();if(k&&R[k])t.nodeValue=t.nodeValue.replace(k,R[k])});})();
-if(location.search.indexOf('e=1')>=0)document.getElementById('err').style.display='block';
+(function(){var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
+if(location.search.indexOf('e=2')>=0){e.textContent=ru?'Слишком много попыток — подождите несколько минут':'Too many attempts — try again in a few minutes';e.style.display='block'}
+else if(location.search.indexOf('e=1')>=0)e.style.display='block';})();
 </script></body></html>

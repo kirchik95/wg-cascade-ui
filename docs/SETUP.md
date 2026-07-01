@@ -108,20 +108,19 @@ chmod 640 /etc/wg-ui/key.pem       # wgui reads it to serve TLS; not world-reada
 
 ## 6. Credentials & env file
 
-The password is never stored — only `SHA-256(SALT + password)`. Generate the
-secrets and write `/etc/wg-ui/wg-ui.env`:
+The password is never stored — only a PBKDF2-HMAC-SHA256 hash (200k iterations).
+Generate the secrets and write `/etc/wg-ui/wg-ui.env`:
 
 ```sh
 SALT=$(openssl rand -hex 16)
 SECRET=$(openssl rand -hex 32)
-read -rsp 'panel password: ' PW; echo
-HASH=$(printf '%s' "${SALT}${PW}" | sha256sum | awk '{print $1}')
-unset PW
+HASH=$(python3 -c 'import hashlib,getpass,sys;
+print("200000$"+hashlib.pbkdf2_hmac("sha256",getpass.getpass("panel password: ").encode(),sys.argv[1].encode(),200000).hex())' "$SALT")
 
 cat > /etc/wg-ui/wg-ui.env <<EOF
 WGUI_USER=admin
 WGUI_SALT=${SALT}
-WGUI_PASS_SHA256=${HASH}
+WGUI_PASS_PBKDF2=${HASH}
 WGUI_SESSION_SECRET=${SECRET}
 WGUI_PORT=443
 WGUI_CERT=/etc/wg-ui/cert.pem
@@ -134,10 +133,18 @@ chown root:wgui /etc/wg-ui/wg-ui.env
 chmod 640 /etc/wg-ui/wg-ui.env
 ```
 
+The service **refuses to start** if `WGUI_SESSION_SECRET` is missing, shorter
+than 24 chars, or a placeholder — a guessable signing key would let anyone mint
+a valid session cookie. Old env files with `WGUI_PASS_SHA256` (legacy salted
+SHA-256) still work as a fallback; migrate by adding `WGUI_PASS_PBKDF2` as above.
+
 `WGUI_EXIT_IP` is the expected cascade egress IP — the panel probes it to show the
 tunnel as healthy. See `deploy/wg-ui.env.example` for every tunable and its
-default; the block above is the minimum. (The live box also sets `WGUI_NAMES`, a
-leftover from `refresh-names.sh` — the panel itself ignores it.)
+default; the block above is the minimum. The same file also carries the values
+`wg-admin.py` bakes into generated client configs (`WGUI_SERVER_PUB`,
+`WGUI_ENDPOINT`, `WGUI_CLIENT_DNS`, `WGUI_CLIENT_MTU`) — set them if your deploy
+differs from the reference. (The live box also sets `WGUI_NAMES`, a leftover
+from `refresh-names.sh` — the panel itself ignores it.)
 
 ---
 
@@ -231,8 +238,11 @@ in with `admin` + the password from step 6.
 Edit under `app/` in the repo, commit (rollback point), then:
 
 ```sh
-./deploy.sh          # scp app/* → /opt/wg-ui, restart if needed, health-check
+./deploy.sh          # preflight (py_compile + unit tests) → rsync app/ → restart → health-check
 ```
+
+`deploy.sh` snapshots the previous version to `/opt/wg-ui.prev` on the server
+and rolls back automatically if the service fails to come up after restart.
 
 CSS/JS/HTML changes need no restart (served per-request from disk — just hard-
 refresh, or bump the `wgui-shell-vN` cache in `sw.js`). `wg-ui.py` changes need

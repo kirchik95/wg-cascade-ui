@@ -17,10 +17,8 @@ All output is a single JSON line: {"ok":true,...} or {"ok":false,"error":...}.
 """
 import sys, os, re, json, time, base64, fcntl, shutil, tempfile, tarfile, io, subprocess
 
-WG_CONF      = "/etc/wireguard/wg-cl.conf"
 CLIENTS_JSON = "/etc/wg-ui/clients.json"
 NAMES_JSON   = "/etc/wg-ui/names.json"
-SPLIT_FILE   = "/etc/wg-ui/split-allowedips.txt"   # complement(RU+LAN+extras); built by build-split.py
 SPLIT_EXTRA  = "/etc/wg-ui/split-extra.txt"        # user extras (CIDR/IP/domain), one per line
 SPLIT_META   = "/etc/wg-ui/split-meta.json"
 BUILD_SPLIT  = "/opt/wg-ui/build-split.py"
@@ -28,13 +26,34 @@ SPLIT_SH     = "/opt/wg-ui/split-server.sh"        # server-side global RU-direc
 CLIENT_DIR   = "/etc/wireguard/clients"
 LOCKFILE     = "/etc/wg-ui/.adminlock"
 AUDIT_LOG    = "/var/lib/wg-ui/audit.log"          # append-only admin action log (UI reads it)
-IFACE        = "wg-cl"
 SUBNET_PRE   = "10.10.0."
 SERVER_IP    = 1                       # 10.10.0.1 reserved for the server
-SERVER_PUB   = "HoGl+zFzr1b6ldatws6PqYr2n74Rk3+e4ZPgf0Fb5F8="
-ENDPOINT     = "203.0.113.10:51820"
-DNS          = "1.1.1.1"
-MTU          = "1420"
+
+# Deployment values: defaults below match the reference deploy; override them in
+# /etc/wg-ui/wg-ui.env (the same file the web service loads) so the code stays
+# portable. sudo strips the environment, hence the file is parsed directly.
+def _env_file(path="/etc/wg-ui/wg-ui.env"):
+    vals = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    vals[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return vals
+
+_ENV       = _env_file()
+IFACE      = _ENV.get("WGUI_IFACE", "wg-cl")
+if not re.match(r'^[A-Za-z0-9_-]{1,15}$', IFACE):
+    IFACE = "wg-cl"
+WG_CONF    = "/etc/wireguard/%s.conf" % IFACE
+SERVER_PUB = _ENV.get("WGUI_SERVER_PUB", "HoGl+zFzr1b6ldatws6PqYr2n74Rk3+e4ZPgf0Fb5F8=")
+ENDPOINT   = _ENV.get("WGUI_ENDPOINT", "203.0.113.10:51820")
+DNS        = _ENV.get("WGUI_CLIENT_DNS", "1.1.1.1")
+MTU        = _ENV.get("WGUI_CLIENT_MTU", "1420")
 
 NAME_RE  = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
 PUB_RE   = re.compile(r'^[A-Za-z0-9+/]{43}=$')
@@ -153,20 +172,10 @@ def genkeypair():
         die("key generation failed")
     return priv, pub
 
-def split_allowed():
-    """AllowedIPs for split-tunnel clients = everything except RU + LAN (so those go direct)."""
-    try:
-        with open(SPLIT_FILE) as f:
-            s = f.read().strip()
-        return s or "0.0.0.0/0"
-    except Exception:
-        return "0.0.0.0/0"
-
-def client_conf(priv, ip, split=False):
-    allowed = split_allowed() if split else "0.0.0.0/0"
+def client_conf(priv, ip):
     return ("[Interface]\nPrivateKey = %s\nAddress = %s/32\nDNS = %s\nMTU = %s\n\n"
-            "[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = %s\n"
-            "PersistentKeepalive = 25\n" % (priv, ip, DNS, MTU, SERVER_PUB, ENDPOINT, allowed))
+            "[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 0.0.0.0/0\n"
+            "PersistentKeepalive = 25\n" % (priv, ip, DNS, MTU, SERVER_PUB, ENDPOINT))
 
 def qr_b64(conf_path, png_path):
     r = run(["qrencode", "-t", "png", "-o", png_path, "-r", conf_path])
@@ -215,7 +224,7 @@ def op_add(name, expires="0"):
     cpath, ppath = paths(name)
     write_atomic(cpath, conf, 0o600)
     qr = qr_b64(cpath, ppath)
-    entry = {"name": name, "ip": ip, "pubkey": pub, "enabled": True, "split": False}
+    entry = {"name": name, "ip": ip, "pubkey": pub, "enabled": True}
     if exp > 0:
         entry["expires"] = exp
     clients.append(entry)
@@ -284,7 +293,7 @@ def op_getconf(pub):
         die("config file unavailable for this client")
     with open(cpath) as f:
         conf = f.read()
-    qr = qr_b64(cpath, ppath) if len(conf) < 2500 else ""   # QR can't hold a big split config
+    qr = qr_b64(cpath, ppath) if len(conf) < 2500 else ""   # QR can't hold a big legacy split config
     ok({"name": c["name"], "ip": c["ip"], "conf": conf, "qr": qr, "split": c.get("split", False)})
 
 def op_setexpiry(pub, ts):
@@ -329,52 +338,7 @@ def op_export():
     audit("export", "backup downloaded")
     ok({"archive": base64.b64encode(buf.getvalue()).decode(), "name": "wg-cascade-backup.tar.gz"})
 
-def op_setsplit(pub, val):
-    if not PUB_RE.match(pub):
-        die("invalid pubkey")
-    if val not in ("0", "1"):
-        die("split must be 0 or 1")
-    clients = load_clients()
-    c = find(clients, pub)
-    cpath, ppath = paths(c["name"])
-    if not os.path.exists(cpath):
-        die("client config file unavailable")
-    priv = ""
-    with open(cpath) as f:
-        for line in f:
-            if line.strip().startswith("PrivateKey"):
-                priv = line.split("=", 1)[1].strip(); break
-    if not priv:
-        die("could not read client private key")
-    c["split"] = (val == "1")
-    conf = client_conf(priv, c["ip"], c["split"])   # only the client .conf changes; server peer is untouched
-    write_atomic(cpath, conf, 0o600)
-    save_clients(clients)
-    qr = qr_b64(cpath, ppath) if len(conf) < 2500 else ""
-    ok({"name": c["name"], "ip": c["ip"], "split": c["split"], "conf": conf, "qr": qr})
-
 # -------------------------------------------------- global split-tunnel policy
-def _read_priv(cpath):
-    with open(cpath) as f:
-        for line in f:
-            if line.strip().startswith("PrivateKey"):
-                return line.split("=", 1)[1].strip()
-    return ""
-
-def _regen_split(clients):
-    """Rewrite the .conf of every split-enabled client with the current AllowedIPs."""
-    cnt = 0
-    for c in clients:
-        if not c.get("split"):
-            continue
-        cpath, _ = paths(c["name"])
-        if not os.path.exists(cpath):
-            continue
-        priv = _read_priv(cpath)
-        if priv:
-            write_atomic(cpath, client_conf(priv, c["ip"], True), 0o600); cnt += 1
-    return cnt
-
 def split_server_status():
     try:
         r = run([SPLIT_SH, "status"], timeout=15)
@@ -395,8 +359,7 @@ def splitinfo_data():
             extra = [l.strip() for l in f if l.strip() and not l.startswith("#")]
     except Exception:
         pass
-    return {"meta": meta, "extra": extra, "server": split_server_status(),
-            "split_clients": sum(1 for c in load_clients() if c.get("split"))}
+    return {"meta": meta, "extra": extra, "server": split_server_status()}
 
 def op_splitserver(val):
     if val not in ("0", "1"):
@@ -426,28 +389,8 @@ def op_splitsave(refresh, entries):
     if r.returncode != 0:
         die("rebuild failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
     run([SPLIT_SH, "reload"], timeout=30)          # server-side: repopulate the ipset
-    n = _regen_split(load_clients())               # legacy client-side split (none after revert)
     audit("split-list", ("refreshed RU + " if refresh == "1" else "") + "%d custom" % len(clean))
-    d = splitinfo_data(); d["regenerated"] = n
-    ok(d)
-
-def op_splitbulk(val):
-    if val not in ("0", "1"):
-        die("value must be 0 or 1")
-    clients = load_clients()
-    want = (val == "1")
-    cnt = 0
-    for c in clients:
-        if c.get("split", False) != want:
-            c["split"] = want
-            cpath, _ = paths(c["name"])
-            if os.path.exists(cpath):
-                priv = _read_priv(cpath)
-                if priv:
-                    write_atomic(cpath, client_conf(priv, c["ip"], want), 0o600)
-            cnt += 1
-    save_clients(clients)
-    ok({"changed": cnt, "split": want})
+    ok(splitinfo_data())
 
 def main():
     if len(sys.argv) < 2:
@@ -464,10 +407,8 @@ def main():
     elif op == "setenabled" and len(a) >= 2: op_setenabled(a[0], a[1])
     elif op == "delete"     and len(a) >= 1: op_delete(a[0])
     elif op == "getconf"    and len(a) >= 1: op_getconf(a[0])
-    elif op == "setsplit"   and len(a) >= 2: op_setsplit(a[0], a[1])
     elif op == "splitinfo":               op_splitinfo()
     elif op == "splitsave"  and len(a) >= 1: op_splitsave(a[0], a[1:])
-    elif op == "splitbulk"  and len(a) >= 1: op_splitbulk(a[0])
     elif op == "splitserver" and len(a) >= 1: op_splitserver(a[0])
     elif op == "regenerate":              regenerate(load_clients()); ok()
     else:                                 die("bad operation or arguments")
