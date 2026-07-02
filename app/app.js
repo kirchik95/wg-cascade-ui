@@ -37,6 +37,18 @@ function csparkSVG(s){
  return '<svg class="csv" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none"><path class="ca" d="'+ln+' L'+W+' '+H+' L0 '+H+' Z"/><path class="cl" d="'+ln+'"/></svg>';}
 function ic(n,s){s=s||16;return '<svg width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+IP[n]+'</svg>';}
 const fmtB=n=>{n=+n;const u=["B","KiB","MiB","GiB","TiB","PiB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(1)+" "+u[i]};
+function trafficTotals(items,rxKey,txKey){
+ items=items||[];rxKey=rxKey||'rx';txKey=txKey||'tx';
+ return items.reduce((a,x)=>({rx:a.rx+(+x[rxKey]||0),tx:a.tx+(+x[txKey]||0)}),{rx:0,tx:0});
+}
+function monthSummaryHTML(t){
+ const total=t.rx+t.tx;
+ return '<span class="mlbl">'+tr('Month')+'</span> <span class="dn">↓ <b>'+fmtB(t.rx)+'</b></span> <span class="up">↑ <b>'+fmtB(t.tx)+'</b></span> <span class="msum">· '+fmtB(total)+'</span>';
+}
+function renderMonthPill(peers){
+ const el=document.getElementById('monthuse');if(!el)return;
+ el.innerHTML=monthSummaryHTML(trafficTotals(peers,'mrx','mtx'));
+}
 const fmtAge=s=>{const r=LANG==='ru';if(s<0)return r?"никогда":"never";if(s<60)return s+(r?"с назад":"s ago");if(s<3600)return(s/60|0)+(r?"м назад":"m ago");if(s<86400)return(s/3600|0)+(r?"ч ":"h ")+((s%3600)/60|0)+(r?"м назад":"m ago");return(s/86400|0)+(r?"д назад":"d ago")};
 const fmtTime=ts=>{const d=new Date(ts*1000),p=n=>(''+n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())};
 const fmtLeft=s=>{const r=LANG==='ru';if(s<=0)return r?"истёк":"expired";if(s<3600)return(s/60|0)+(r?"м":"m left");if(s<86400)return(s/3600|0)+(r?"ч":"h left");return Math.ceil(s/86400)+(r?"д":"d left")};
@@ -48,7 +60,7 @@ const RU={
  "client status":"статус клиентов","Throughput":"Трафик","last 5 min":"за 5 мин","Clients":"Клиенты",
  "online":"онлайн","offline":"оффлайн","never":"никогда","reconnecting…":"переподключение…","updated":"обновлено",
  "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL",
- "You":"Вы","Internet":"Интернет","egress checked":"выход проверен","total":"всего",
+ "You":"Вы","Internet":"Интернет","egress checked":"выход проверен","total":"всего","Month":"Месяц",
  "cascade up":"каскад работает","tunnel up · no exit":"туннель есть · нет выхода","tunnel down":"туннель упал",
  "RU → direct":"РФ → напрямую","logout":"выход","logout all":"выйти везде","Sign out on all devices":"Выйти на всех устройствах",
  "disabled":"выключен","load avg":"загрузка","uptime":"аптайм",
@@ -224,7 +236,7 @@ async function tick(){
   const r=await fetch("/api/status",{cache:"no-store"});
   if(r.status===401){location.href="/login";return}
   const d=await r.json();
-  renderAlert(d.tunnel);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);
+  renderAlert(d.tunnel);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
   thrPills(d.thr.cur);
   document.getElementById('spark').innerHTML=spark(d.thr.series);
   document.getElementById('upd').textContent=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
@@ -313,8 +325,10 @@ function dayChart(d,H){
   dates:'<div class="udates"><span>'+d[0].day.slice(5)+'</span><span>'+d[d.length-1].day.slice(5)+'</span></div>'};
 }
 function renderUsage(r){
- const d=r.daily||[],n=d.length;let h='';
- if(!n){h='<p class="mtext">No usage recorded yet — history accrues from now (sampled every minute). Check back later.</p>';}
+ const d=r.daily||[],n=d.length;
+ const mt=trafficTotals(r.clients||[]);
+ let h='<div class="utotal">'+monthSummaryHTML(mt)+'</div>';
+ if(!n){h+='<p class="mtext">No usage recorded yet — history accrues from now (sampled every minute). Check back later.</p>';}
  else{
   const c=dayChart(d,120);
   h=c.head+c.svg+c.dates;
