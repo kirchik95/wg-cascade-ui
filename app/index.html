@@ -5,11 +5,12 @@
 <div class="meta">
 <span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
 <button class="pill btn" id="lang" onclick="toggleLang()" data-tip="Language / Язык">RU</button>
-<button class="pill btn" id="theme" onclick="toggleTheme()" data-tip="Toggle theme">☀</button>
+<button class="pill btn" id="theme" onclick="toggleTheme()" data-tip="Toggle theme" aria-label="Toggle theme">☀</button>
 <a class="pill btn" href="/logout" data-tip="Sign out">logout</a>
 <button class="pill btn" onclick="logoutAll()" data-tip="Sign out on all devices">logout all</button>
 </div>
 </header>
+<div class="alert" id="alert" style="display:none" role="alert"></div>
 <div class="bento">
 <div class="cascade card" id="cascade"></div>
 <div class="tline" id="tline"></div>

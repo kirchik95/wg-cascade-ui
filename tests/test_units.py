@@ -201,6 +201,25 @@ class TestLoginThrottle(unittest.TestCase):
         self.assertFalse(wgui.login_blocked(ip))
 
 
+class TestHistoryDB(unittest.TestCase):
+    def test_usage_accrual_and_per_client_daily(self):
+        saved = wgui.DB
+        wgui.DB = os.path.join(TMP, "hist.db")
+        try:
+            wgui.db_init()
+            wgui.record_usage({"PUB1": (100, 200)})    # first sample: baseline only
+            wgui.record_usage({"PUB1": (150, 260)})    # +50 / +60
+            wgui.record_usage({"PUB1": (30, 10)})      # counter reset -> delta = current
+            rows = wgui.usage_daily_for("PUB1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["rx"], rows[0]["tx"]), (80, 70))
+            self.assertEqual(wgui.usage_daily_for("OTHER"), [])
+            month = wgui.usage_month()
+            self.assertEqual(month["PUB1"], {"rx": 80, "tx": 70})
+        finally:
+            wgui.DB = saved
+
+
 class TestComplement(unittest.TestCase):
     def test_covers_everything_except_excluded(self):
         excl = [ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("192.168.0.0/16")]

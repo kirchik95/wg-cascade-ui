@@ -433,6 +433,16 @@ def usage_daily(days=30):
     except Exception:
         return []
 
+def usage_daily_for(pub, days=30):
+    try:
+        c = _conn()
+        rows = c.execute("SELECT day, rx, tx FROM usage WHERE pubkey=? "
+                         "ORDER BY day DESC LIMIT ?", (pub, days)).fetchall()
+        c.close()
+        return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in reversed(rows)]
+    except Exception:
+        return []
+
 # ----------------------------------------------------------------------- views
 
 
@@ -534,6 +544,9 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json(500, {"error": str(e)})
             if path.startswith("/api/history"):
+                pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
+                if pub:   # per-client daily series (config modal chart)
+                    return self._json(200, {"daily": usage_daily_for(pub, 30)})
                 reg = load_registry() or []
                 names = {c["pubkey"]: c["name"] for c in reg}
                 mu = usage_month()

@@ -20,7 +20,8 @@ const IP={d:'<path d="M2 3h20v14H2z"/><path d="M8 21h8M12 17v4"/>',
  branch:'<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
  list:'<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
  hist:'<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
- check:'<path d="M20 6 9 17l-5-5"/>'};
+ check:'<path d="M20 6 9 17l-5-5"/>',
+ warn:'<path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>'};
 function devIcon(name){const s=(name||'').toLowerCase();
  if(/phone|iphone|android|pixel|galaxy|redmi|xiaomi|moto|oneplus/.test(s))return 'phone';
  if(/mac|book|laptop|notebook|thinkpad|\bpc\b|win|ubuntu|linux|desktop|imac/.test(s))return 'laptop';
@@ -55,8 +56,12 @@ const RU={
  "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Add client":"+ Клиент",
  "Add client":"Добавить клиента","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
  "in 7 days":"через 7 дней","in 30 days":"через 30 дней","Cancel":"Отмена","Create":"Создать","Done":"Готово",
- "Copy":"Копировать","Rename":"Переименовать","Rename client":"Переименовать клиента","Save":"Сохранить",
- "Delete":"Удалить","Recent connections":"Недавние подключения","Audit log":"Журнал действий","Split-tunnel":"Сплит-туннель",
+ "Copy":"Копировать","Edit":"Изменить","Edit client":"Редактировать клиента","Keep current":"Оставить как есть","Save":"Сохранить",
+ "Delete":"Удалить","Recent connections":"Недавние подключения","Daily traffic · 30 days":"Трафик по дням · 30 дней",
+ "Audit log":"Журнал действий","Split-tunnel":"Сплит-туннель",
+ "Cascade is down":"Каскад упал","Cascade degraded":"Каскад деградировал",
+ "No fresh handshake on the VDSina→DO link — client traffic fails closed.":"Нет свежего handshake на линке VDSina→DO — трафик клиентов заблокирован (fail-closed).",
+ "Tunnel is up but the egress check fails — exit IP not confirmed.":"Туннель работает, но проверка выхода не проходит — exit-IP не подтверждён.",
  "RU + custom direct":"РФ + свои правила","Route RU traffic direct":"РФ-трафик напрямую","Refresh RU list":"Обновить список РФ",
  "Save list":"Сохранить список","Close":"Закрыть","By client · this month":"По клиентам · за месяц",
  "No traffic yet this month.":"Трафика за месяц пока нет.","No admin actions logged yet.":"Действий пока не было.",
@@ -91,6 +96,7 @@ function applyI18n(root){
  const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),ns=[];let n;while(n=w.nextNode())ns.push(n);
  ns.forEach(t=>{const k=t.nodeValue.trim();if(k&&RU[k])t.nodeValue=t.nodeValue.replace(k,RU[k])});
  root.querySelectorAll&&root.querySelectorAll('[data-tip]').forEach(e=>{const k=e.getAttribute('data-tip');if(RU[k])e.setAttribute('data-tip',RU[k])});
+ root.querySelectorAll&&root.querySelectorAll('[aria-label]').forEach(e=>{const k=e.getAttribute('aria-label');if(RU[k])e.setAttribute('aria-label',RU[k])});
 }
 function toggleLang(){LANG=LANG==='ru'?'en':'ru';try{localStorage.setItem('wgui-lang',LANG)}catch(e){}
  const b=document.getElementById('lang');if(b)b.textContent=LANG==='ru'?'EN':'RU';location.reload()}
@@ -116,6 +122,19 @@ function thrPills(c){
  tw(document.getElementById('cnd'),'cnd',md,mbF);tw(document.getElementById('cnu'),'cnu',mu,mbF);
 }
 
+function renderAlert(t){
+ const el=document.getElementById('alert');
+ if(!t||t.state==='up'){el.style.display='none';el.__k='';return}
+ el.style.display='flex';
+ if(el.__k===t.state)return;          /* rebuild only on state change */
+ el.__k=t.state;
+ const bad=t.state==='down';
+ el.className='alert '+(bad?'bad':'warn');
+ el.innerHTML=ic('warn',17)+'<div><b>'+(bad?'Cascade is down':'Cascade degraded')+'</b> <span>'
+  +(bad?'No fresh handshake on the VDSina→DO link — client traffic fails closed.'
+       :'Tunnel is up but the egress check fails — exit IP not confirmed.')+'</span></div>';
+ applyI18n(el);
+}
 let _cascKey="";
 function renderCascade(t,rud){
  const cls={up:'ok',degraded:'warn',down:'bad'}[t.state];
@@ -178,11 +197,12 @@ function renderClients(peers){
   const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;   // handshake just refreshed
   _pv['age-'+p.pubkey]=p.age;
   const prx=_pv['rx-'+p.pubkey],ptx=_pv['tx-'+p.pubkey];          // for smooth count from previous
+  const en=p.enabled?'Disable':'Enable';
   const acts=
-   '<button class="ib" data-tip="Show config / QR" onclick=\'showCfg('+pj+')\'>'+ic('qr')+'</button>'
-  +'<button class="ib" data-tip="Rename" onclick=\'openRename('+pj+','+nj+')\'>'+ic('edit')+'</button>'
-  +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+(p.enabled?'Disable':'Enable')+'" onclick=\'toggleEn('+pj+','+(p.enabled?'true':'false')+')\'>'+ic('pow')+'</button>'
-  +'<button class="ib danger" data-tip="Delete" onclick=\'confirmDel('+pj+','+nj+')\'>'+ic('trash')+'</button>';
+   '<button class="ib" data-tip="Show config / QR" aria-label="Show config / QR" onclick=\'showCfg('+pj+')\'>'+ic('qr')+'</button>'
+  +'<button class="ib" data-tip="Edit" aria-label="Edit" onclick=\'openEdit('+pj+','+nj+','+(p.expires||0)+')\'>'+ic('edit')+'</button>'
+  +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+en+'" aria-label="'+en+'" onclick=\'toggleEn('+pj+','+(p.enabled?'true':'false')+')\'>'+ic('pow')+'</button>'
+  +'<button class="ib danger" data-tip="Delete" aria-label="Delete" onclick=\'confirmDel('+pj+','+nj+')\'>'+ic('trash')+'</button>';
   const sv=csparkSVG(p.spark);
   return '<div class="crow '+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'')+'">'
    +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+ic(devIcon(p.name),20)+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
@@ -204,7 +224,7 @@ async function tick(){
   const r=await fetch("/api/status",{cache:"no-store"});
   if(r.status===401){location.href="/login";return}
   const d=await r.json();
-  renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);
+  renderAlert(d.tunnel);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);
   thrPills(d.thr.cur);
   document.getElementById('spark').innerHTML=spark(d.thr.series);
   document.getElementById('upd').textContent=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
@@ -234,11 +254,16 @@ async function doAdd(){const n=document.getElementById('cn').value.trim();const 
  b.disabled=true;b.textContent='Creating…';const r=await admin({op:'add',name:n,expires:expires});
  if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';b.disabled=false;b.textContent='Create';return}
  showResult(r);tick();}
-function showResult(r){openModal(
+function showResult(r){
+ let dh='';
+ if(r.daily&&r.daily.length>1){const c=dayChart(r.daily,90);
+  dh='<div class="ulh">'+ic('chart',13)+' Daily traffic · 30 days</div>'+c.head+c.svg+c.dates;}
+ openModal(
  '<div class="mtitle">'+ic('check',18)+' '+esc(r.name)+'<span class="mip">'+r.ip+'</span></div>'
  +(r.split?'<div class="splitnote">'+ic('branch')+'<span>Split-tunnel: RU &amp; local IPs go <b>direct</b>, the rest via the cascade. Large config — import the <b>.conf file</b> (too big for QR), then re-import to apply.</span></div>':'')
  +(r.qr?'<div class="qrwrap"><img src="data:image/png;base64,'+r.qr+'"></div>':'')
  +'<pre class="conf">'+esc(r.conf)+'</pre>'
+ +dh
  +(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' Recent connections</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'')
  +'<div class="mrow"><button class="ghost" onclick="copyConf()">'+ic('copy')+' Copy</button>'
  +'<button class="ghost" onclick="dlConf()">'+ic('dl')+' .conf</button>'
@@ -248,7 +273,11 @@ function copyConf(){navigator.clipboard.writeText(window.__cf).then(()=>toast('C
 function dlConf(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([window.__cf],{type:'text/plain'}));
  a.download=window.__cn+'.conf';a.click();URL.revokeObjectURL(a.href)}
 async function showCfg(pub){const r=await admin({op:'getconf',pubkey:pub});if(!r||!r.ok){toast((r&&r.error)||'failed');return}
- try{const h=await(await fetch('/api/connections?pub='+encodeURIComponent(pub),{cache:'no-store'})).json();r.conns=h.connections||[]}catch(e){}
+ try{const q='?pub='+encodeURIComponent(pub);
+  const [h,u]=await Promise.all([
+   fetch('/api/connections'+q,{cache:'no-store'}).then(x=>x.json()),
+   fetch('/api/history'+q,{cache:'no-store'}).then(x=>x.json())]);
+  r.conns=h.connections||[];r.daily=u.daily||[]}catch(e){}
  showResult(r)}
 async function doExport(){
  toast('Preparing backup…');const r=await admin({op:'export'});
@@ -272,18 +301,23 @@ async function openUsage(){
  let r;try{r=await(await fetch('/api/history',{cache:'no-store'})).json()}catch(e){document.getElementById('ubody').textContent='failed to load';return}
  document.getElementById('umo').textContent=r.month;renderUsage(r);
 }
+function dayChart(d,H){
+ const max=Math.max(1,...d.map(x=>x.rx+x.tx)),W=380,base=H-14,slot=W/d.length,bw=Math.max(2,slot-2);
+ let bars='';
+ d.forEach((x,i)=>{const X=i*slot+1,hr=x.rx/max*base,hu=x.tx/max*base;
+  bars+='<rect x="'+X.toFixed(1)+'" y="'+(base-hr-hu).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hu.toFixed(1)+'" class="bu"/>'
+       +'<rect x="'+X.toFixed(1)+'" y="'+(base-hr).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hr.toFixed(1)+'" class="bd"/>';});
+ return {max:max,
+  head:'<div class="umax"><span><b class="dn">↓</b> down · <b class="up">↑</b> up</span><span>peak '+fmtB(max)+'/day</span></div>',
+  svg:'<svg class="ubar" style="height:'+H+'px" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+bars+'<line x1="0" y1="'+base+'" x2="'+W+'" y2="'+base+'" class="bax"/></svg>',
+  dates:'<div class="udates"><span>'+d[0].day.slice(5)+'</span><span>'+d[d.length-1].day.slice(5)+'</span></div>'};
+}
 function renderUsage(r){
  const d=r.daily||[],n=d.length;let h='';
  if(!n){h='<p class="mtext">No usage recorded yet — history accrues from now (sampled every minute). Check back later.</p>';}
  else{
-  const max=Math.max(1,...d.map(x=>x.rx+x.tx)),W=380,H=120,base=H-14,slot=W/n,bw=Math.max(2,slot-2);
-  let bars='';
-  d.forEach((x,i)=>{const X=i*slot+1,hr=x.rx/max*base,hu=x.tx/max*base;
-   bars+='<rect x="'+X.toFixed(1)+'" y="'+(base-hr-hu).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hu.toFixed(1)+'" class="bu"/>'
-        +'<rect x="'+X.toFixed(1)+'" y="'+(base-hr).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hr.toFixed(1)+'" class="bd"/>';});
-  h='<div class="umax"><span><b class="dn">↓</b> down · <b class="up">↑</b> up</span><span>peak '+fmtB(max)+'/day</span></div>'
-   +'<svg class="ubar" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+bars+'<line x1="0" y1="'+base+'" x2="'+W+'" y2="'+base+'" class="bax"/></svg>'
-   +'<div class="udates"><span>'+d[0].day.slice(5)+'</span><span>'+d[n-1].day.slice(5)+'</span></div>';
+  const c=dayChart(d,120);
+  h=c.head+c.svg+c.dates;
   const cl=r.clients||[];
   h+='<div class="ulh">By client · this month</div>';
   if(!cl.length){h+='<p class="mtext" style="margin:0 0 6px">No traffic yet this month.</p>';}
@@ -328,13 +362,30 @@ async function splitSave(refresh){
  if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';btn.disabled=false;btn.innerHTML=old;return}
  toast('List rebuilt · '+(((r.meta&&r.meta.direct_count)||0)).toLocaleString()+' direct routes');renderSplit(r);
 }
-function openRename(pub,name){_act=pub;openModal(
- '<div class="mtitle">'+ic('edit',18)+' Rename client</div>'
- +'<label class="fl">Name<input id="rn" value="'+esc(name)+'"></label><div class="merr" id="me"></div>'
- +'<div class="mrow"><button class="ghost" onclick="closeModal()">Cancel</button><button class="primary" onclick="doRename()">Save</button></div>');
- setTimeout(()=>{const i=document.getElementById('rn');i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doRename()}},30);}
-async function doRename(){const n=document.getElementById('rn').value.trim();const r=await admin({op:'rename',pubkey:_act,name:n});
- if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';return}closeModal();tick();}
+function openEdit(pub,name,exp){_act=pub;window.__en=name;const now=Date.now()/1000|0;openModal(
+ '<div class="mtitle">'+ic('edit',18)+' Edit client</div>'
+ +'<label class="fl">Name<input id="rn" value="'+esc(name)+'"></label>'
+ +'<label class="fl">Expires<select id="rx" class="fsel">'
+ +'<option value="keep">'+tr('Keep current')+' · '+(exp?fmtLeft(exp-now):tr('Never').toLowerCase())+'</option>'
+ +'<option value="0">'+tr('Never')+'</option>'
+ +'<option value="1">'+tr('in 1 day')+'</option>'
+ +'<option value="7">'+tr('in 7 days')+'</option>'
+ +'<option value="30">'+tr('in 30 days')+'</option></select></label>'
+ +'<div class="merr" id="me"></div>'
+ +'<div class="mrow"><button class="ghost" onclick="closeModal()">Cancel</button><button class="primary" onclick="doEdit()">Save</button></div>');
+ setTimeout(()=>{const i=document.getElementById('rn');i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doEdit()}},30);}
+async function doEdit(){
+ const n=document.getElementById('rn').value.trim(),x=document.getElementById('rx').value;
+ if(n!==window.__en){                                 /* skip no-op rename (keeps the audit log clean) */
+  const r=await admin({op:'rename',pubkey:_act,name:n});
+  if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';return}
+ }
+ if(x!=='keep'){
+  const expires=+x>0?((Date.now()/1000|0)+(+x)*86400):0;
+  const r=await admin({op:'setexpiry',pubkey:_act,expires:expires});
+  if(!r||!r.ok){document.getElementById('me').textContent=(r&&r.error)||'failed';return}
+ }
+ closeModal();tick();}
 async function toggleEn(pub,en){const r=await admin({op:'enabled',pubkey:pub,enabled:!en});if(!r||!r.ok)toast((r&&r.error)||'failed');tick();}
 async function logoutAll(){
  try{await fetch('/logout-all',{method:'POST',headers:{'X-CSRF':CSRF}})}catch(e){}

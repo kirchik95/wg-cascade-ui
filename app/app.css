@@ -48,6 +48,13 @@ button.btn{padding:6px 11px}
 .qrwrap img{transition:transform .2s}.qrwrap img:hover{transform:scale(1.03)}
 @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition:none!important}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;box-shadow:var(--shadow)}
+/* cascade-down banner */
+.alert{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:11px;margin-bottom:14px;
+font-size:13px;line-height:1.45;animation:fadeUp .25s ease both}
+.alert svg{flex:0 0 auto;margin-top:1px}
+.alert b{font-weight:650}.alert span{opacity:.85}
+.alert.bad{background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.5);color:var(--red)}
+.alert.warn{background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.5);color:var(--amber)}
 /* cascade */
 .cascade{display:flex;align-items:stretch;gap:0;padding:18px 14px 16px;margin-bottom:14px;overflow:visible}
 .hop{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:84px;text-align:center}
