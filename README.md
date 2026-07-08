@@ -3,10 +3,13 @@
 A single-file-ish web panel to monitor and manage a **WireGuard cascade VPN**:
 
 ```
-device ──wg-cl──▶ VDSina (entry, RU) ──wg-do──▶ DigitalOcean (exit, NL) ──▶ internet
+device ──wg-cl──▶ VDSina (entry, RU) ┬──wg-do──▶ NL exit ──▶ internet
+                                    └──wg-us──▶ US exit ──▶ internet
 ```
 
-It shows per-client status, cascade tunnel health, live throughput, and traffic
+Per-client exit is chosen in the panel (`nl` default / `us`); the client config
+stays the same — routing is decided on the entry node via fwmark policy rules.
+It shows per-client status, cascade tunnel health (both exits), live throughput, and traffic
 history, and lets you add / rename / enable / disable / delete clients and fetch
 their configs (with QR) — plus a **server-side global split-tunnel** that routes
 RU services (Wildberries, Ozon, Kinopoisk, …) directly out of the entry node
@@ -37,12 +40,15 @@ app/                    # deployed verbatim to /opt/wg-ui/ on the entry node
   wg-ui.py              # the HTTPS service (read-only: status, throughput, history)
   wg-admin.py           # root helper (the ONLY thing that writes; called via sudo)
   index.html login.html # HTML shells
-  app.css app.js        # front end (bento UI, i18n RU/EN, charts, PWA)
+  app.css app.js cascade.js clients.js  # front end (bento UI, i18n, charts, PWA)
+  exit_model.py         # shared NL/US exit contract (admin + UI + exit-route)
   sw.js manifest.webmanifest icon*.png icon.svg inter.woff2   # PWA + self-hosted font
-  build-split.py split-server.sh refresh-names.sh             # split-tunnel + helpers
+  build-split.py split-server.sh exit-route.sh refresh-names.sh   # split + per-client exit + helpers
 deploy/
   wg-ui.service         # systemd unit (secrets via EnvironmentFile, none inline)
   wg-ui.env.example     # env template — copy to /etc/wg-ui/wg-ui.env and fill in
+  wg-split-server.service
+  wg-exit-route.service # re-applies per-client US marks on boot
 tests/                  # stdlib unit tests (validation, tokens, split-set math)
 deploy.sh               # preflight (py_compile + tests) → rsync app/ → restart → health-check, auto-rollback
 ```

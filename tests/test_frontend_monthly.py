@@ -9,7 +9,10 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
     def test_header_has_monthly_usage_mount(self):
         html = (ROOT / "app" / "index.html").read_text()
         self.assertIn('id="monthuse"', html)
-        self.assertIn('data-tip="Traffic this calendar month"', html)
+        self.assertIn('id="monthuse-nl"', html)
+        self.assertIn('id="monthuse-us"', html)
+        self.assertIn('data-tip="NL calendar-month traffic · 500 GiB quota"', html)
+        self.assertIn('data-tip="US calendar-month traffic · 500 GiB quota"', html)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
     def test_monthly_helper_sums_and_renders_status_usage(self):
@@ -23,7 +26,8 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
                 elements.set(id, {
                   id, textContent: '', innerHTML: '', dataset: {}, style: {},
                   classList: {add(){}, remove(){}},
-                  querySelectorAll(){ return []; }
+                  querySelectorAll(){ return []; },
+                  setAttribute(){}, getAttribute(){ return null; }
                 });
               }
               return elements.get(id);
@@ -55,7 +59,9 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
             vm.createContext(context);
             vm.runInContext(
               fs.readFileSync('app/app.js', 'utf8') +
-              '\\nglobalThis.__monthlyTest = {trafficTotals, monthSummaryHTML, renderMonthPill, renderUsage};',
+              fs.readFileSync('app/cascade.js', 'utf8') +
+              fs.readFileSync('app/clients.js', 'utf8') +
+              '\\nglobalThis.__monthlyTest = {trafficTotals, peersByExit, clientExit, monthSummaryHTML, monthExitHTML, renderMonthPill, renderUsage};',
               context,
               {filename: 'app/app.js'}
             );
@@ -68,10 +74,24 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
             if(totals.rx !== 1536 || totals.tx !== 2304){
               throw new Error('unexpected totals ' + JSON.stringify(totals));
             }
-            helpers.renderMonthPill([{mrx: 1024, mtx: 2048}]);
-            const html = element('monthuse').innerHTML;
-            if(!html.includes('Month') || !html.includes('1.0 KiB') || !html.includes('2.0 KiB') || !html.includes('3.0 KiB')){
-              throw new Error('unexpected month pill HTML: ' + html);
+            const peers = [
+              {exit: 'nl', mrx: 1024, mtx: 2048},
+              {exit: 'us', mrx: 4096, mtx: 0},
+              {exit: null, mrx: 512, mtx: 0},
+            ];
+            const nlPeers = helpers.peersByExit(peers, 'nl');
+            const usPeers = helpers.peersByExit(peers, 'us');
+            if(nlPeers.length !== 2 || usPeers.length !== 1){
+              throw new Error('unexpected exit partition ' + nlPeers.length + '/' + usPeers.length);
+            }
+            helpers.renderMonthPill(peers);
+            const nlHtml = element('monthuse-nl').innerHTML;
+            const usHtml = element('monthuse-us').innerHTML;
+            if(!nlHtml.includes('NL') || !nlHtml.includes('3.5 KiB') || !nlHtml.includes('/ 500 GiB') || nlHtml.includes('mqbar')){
+              throw new Error('unexpected NL month pill HTML: ' + nlHtml);
+            }
+            if(!usHtml.includes('US') || !usHtml.includes('4.0 KiB') || !usHtml.includes('/ 500 GiB') || usHtml.includes('mqbar')){
+              throw new Error('unexpected US month pill HTML: ' + usHtml);
             }
             helpers.renderUsage({daily: [], clients: []});
             const modalHtml = element('ubody').innerHTML;

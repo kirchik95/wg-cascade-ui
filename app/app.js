@@ -2,6 +2,8 @@ const CSRF=document.querySelector('meta[name=csrf]').content;
 let _act="";   /* pubkey the currently-open modal acts on (avoids quoting args into onclick) */
 let _peers=[]; /* last peers snapshot for search filter */
 let _cquery="";
+let _exitFilter="all"; /* all | nl | us — client list filter */
+let _clientsView=(function(){try{const v=localStorage.getItem('wgui-clients-view');return v==='list'?'list':'cards'}catch(e){return'cards'}})();
 let _prevFocus=null;
 let _sparkSeries=[];
 const IP={d:'<path d="M2 3h20v14H2z"/><path d="M8 21h8M12 17v4"/>',
@@ -23,6 +25,7 @@ const IP={d:'<path d="M2 3h20v14H2z"/><path d="M8 21h8M12 17v4"/>',
  cal:'<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/>',
  branch:'<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
  list:'<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+ grid:'<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
  hist:'<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
  check:'<path d="M20 6 9 17l-5-5"/>',
  warn:'<path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
@@ -39,22 +42,72 @@ function devIcon(name){const s=(name||'').toLowerCase();
 function csparkSVG(s){
  if(!s||s.length<2)return '';
  const mx=Math.max.apply(null,s);if(mx<=0)return '';
- const W=600,H=24,n=s.length,X=i=>W*i/(n-1),Y=v=>H-1.5-(H-4)*v/mx;
- let ln='';for(let i=0;i<n;i++)ln+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(s[i]).toFixed(1);
- return '<svg class="csv" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none"><path class="ca" d="'+ln+' L'+W+' '+H+' L0 '+H+' Z"/><path class="cl" d="'+ln+'"/></svg>';}
+ const W=600,H=32,padT=3,padB=4,n=s.length;
+ const X=i=>W*i/(n-1),Y=v=>H-padB-((H-padT-padB)*v/mx);
+ let ln='',pi=0;
+ for(let i=0;i<n;i++){
+  const x=X(i),y=Y(s[i]);
+  ln+=(i?'L':'M')+x.toFixed(1)+' '+y.toFixed(1);
+  if(s[i]>s[pi])pi=i;
+ }
+ const uid='cg'+Math.random().toString(36).slice(2,8);
+ const midY=(H*0.5).toFixed(1);
+ const px=X(pi).toFixed(1),py=Y(s[pi]).toFixed(1);
+ return '<svg class="csv" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" aria-hidden="true">'
+  +'<defs><linearGradient id="'+uid+'" class="cg" x1="0" y1="0" x2="0" y2="1">'
+  +'<stop offset="0%"/><stop offset="100%"/></linearGradient></defs>'
+  +'<line class="cgd" x1="0" y1="'+midY+'" x2="'+W+'" y2="'+midY+'"/>'
+  +'<path class="ca" d="'+ln+' L'+W+' '+H+' L0 '+H+' Z" fill="url(#'+uid+')"/>'
+  +'<path class="cl" d="'+ln+'"/>'
+  +'<ellipse class="cp" cx="'+px+'" cy="'+py+'" rx="5" ry="3"/>'
+  +'</svg>';
+}
+function csparkTip(s){
+ if(!s||s.length<2)return tr('Throughput, last ~2 min');
+ const mx=Math.max.apply(null,s);if(mx<=0)return tr('Throughput, last ~2 min');
+ const cur=s[s.length-1]||0;
+ return tr('Throughput, last ~2 min')+' · '+tr('now')+' '+mbit(cur)+' · '+tr('peak')+' '+mbit(mx)+' '+tr('Mbit/s');
+}
 function ic(n,s){s=s||16;return '<svg width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+IP[n]+'</svg>';}
+function hydrateIcons(root){
+ root=root||document;
+ root.querySelectorAll('[data-ic]').forEach(el=>{
+  const n=el.getAttribute('data-ic');if(!n||!IP[n])return;
+  if(el.querySelector('svg[data-hyd]'))return;
+  const svg=ic(n,el.classList.contains('menuitem')?15:16);
+  if(el.classList.contains('menuitem')){
+   el.insertAdjacentHTML('afterbegin',svg.replace('<svg ','<svg data-hyd="1" '));
+  }else if(el.classList.contains('primary')){
+   el.insertAdjacentHTML('afterbegin',svg.replace('<svg ','<svg data-hyd="1" '));
+  }else{
+   el.innerHTML=svg.replace('<svg ','<svg data-hyd="1" ');
+  }
+ });
+}
 const fmtB=n=>{n=+n;const u=["B","KiB","MiB","GiB","TiB","PiB"];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(1)+" "+u[i]};
 function trafficTotals(items,rxKey,txKey){
  items=items||[];rxKey=rxKey||'rx';txKey=txKey||'tx';
  return items.reduce((a,x)=>({rx:a.rx+(+x[rxKey]||0),tx:a.tx+(+x[txKey]||0)}),{rx:0,tx:0});
 }
+const EXITS=['nl','us'];
+function clientExit(p){return (p&&p.exit)==='us'?'us':'nl'}
+function peersByExit(peers,exit){
+ return (peers||[]).filter(p=>clientExit(p)===exit);
+}
 function monthSummaryHTML(t){
  const total=t.rx+t.tx;
  return '<span class="mlbl">'+tr('Month')+'</span> <span class="dn">↓ <b>'+fmtB(t.rx)+'</b></span> <span class="up">↑ <b>'+fmtB(t.tx)+'</b></span> <span class="msum">· '+fmtB(total)+'</span>';
 }
+function monthExitHTML(label,t){
+ const total=t.rx+t.tx;
+ return '<span class="mlbl">'+esc(label)+'</span>'
+  +' <span class="msum"><b>'+fmtB(total)+'</b> <span class="mq">/ 500 GiB</span></span>';
+}
 function renderMonthPill(peers){
- const el=document.getElementById('monthuse');if(!el)return;
- el.innerHTML=monthSummaryHTML(trafficTotals(peers,'mrx','mtx'));
+ EXITS.forEach(ex=>{
+  const el=document.getElementById('monthuse-'+ex);
+  if(el){el.innerHTML=monthExitHTML(ex.toUpperCase(),trafficTotals(peersByExit(peers,ex),'mrx','mtx'));applyI18n(el)}
+ });
 }
 const fmtAge=s=>{const r=LANG==='ru';if(s<0)return r?"никогда":"never";if(s<60)return s+(r?"с назад":"s ago");if(s<3600)return(s/60|0)+(r?"м назад":"m ago");if(s<86400)return(s/3600|0)+(r?"ч ":"h ")+((s%3600)/60|0)+(r?"м назад":"m ago");return(s/86400|0)+(r?"д назад":"d ago")};
 const fmtTime=ts=>{const d=new Date(ts*1000),p=n=>(''+n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())};
@@ -66,21 +119,32 @@ let LANG=(function(){try{return localStorage.getItem('wgui-lang')||'ru'}catch(e)
 const RU={
  "client status":"статус клиентов","Throughput":"Трафик","last 5 min":"за 5 мин","Clients":"Клиенты",
  "online":"онлайн","offline":"оффлайн","never":"никогда","reconnecting…":"переподключение…","updated":"обновлено",
- "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL",
- "You":"Вы","Internet":"Интернет","egress checked":"выход проверен","total":"всего","Month":"Месяц",
+ "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL","exit · US":"выход · US",
+ "You":"Вы","Internet":"Интернет","Cascade topology":"Топология каскада","egress checked":"выход проверен","total":"всего","Month":"Месяц",
+ "Exit":"Выход","Netherlands (NL)":"Нидерланды (NL)","United States (US)":"США (US)",
+ "All":"Все","Switch exit":"Сменить exit","Switching…":"Переключаю…",
  "cascade up":"каскад работает","tunnel up · no exit":"туннель есть · нет выхода","tunnel down":"туннель упал",
+ "both exits up":"оба выхода работают","NL up · US down":"NL ок · US нет","US up · NL down":"US ок · NL нет",
+ "Click to switch exit":"Нажми, чтобы сменить exit",
+ "Filter by exit":"Фильтр по exit",
  "RU → direct":"РФ → напрямую","logout":"выход","logout all":"выйти везде","Sign out on all devices":"Выйти на всех устройствах",
  "disabled":"выключен","load avg":"загрузка","uptime":"аптайм",
  "read-only status · writes via secure helper":"только чтение · запись через защищённый хелпер",
- "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Add client":"+ Клиент",
- "Add client":"Добавить клиента","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
+ "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Add client":"+ Клиент","Add client":"Добавить клиента",
+ "Client":"Клиент","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
  "in 7 days":"через 7 дней","in 30 days":"через 30 дней","Cancel":"Отмена","Create":"Создать","Done":"Готово",
  "Copy":"Копировать","Edit":"Изменить","Edit client":"Редактировать клиента","Keep current":"Оставить как есть","Save":"Сохранить",
  "Delete":"Удалить","Recent connections":"Недавние подключения","Daily traffic · 30 days":"Трафик по дням · 30 дней",
  "Audit log":"Журнал действий","Split-tunnel":"Сплит-туннель",
  "Cascade is down":"Каскад упал","Cascade degraded":"Каскад деградировал",
- "No fresh handshake on the VDSina→DO link — client traffic fails closed.":"Нет свежего handshake на линке VDSina→DO — трафик клиентов заблокирован (fail-closed).",
+ "No fresh handshake on either exit link — client traffic fails closed.":"Нет свежего handshake ни на одном exit — трафик клиентов заблокирован (fail-closed).",
  "Tunnel is up but the egress check fails — exit IP not confirmed.":"Туннель работает, но проверка выхода не проходит — exit-IP не подтверждён.",
+ "One exit is down or unverified — clients on that path may fail.":"Один выход недоступен или не подтверждён — клиенты на этом пути могут не работать.",
+ "Exit node · Amsterdam, NL":"Exit-нода · Амстердам, NL",
+ "Exit node · United States":"Exit-нода · США",
+ "Traffic exits via the selected exit IP":"Трафик выходит через IP выбранного exit",
+ "Last WireGuard handshake on the VDSina→exit link":"Последний handshake на линке VDSina→exit",
+ "Cascade exit for this client (NL default)":"Exit каскада для этого клиента (по умолчанию NL)",
  "RU + custom direct":"РФ + свои правила","Route RU traffic direct":"РФ-трафик напрямую","Refresh RU list":"Обновить список РФ",
  "Save list":"Сохранить список","Close":"Закрыть","By client · this month":"По клиентам · за месяц",
  "No traffic yet this month.":"Трафика за месяц пока нет.","No admin actions logged yet.":"Действий пока не было.",
@@ -88,9 +152,12 @@ const RU={
  "Toggle theme":"Сменить тему","Sign out":"Выйти","Show config / QR":"Конфиг / QR","Enable":"Включить","Disable":"Выключить",
  "Tunnel address":"Адрес в туннеле","Client public endpoint":"Публичный адрес клиента","Last handshake":"Последний handshake",
  "Last WireGuard handshake":"Последний WireGuard handshake","Total since connect":"Всего с подключения",
- "Traffic this calendar month":"Трафик за календарный месяц","Temporary client (auto-disables)":"Временный клиент (сам выключится)",
+ "Traffic this calendar month":"Трафик за календарный месяц",
+ "NL calendar-month traffic · 500 GiB quota":"NL · трафик за календарный месяц · квота 500 ГиБ",
+ "US calendar-month traffic · 500 GiB quota":"US · трафик за календарный месяц · квота 500 ГиБ",
+ "Temporary client (auto-disables)":"Временный клиент (сам выключится)",
  "Online — recent handshake":"Онлайн — свежий handshake","Offline":"Оффлайн","Disabled":"Выключен",
- "Throughput, last ~2 min":"Трафик за ~2 мин","Entry-node CPU load":"Загрузка CPU входной ноды","Memory used / total":"Память занято / всего",
+ "Throughput, last ~2 min":"Трафик за ~2 мин","now":"сейчас","Mbit/s":"Мбит/с","Entry-node CPU load":"Загрузка CPU входной ноды","Memory used / total":"Память занято / всего",
  "Load average 1·5·15 min":"Средняя загрузка 1·5·15 мин","Entry-node uptime":"Аптайм входной ноды",
  "Aggregate live throughput across all clients":"Суммарный трафик всех клиентов",
  "Your devices connect to the entry node":"Твои устройства подключаются к входной ноде",
@@ -108,6 +175,7 @@ const RU={
  "sign in to manage the cascade":"войдите для управления каскадом","Username":"Логин","Password":"Пароль","Sign in":"Войти",
  "Invalid username or password":"Неверный логин или пароль",
  "Search clients…":"Поиск клиентов…","Search clients":"Поиск клиентов","More":"Ещё","More actions":"Ещё действия",
+ "Clients view":"Вид клиентов","Cards view":"Карточки","List view":"Список","Cards":"Карточки","List":"Список",
  "Account":"Аккаунт","Sign out all":"Выйти везде",
  "No clients yet":"Пока нет клиентов","Create a client to generate a WireGuard config and QR code.":"Создай клиента — получишь конфиг и QR-код.",
  "No matches":"Ничего не найдено","Try a different name or IP.":"Попробуй другое имя или IP.",
@@ -117,7 +185,8 @@ const RU={
  "Connection lost — reconnecting…":"Нет связи — переподключение…",
  "Session expired — sign in again":"Сессия истекла — войдите снова",
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
- "Tap a day for details":"Нажми день для деталей"
+ "Tap a day for details":"Нажми день для деталей",
+ "Throughput chart, last 5 minutes":"График трафика за 5 минут"
 };
 function tr(s){return LANG==='ru'&&RU[s]?RU[s]:s}
 function applyI18n(root){
@@ -156,49 +225,11 @@ function thrPills(c){
  tw(document.getElementById('cnd'),'cnd',md,mbF);tw(document.getElementById('cnu'),'cnu',mu,mbF);
 }
 
-function renderAlert(t){
- const el=document.getElementById('alert');
- if(!t||t.state==='up'){el.style.display='none';el.__k='';return}
- el.style.display='flex';
- if(el.__k===t.state)return;          /* rebuild only on state change */
- el.__k=t.state;
- const bad=t.state==='down';
- el.className='alert '+(bad?'bad':'warn');
- el.innerHTML=ic('warn',17)+'<div><b>'+(bad?'Cascade is down':'Cascade degraded')+'</b> <span>'
-  +(bad?'No fresh handshake on the VDSina→DO link — client traffic fails closed.'
-       :'Tunnel is up but the egress check fails — exit IP not confirmed.')+'</span></div>';
- applyI18n(el);
-}
 function setOffline(on){
  const el=document.getElementById('offline');if(!el)return;
  if(on){if(el.classList&&el.classList.add)el.classList.add('show');else el.className=(el.className||'')+' show';
   el.innerHTML=ic('warn',15)+'<span>'+tr('Connection lost — reconnecting…')+'</span>';}
  else{if(el.classList&&el.classList.remove)el.classList.remove('show');el.innerHTML='';}
-}
-let _cascKey="";
-function renderCascade(t,rud){
- const cls={up:'ok',degraded:'warn',down:'bad'}[t.state];
- const flow=t.state==='up'?'flow':(t.state==='degraded'?'warn':'bad');
- const exitIP=(t.exit_seen||t.exit_ip);
- const entryTip=t.entry_ip?('Entry node · Russia · '+t.entry_ip):'Entry node · Russia · 203.0.113.10';
- const key=t.state+'|'+exitIP+'|'+(rud?1:0)+'|'+entryTip;
- if(key!==_cascKey){           // rebuild the diagram only when state changes -> smooth flow animation
-  _cascKey=key;
-  document.getElementById('cascade').innerHTML=
-   '<div class="hop"><div class="hicon live" data-tip="Your devices connect to the entry node">'+ic('d',22)+'</div><div class="hname">You</div><div class="hsub">devices</div></div>'
-  +'<div class="link flow"></div>'
-  +'<div class="hop"><div class="hicon ok" data-tip="'+esc(entryTip)+'">'+ic('srv',22)+'</div><div class="hname">VDSina</div><div class="hsub">entry · RU</div></div>'
-  +'<div class="link '+flow+'"></div>'
-  +'<div class="hop"><div class="hicon '+cls+'" data-tip="Exit node · Amsterdam, NL · '+esc(exitIP)+'">'+ic('srv',22)+'</div><div class="hname">DO</div><div class="hsub">exit · NL</div></div>'
-  +'<div class="link '+(t.state==='up'?'flow':cls)+'"></div>'
-  +'<div class="hop"><div class="hicon '+(t.state==='up'?'live':cls)+'" data-tip="Traffic exits the internet with the DO IP">'+ic('net',22)+'</div><div class="hname">Internet</div><div class="hsub mono">'+esc(exitIP)+'</div></div>';
-  applyI18n(document.getElementById('cascade'));
- }
- const lbl={up:'cascade up',degraded:'tunnel up · no exit',down:'tunnel down'}[t.state];
- document.getElementById('tline').innerHTML='<span class="st '+cls+'">● '+tr(lbl)+'</span>'
-  +(rud?'<span class="rud" data-tip="RU traffic bypasses the cascade and exits directly via VDSina (RU IP)">'+ic('branch')+tr('RU → direct')+'</span>':'')
-  +'<span data-tip="Last WireGuard handshake on the VDSina→DO link">wg-do ⇅ '+fmtAge(t.wg_age)+'</span>'
-  +(t.checked_age>=0?'<span data-tip="Last live exit-IP verification">'+tr('egress checked')+' '+fmtAge(t.checked_age)+'</span>':'');
 }
 function renderHost(h){
  const el=document.getElementById('hostbar');
@@ -220,20 +251,54 @@ function renderHost(h){
  document.getElementById('hbload').textContent=h.load.map(x=>x.toFixed(2)).join('  ');
  document.getElementById('hbup').textContent=(h.uptime/86400|0)+'d '+((h.uptime%86400)/3600|0)+'h';
 }
-function spark(series){
- const W=600,H=56,pad=3;
- if(series.length<2)return '<text x="8" y="32" class="ph">'+tr('collecting throughput…')+'</text>';
+const fmtClock=ts=>{const d=new Date((+ts||0)*1000),p=n=>(''+n).padStart(2,'0');return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())};
+function sparkPeak(series,key,X,Y){
+ let bi=0,bv=-1;for(let i=0;i<series.length;i++){const v=+series[i][key]||0;if(v>bv){bv=v;bi=i}}
+ if(bv<=0)return '';
+ return '<circle class="pk '+(key==='down'?'dn':'up')+'" cx="'+X(bi).toFixed(1)+'" cy="'+Y(bv).toFixed(1)+'" r="3"/>';
+}
+function sparkMeta(series){
+ const ticks=document.getElementById('sparkticks');
+ let ymax=document.getElementById('sparkymax');
+ const wrap=document.querySelector('.sparkwrap');
+ if(wrap&&!ymax){ymax=document.createElement('div');ymax.id='sparkymax';ymax.className='spark-ymax';ymax.setAttribute('aria-hidden','true');wrap.insertBefore(ymax,wrap.firstChild)}
+ if(!series||series.length<2){
+  if(ticks)ticks.innerHTML='';
+  if(ymax)ymax.textContent='';
+  return;
+ }
  const max=Math.max(1,...series.map(s=>Math.max(s.down,s.up)));
- const n=series.length,X=i=>pad+(W-2*pad)*i/(n-1),Y=v=>H-pad-(H-2*pad)*v/max;
+ const mid=series[Math.round((series.length-1)/2)];
+ if(ticks)ticks.innerHTML='<span>'+fmtClock(series[0].t)+'</span><span>'+fmtClock(mid.t)+'</span><span>'+fmtClock(series[series.length-1].t)+'</span>';
+ if(ymax)ymax.textContent=mbF(mbN(max))+' '+tr('Mbit/s');
+}
+function spark(series){
+ /* pad* reserve room so strokes/peaks stay inside the SVG (ticks/ymax are HTML overlays) */
+ const W=600,H=62,pad=10,padT=14,padB=10,plotB=H-padB;
+ if(series.length<2)return '<text x="12" y="34" class="ph">'+tr('collecting throughput…')+'</text>';
+ const max=Math.max(1,...series.map(s=>Math.max(s.down,s.up)));
+ const n=series.length,X=i=>pad+(W-2*pad)*i/(n-1),Y=v=>plotB-(plotB-padT)*v/max;
  const ln=k=>series.map((s,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(s[k]).toFixed(1)).join(' ');
- const ar=k=>ln(k)+' L'+X(n-1).toFixed(1)+' '+H+' L'+X(0).toFixed(1)+' '+H+' Z';
- return '<path class="ar dn" d="'+ar('down')+'"/><path class="ar up" d="'+ar('up')+'"/><path class="ln dn" d="'+ln('down')+'"/><path class="ln up" d="'+ln('up')+'"/>'
-  +'<line class="guide" id="sparkguide" x1="0" y1="0" x2="0" y2="'+H+'" style="display:none"/>';
+ const ar=k=>ln(k)+' L'+X(n-1).toFixed(1)+' '+plotB+' L'+X(0).toFixed(1)+' '+plotB+' Z';
+ let grid='';
+ for(let g=1;g<=3;g++){const gy=Y(max*g/4);grid+='<line class="grid" x1="'+pad+'" y1="'+gy.toFixed(1)+'" x2="'+(W-pad)+'" y2="'+gy.toFixed(1)+'"/>';}
+ grid+='<line class="base" x1="'+pad+'" y1="'+plotB+'" x2="'+(W-pad)+'" y2="'+plotB+'"/>';
+ const defs='<defs>'
+  +'<linearGradient id="sparkGdn" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"/><stop offset="100%"/></linearGradient>'
+  +'<linearGradient id="sparkGup" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"/><stop offset="100%"/></linearGradient>'
+  +'</defs>';
+ return defs+grid
+  +'<path class="ar dn" d="'+ar('down')+'"/><path class="ar up" d="'+ar('up')+'"/>'
+  +'<path class="ln dn" d="'+ln('down')+'"/><path class="ln up" d="'+ln('up')+'"/>'
+  +sparkPeak(series,'down',X,Y)+sparkPeak(series,'up',X,Y)
+  +'<circle class="hd dn" id="sparkhdd" cx="0" cy="0" r="3.5"/><circle class="hd up" id="sparkhdu" cx="0" cy="0" r="3.5"/>'
+  +'<line class="guide" id="sparkguide" x1="0" y1="'+padT+'" x2="0" y2="'+plotB+'" style="display:none"/>';
 }
 function hideChartTip(){
  const tip=document.getElementById('charttip'),g=document.getElementById('sparkguide');
- if(tip){tip.classList.remove('show');tip.innerHTML='';}
+ if(tip){tip.classList.remove('show');tip.innerHTML='';tip.setAttribute('aria-hidden','true')}
  if(g)g.style.display='none';
+ ['sparkhdd','sparkhdu'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('show')});
 }
 function showChartTip(ev){
  const series=_sparkSeries,svg=document.getElementById('spark'),tip=document.getElementById('charttip');
@@ -242,11 +307,19 @@ function showChartTip(ev){
  const x=Math.max(0,Math.min(1,((ev.clientX||(ev.touches&&ev.touches[0].clientX)||0)-rect.left)/rect.width));
  const i=Math.round(x*(series.length-1));
  const s=series[i];if(!s)return;
- const pad=3,W=600,gx=pad+(W-2*pad)*i/(series.length-1);
+ const W=600,H=62,pad=10,padT=14,padB=10,plotB=H-padB;
+ const max=Math.max(1,...series.map(p=>Math.max(p.down,p.up)));
+ const X=j=>pad+(W-2*pad)*j/(series.length-1),Y=v=>plotB-(plotB-padT)*v/max;
+ const gx=X(i);
  const g=document.getElementById('sparkguide');
  if(g){g.setAttribute('x1',gx);g.setAttribute('x2',gx);g.style.display='';}
- tip.innerHTML='<span class="dn">↓ '+mbF(mbN(s.down))+'</span> · <span class="up">↑ '+mbF(mbN(s.up))+'</span> Mbit/s';
- tip.classList.add('show');
+ const hd=document.getElementById('sparkhdd'),hu=document.getElementById('sparkhdu');
+ if(hd){hd.setAttribute('cx',gx);hd.setAttribute('cy',Y(s.down));hd.classList.add('show')}
+ if(hu){hu.setAttribute('cx',gx);hu.setAttribute('cy',Y(s.up));hu.classList.add('show')}
+ tip.innerHTML='<div class="ct-t">'+fmtClock(s.t)+'</div>'
+  +'<span class="dn">↓ '+mbF(mbN(s.down))+'</span> · <span class="up">↑ '+mbF(mbN(s.up))+'</span>'
+  +' <span class="ct-u">'+tr('Mbit/s')+'</span>';
+ tip.classList.add('show');tip.setAttribute('aria-hidden','false');
  tip.style.left=(x*100)+'%';
  tip.style.top='0';
 }
@@ -255,120 +328,6 @@ function bindSpark(){
  svg.addEventListener('pointermove',showChartTip);
  svg.addEventListener('pointerleave',hideChartTip);
  svg.addEventListener('pointerdown',showChartTip);
-}
-function cardStructSig(p){
- return [p.pubkey,p.name,p.enabled?1:0,p.online?1:0,p.expires||0,p.endpoint||'',p.ip||'',!!(p.spark&&p.spark.length>1)].join('|');
-}
-function clientCardHTML(p){
- const pj=JSON.stringify(p.pubkey),nj=JSON.stringify(p.name);
- const prevAge=_pv['age-'+p.pubkey];
- const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
- _pv['age-'+p.pubkey]=p.age;
- const prx=_pv['rx-'+p.pubkey],ptx=_pv['tx-'+p.pubkey];
- const en=p.enabled?'Disable':'Enable';
- const acts=
-  '<button class="ib" data-tip="Show config / QR" aria-label="Show config / QR" type="button" onclick=\'showCfg('+pj+')\'>'+ic('qr')+'</button>'
- +'<button class="ib" data-tip="Edit" aria-label="Edit" type="button" onclick=\'openEdit('+pj+','+nj+','+(p.expires||0)+')\'>'+ic('edit')+'</button>'
- +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+en+'" aria-label="'+en+'" type="button" onclick=\'toggleEn('+pj+','+(p.enabled?'true':'false')+')\'>'+ic('pow')+'</button>'
- +'<button class="ib danger" data-tip="Delete" aria-label="Delete" type="button" onclick=\'confirmDel('+pj+','+nj+')\'>'+ic('trash')+'</button>';
- const sv=csparkSVG(p.spark);
- return '<div class="crow '+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'')+'" data-pk="'+esc(p.pubkey)+'" data-ssig="'+esc(cardStructSig(p))+'">'
-  +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+ic(devIcon(p.name),20)+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
-  +'<div class="idc"><div class="nm">'+esc(p.name)
-  +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="Temporary client (auto-disables)">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
-  +(p.enabled?'':'<span class="chip">disabled</span>')+'</div>'
-  +'<div class="ipa mono" data-tip="Tunnel address">'+p.ip+'</div>'
-  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+p.endpoint+'</div>':'')+'</div></div>'
-  +'<div class="stat '+(p.online?'':'o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
-  +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div><div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+p.pubkey+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+p.pubkey+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>'
-  +((p.mrx||p.mtx)?'<div class="mo mono" data-tip="Traffic this calendar month">'+ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx)+'</div>':'')+'</div>'
-  +'<div class="acts">'+acts+'</div>'
-  +(sv?'<div class="cspark" data-tip="Throughput, last ~2 min">'+sv+'</div>':'')+'</div>';
-}
-function emptyStateHTML(kind){
- if(kind==='none'){
-  return '<div class="empty">'+ic('plus',28)+'<b>'+tr('No clients yet')+'</b><p>'+tr('Create a client to generate a WireGuard config and QR code.')+'</p>'
-   +'<button class="primary" type="button" onclick="openAdd()">'+tr('+ Add client')+'</button></div>';
- }
- return '<div class="empty">'+ic('search',28)+'<b>'+tr('No matches')+'</b><p>'+tr('Try a different name or IP.')+'</p></div>';
-}
-function updateCardLive(el,p){
- const prevAge=_pv['age-'+p.pubkey];
- const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
- _pv['age-'+p.pubkey]=p.age;
- if(fresh){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
- const age=el.querySelector('.age');if(age)age.innerHTML=ic('clock',11)+fmtAge(p.age);
- const hs=el.querySelector('.hs');if(hs)hs.textContent=p.online?'online':'offline';
- el.querySelectorAll('.vx').forEach(b=>{
-  const k=b.dataset.k;const to=k.indexOf('rx-')===0?p.rx:p.tx;b.dataset.to=to;tw(b,k,+to,fmtB);
- });
- const mo=el.querySelector('.mo');
- if(p.mrx||p.mtx){
-  const html=ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx);
-  if(mo)mo.innerHTML=html;else{
-   const stat=el.querySelector('.stat');
-   if(stat){const d=document.createElement('div');d.className='mo mono';d.setAttribute('data-tip','Traffic this calendar month');d.innerHTML=html;stat.appendChild(d);applyI18n(d);}
-  }
- }
- const sparkEl=el.querySelector('.cspark');
- const sv=csparkSVG(p.spark);
- if(sv){if(sparkEl)sparkEl.innerHTML=sv;else el.insertAdjacentHTML('beforeend','<div class="cspark" data-tip="Throughput, last ~2 min">'+sv+'</div>');}
- else if(sparkEl)sparkEl.remove();
-}
-function renderClients(peers){
- _peers=peers||[];
- peers=_peers.slice().sort((a,b)=>octet(a.ip)-octet(b.ip));
- const q=_cquery.trim().toLowerCase();
- const filtered=q?peers.filter(p=>{
-  const hay=((p.name||'')+' '+(p.ip||'')+' '+(p.endpoint||'')).toLowerCase();
-  return hay.indexOf(q)>=0;
- }):peers;
- document.getElementById('csum').textContent=_peers.filter(p=>p.online).length+' '+tr('online')+' · '+_peers.length+' '+(LANG==='ru'?'всего':'total');
- const root=document.getElementById('cards');
- if(!_peers.length){root.innerHTML=emptyStateHTML('none');return;}
- if(!filtered.length){root.innerHTML=emptyStateHTML('filter');return;}
-
- const existing=new Map();
- root.querySelectorAll('.crow[data-pk]').forEach(el=>existing.set(el.dataset.pk,el));
- /* drop non-cards (empty/skel) */
- if(!root.querySelector('.crow[data-pk]'))root.innerHTML='';
-
- const order=[];
- filtered.forEach(p=>{
-  order.push(p.pubkey);
-  let el=existing.get(p.pubkey);
-  const ssig=cardStructSig(p);
-  if(!el){
-   if(typeof root.insertAdjacentHTML==='function'){
-    root.insertAdjacentHTML('beforeend',clientCardHTML(p));
-   }else{
-    root.innerHTML=(root.innerHTML||'')+clientCardHTML(p);
-   }
-   el=findCard(root,p.pubkey);
-   if(el)applyI18n(el);
-  }else if(el.dataset.ssig!==ssig){
-   const tmp=document.createElement('div');tmp.innerHTML=clientCardHTML(p);
-   let neu=tmp.firstChild;
-   if(typeof el.replaceWith==='function')el.replaceWith(neu);
-   else{el.outerHTML=clientCardHTML(p);neu=findCard(root,p.pubkey);}
-   el=neu||findCard(root,p.pubkey);if(el)applyI18n(el);
-  }else{
-   updateCardLive(el,p);
-  }
-  existing.delete(p.pubkey);
- });
- existing.forEach(el=>{if(typeof el.remove==='function')el.remove();});
- /* preserve visual order */
- order.forEach(pk=>{
-  const el=findCard(root,pk);
-  if(el&&root.appendChild)root.appendChild(el);
- });
- const vxs=root.querySelectorAll?root.querySelectorAll('.vx'):[];
- [...vxs].forEach(b=>{if(b.dataset&&b.dataset.to!=null)tw(b,b.dataset.k,+b.dataset.to,fmtB);});
-}
-function findCard(root,pk){
- if(!root||!root.querySelectorAll)return null;
- return [...root.querySelectorAll('.crow[data-pk]')].find(el=>el.dataset&&el.dataset.pk===pk)||null;
 }
 async function tick(){
  try{
@@ -380,6 +339,7 @@ async function tick(){
   thrPills(d.thr.cur);
   _sparkSeries=d.thr.series||[];
   document.getElementById('spark').innerHTML=spark(_sparkSeries);
+  sparkMeta(_sparkSeries);
   bindSpark();
   document.getElementById('upd').textContent=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
   applyI18n(document.getElementById('tline'));
@@ -420,16 +380,18 @@ function toast(m){const t=document.getElementById('toast');t.textContent=tr(m);t
 function openAdd(){openModal(
  '<div class="mtitle" id="mtitle">'+ic('plus',18)+' Add client</div>'
  +'<label class="fl">Name<input id="cn" placeholder="e.g. iphone, laptop" autocomplete="off" maxlength="32"></label>'
+ +'<label class="fl">Exit<select id="ce" class="fsel" data-tip="Cascade exit for this client (NL default)"><option value="nl">Netherlands (NL)</option><option value="us">United States (US)</option></select></label>'
  +'<label class="fl">Expires<select id="cx" class="fsel"><option value="0">Never</option><option value="1">in 1 day</option><option value="7">in 7 days</option><option value="30">in 30 days</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
  +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">Cancel</button><button class="primary" id="ab" type="button" onclick="doAdd()">Create</button></div>');
  setTimeout(()=>{const i=document.getElementById('cn');if(!i)return;i.focus();i.onkeydown=e=>{if(e.key==="Enter")doAdd()}},30);}
 async function doAdd(){const n=document.getElementById('cn').value.trim();const days=+document.getElementById('cx').value;
+ const exit=clientExit({exit:document.getElementById('ce').value});
  const me=document.getElementById('me');
  if(!n){me.textContent=tr('Name is required');return}
  if(n.length>32){me.textContent=tr('Name too long (max 32)');return}
  const expires=days>0?((Date.now()/1000|0)+days*86400):0;const b=document.getElementById('ab');
- b.disabled=true;b.textContent=tr('Creating…');const r=await admin({op:'add',name:n,expires:expires});
+ b.disabled=true;b.textContent=tr('Creating…');const r=await admin({op:'add',name:n,expires:expires,exit:exit});
  if(!r||!r.ok){me.textContent=tr((r&&r.error)||'failed');b.disabled=false;b.textContent=tr('Create');return}
  showResult(r);tick();}
 function showResult(r){
@@ -466,7 +428,7 @@ async function doExport(){
  a.download=r.name||'wg-cascade-backup.tar.gz';a.click();URL.revokeObjectURL(a.href);
  toast('Backup downloaded — keep it safe (contains private keys)');
 }
-function aopcls(op){if(op==='delete'||op==='disable'||op==='expire')return'bad';if(op==='add'||op==='enable')return'ok';return''}
+function aopcls(op){if(op==='delete'||op==='disable'||op==='expire')return'bad';if(op==='add'||op==='enable'||op==='setexit')return'ok';return''}
 async function openAudit(){
  openModal('<div class="mtitle" id="mtitle">'+ic('list',18)+' Audit log</div><div id="aubody" class="mtext">loading…</div>');
  let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent='failed to load';return}
@@ -561,9 +523,13 @@ async function splitSave(refresh){
  if(!r||!r.ok){document.getElementById('me').textContent=tr((r&&r.error)||'failed');btn.disabled=false;btn.innerHTML=old;return}
  toast('List rebuilt · '+(((r.meta&&r.meta.direct_count)||0)).toLocaleString()+' direct routes');renderSplit(r);
 }
-function openEdit(pub,name,exp){_act=pub;window.__en=name;const now=Date.now()/1000|0;openModal(
+function openEdit(pub,name,exp,exit){_act=pub;window.__en=name;window.__ex=clientExit({exit:exit});
+ const now=Date.now()/1000|0;openModal(
  '<div class="mtitle" id="mtitle">'+ic('edit',18)+' Edit client</div>'
  +'<label class="fl">Name<input id="rn" value="'+esc(name)+'" maxlength="32"></label>'
+ +'<label class="fl">Exit<select id="re" class="fsel" data-tip="Cascade exit for this client (NL default)">'
+ +'<option value="nl"'+(window.__ex==='nl'?' selected':'')+'>Netherlands (NL)</option>'
+ +'<option value="us"'+(window.__ex==='us'?' selected':'')+'>United States (US)</option></select></label>'
  +'<label class="fl">Expires<select id="rx" class="fsel">'
  +'<option value="keep">'+tr('Keep current')+' · '+(exp?fmtLeft(exp-now):tr('Never').toLowerCase())+'</option>'
  +'<option value="0">'+tr('Never')+'</option>'
@@ -575,11 +541,16 @@ function openEdit(pub,name,exp){_act=pub;window.__en=name;const now=Date.now()/1
  setTimeout(()=>{const i=document.getElementById('rn');if(!i)return;i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doEdit()}},30);}
 async function doEdit(){
  const n=document.getElementById('rn').value.trim(),x=document.getElementById('rx').value;
+ const exit=clientExit({exit:document.getElementById('re').value});
  const me=document.getElementById('me');
  if(!n){me.textContent=tr('Name is required');return}
  if(n.length>32){me.textContent=tr('Name too long (max 32)');return}
  if(n!==window.__en){                                 /* skip no-op rename (keeps the audit log clean) */
   const r=await admin({op:'rename',pubkey:_act,name:n});
+  if(!r||!r.ok){me.textContent=tr((r&&r.error)||'failed');return}
+ }
+ if(exit!==window.__ex){
+  const r=await admin({op:'setexit',pubkey:_act,exit:exit});
   if(!r||!r.ok){me.textContent=tr((r&&r.error)||'failed');return}
  }
  if(x!=='keep'){
@@ -655,11 +626,7 @@ function renderSkeleton(){
  const hb=document.getElementById('hostbar');if(hb){hb.style.display='flex';
  hb.innerHTML='<div class="skel" style="width:42%;height:13px;margin-bottom:11px"></div>'
   +'<div class="skel" style="height:11px;margin-bottom:9px"></div>'.repeat(4);}
- const sp=document.getElementById('spark');if(sp)sp.innerHTML='<rect x="2" y="6" width="596" height="44" rx="6" class="skel-svg"/>';
-}
-if(typeof navigator!=='undefined'&&'serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){})}
-setLangBtn();applyI18n();bindMenus();bindSearch();renderSkeleton();tick();setInterval(tick,5000);
-if(typeof window!=='undefined'&&window.addEventListener){
- window.addEventListener('online',()=>{setOffline(false);tick();});
- window.addEventListener('offline',()=>setOffline(true));
+ const sp=document.getElementById('spark');if(sp)sp.innerHTML='<rect x="10" y="14" width="580" height="38" rx="6" class="skel-svg"/>';
+ const tk=document.getElementById('sparkticks');if(tk)tk.innerHTML='';
+ const ym=document.getElementById('sparkymax');if(ym)ym.textContent='';
 }

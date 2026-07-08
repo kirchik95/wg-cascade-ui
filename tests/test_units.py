@@ -220,6 +220,51 @@ class TestHistoryDB(unittest.TestCase):
             wgui.DB = saved
 
 
+class TestExitHelpers(unittest.TestCase):
+    def test_normalize_exit(self):
+        self.assertEqual(wgadmin.normalize_exit("nl"), "nl")
+        self.assertEqual(wgadmin.normalize_exit("US"), "us")
+        self.assertEqual(wgadmin.normalize_exit(""), "nl")
+        self.assertTrue(quiet_exit(wgadmin.normalize_exit, "de"))
+        self.assertTrue(quiet_exit(wgadmin.normalize_exit, "nl;rm"))
+
+    def test_client_exit_default(self):
+        self.assertEqual(wgadmin.client_exit({}), "nl")
+        self.assertEqual(wgadmin.client_exit({"exit": "us"}), "us")
+        self.assertEqual(wgadmin.client_exit({"exit": "bogus"}), "nl")
+
+    def test_tunnel_state_with_exits(self):
+        saved_eg = {k: dict(v) for k, v in wgui._egress.items()}
+        orig_peer = wgui.wg_peer
+        try:
+            with wgui._lock:
+                wgui._egress["nl"].update(ok=True, seen="1.1.1.1", at=int(time.time()))
+                wgui._egress["us"].update(ok=False, seen=None, at=int(time.time()))
+            wgui.wg_peer = lambda iface: (
+                {"age": 5, "up": True} if iface == wgui.DO_IFACE
+                else {"age": -1, "up": False})
+            t = wgui.tunnel()
+            self.assertEqual(t["state"], "up")          # NL ok → overall up
+            self.assertIn("exits", t)
+            self.assertNotIn("exit_ip", t)              # flat NL fields removed
+            self.assertNotIn("wg_up", t)
+            self.assertTrue(t["exits"]["nl"]["ok"])
+            self.assertFalse(t["exits"]["us"]["ok"])
+            self.assertEqual(t["exits"]["nl"]["exit_ip"], wgui.EXIT_IP)
+            with wgui._lock:
+                wgui._egress["nl"].update(ok=False, seen=None)
+            wgui.wg_peer = lambda iface: {"age": -1, "up": False}
+            self.assertEqual(wgui.tunnel()["state"], "down")
+            wgui.wg_peer = lambda iface: {"age": 3, "up": True}
+            self.assertEqual(wgui.tunnel()["state"], "degraded")
+        finally:
+            with wgui._lock:
+                for k, v in saved_eg.items():
+                    wgui._egress[k].clear()
+                    wgui._egress[k].update(v)
+            wgui.wg_peer = orig_peer
+
+
 class TestComplement(unittest.TestCase):
     def test_covers_everything_except_excluded(self):
         excl = [ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("192.168.0.0/16")]

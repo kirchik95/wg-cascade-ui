@@ -1,0 +1,14 @@
+[Unit]
+Description=Cascade per-client exit routing (NL default / US via mark) — re-applies on boot
+After=wg-quick@wg-cl.service wg-quick@wg-do.service wg-quick@wg-us.service network-online.target
+Wants=network-online.target
+Requires=wg-quick@wg-cl.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/wg-ui/exit-route.sh apply
+ExecStop=/opt/wg-ui/exit-route.sh down
+
+[Install]
+WantedBy=multi-user.target

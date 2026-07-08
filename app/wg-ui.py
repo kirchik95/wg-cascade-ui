@@ -5,10 +5,15 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, base64, hmac, hashlib, sqlite3, subprocess, threading
+import os, ssl, json, time, base64, hmac, hashlib, sqlite3, subprocess, threading, sys
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+from exit_model import client_exit, normalize_exit
 
 USER        = os.environ.get("WGUI_USER", "admin")
 SALT        = os.environ.get("WGUI_SALT", "")
@@ -21,8 +26,10 @@ KEY         = os.environ.get("WGUI_KEY", "/etc/wg-ui/key.pem")
 CLIENTS     = os.environ.get("WGUI_CLIENTS", "/etc/wg-ui/clients.json")
 IFACE       = os.environ.get("WGUI_IFACE", "wg-cl")
 DO_IFACE    = os.environ.get("WGUI_DO_IFACE", "wg-do")
-EXIT_IP     = os.environ.get("WGUI_EXIT_IP", "198.51.100.10")
-SRC_IP      = os.environ.get("WGUI_SRC_IP", "10.10.0.1")
+US_IFACE    = os.environ.get("WGUI_US_IFACE", "wg-us")
+EXIT_IP     = os.environ.get("WGUI_EXIT_IP", "198.51.100.10")      # expected NL egress
+US_EXIT_IP  = os.environ.get("WGUI_US_EXIT_IP", "")                 # expected US egress (empty = skip probe match)
+SRC_IP      = os.environ.get("WGUI_SRC_IP", "10.10.0.1")            # source for NL egress probe
 ONLINE_S    = int(os.environ.get("WGUI_ONLINE_SECS", "180"))
 SESSION_TTL = int(os.environ.get("WGUI_SESSION_TTL", str(7 * 24 * 3600)))
 SAMPLE_S    = int(os.environ.get("WGUI_SAMPLE_SECS", "5"))
@@ -161,13 +168,15 @@ def clients_status():
                     "rx": lv["rx"] if lv else 0, "tx": lv["tx"] if lv else 0,
                     "mrx": m.get("rx", 0), "mtx": m.get("tx", 0),
                     "expires": c.get("expires", 0),
+                    "exit": client_exit(c),
                     "spark": sp.get(c["pubkey"], [])[-24:]})
     out.sort(key=lambda x: (not x["online"], not x["enabled"], x["name"].lower()))
     return out
 
-def wg_do():
+def wg_peer(iface):
+    """Handshake age / up for the first peer on a cascade exit iface (wg-do / wg-us)."""
     try:
-        lines = _dump(DO_IFACE)
+        lines = _dump(iface)
         if len(lines) < 2:
             return None
         p = lines[1].split("\t")
@@ -180,7 +189,10 @@ def wg_do():
 # background sampler: throughput ring buffer + cached egress probe + host stats
 _samples = deque(maxlen=120)          # (t, total_rx, total_tx)
 _psamples = deque(maxlen=30)          # (t, {pubkey: (rx, tx)}) — for per-client sparklines
-_egress = {"ok": False, "seen": None, "at": 0}
+_egress = {                           # per-exit egress probe cache
+    "nl": {"ok": False, "seen": None, "at": 0},
+    "us": {"ok": False, "seen": None, "at": 0},
+}
 _host = {"cpu": 0, "prev": None}      # cpu% (computed from /proc/stat deltas)
 _lock = threading.Lock()
 
@@ -211,17 +223,32 @@ def host():
 
 EGRESS_URLS = ["https://api.ipify.org", "https://icanhazip.com"]
 
-def _probe_egress():
-    for url in EGRESS_URLS:      # fallback so one dead IP service can't fake "degraded"
+def _probe_via(iface_or_ip, expect_ip):
+    """curl through iface_or_ip; ok if seen == expect_ip (or any IP when expect_ip empty)."""
+    for url in EGRESS_URLS:
         try:
-            r = subprocess.run(["curl", "-s", "--max-time", "8", "--interface", SRC_IP, url],
+            r = subprocess.run(["curl", "-s", "--max-time", "8", "--interface", iface_or_ip, url],
                                capture_output=True, text=True, timeout=10)
             ip = r.stdout.strip()
             if ip:
-                return (ip == EXIT_IP), ip
+                if expect_ip:
+                    return (ip == expect_ip), ip
+                return True, ip
         except Exception:
             pass
     return False, None
+
+def _probe_egress():
+    """Probe NL (via SRC_IP → default cascade) and US (via wg-us) egress IPs."""
+    nl_ok, nl_ip = _probe_via(SRC_IP, EXIT_IP)
+    us_ok, us_ip = False, None
+    # Only probe US when the iface exists; missing iface is not an error for NL-only deploys.
+    try:
+        subprocess.run(["ip", "link", "show", US_IFACE], capture_output=True, timeout=3, check=True)
+        us_ok, us_ip = _probe_via(US_IFACE, US_EXIT_IP or None)
+    except Exception:
+        us_ok, us_ip = False, None
+    return {"nl": (nl_ok, nl_ip), "us": (us_ok, us_ip)}
 
 def _sampler():
     i = 0
@@ -265,9 +292,15 @@ def _sampler():
         except Exception:
             pass
         if i % 5 == 0:                 # egress probe every ~25s
-            ok_, ip = _probe_egress()
-            with _lock:
-                _egress.update(ok=ok_, seen=ip, at=int(time.time()))
+            try:
+                res = _probe_egress()
+                now = int(time.time())
+                with _lock:
+                    for key in ("nl", "us"):
+                        ok_, ip = res[key]
+                        _egress[key].update(ok=ok_, seen=ip, at=now)
+            except Exception:
+                pass
         i += 1
         time.sleep(SAMPLE_S)
 
@@ -301,15 +334,30 @@ def client_sparks():
             out.setdefault(pub, []).append(rate)
     return out
 
-def tunnel():
-    do = wg_do()
+def _exit_status(key, iface, expect_ip, peer):
     with _lock:
-        eg = dict(_egress)
-    wg_up = bool(do and do["up"])
-    state = "up" if eg["ok"] else ("degraded" if wg_up else "down")
-    return {"state": state, "wg_up": wg_up, "wg_age": do["age"] if do else -1,
-            "exit_seen": eg["seen"], "exit_ip": EXIT_IP,
-            "checked_age": (int(time.time()) - eg["at"]) if eg["at"] else -1}
+        eg = dict(_egress.get(key) or {})
+    wg_up = bool(peer and peer["up"])
+    ok = bool(eg.get("ok"))
+    return {
+        "iface": iface,
+        "wg_up": wg_up,
+        "wg_age": peer["age"] if peer else -1,
+        "exit_ip": expect_ip or None,
+        "exit_seen": eg.get("seen"),
+        "ok": ok,
+        "checked_age": (int(time.time()) - eg["at"]) if eg.get("at") else -1,
+    }
+
+def tunnel():
+    exits = {
+        "nl": _exit_status("nl", DO_IFACE, EXIT_IP, wg_peer(DO_IFACE)),
+        "us": _exit_status("us", US_IFACE, US_EXIT_IP or None, wg_peer(US_IFACE)),
+    }
+    any_ok = any(e["ok"] for e in exits.values())
+    any_wg = any(e["wg_up"] for e in exits.values())
+    state = "up" if any_ok else ("degraded" if any_wg else "down")
+    return {"state": state, "exits": exits}
 
 def rud_on():
     try:
@@ -504,8 +552,12 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         # PWA assets — public (no sensitive data), so the install/login page can load them
-        _CT = {"/app.css": "text/css", "/app.js": "application/javascript",
-               "/icon.svg": "image/svg+xml", "/manifest.webmanifest": "application/manifest+json"}
+        _CT = {"/app.css": "text/css",
+               "/app.js": "application/javascript",
+               "/cascade.js": "application/javascript",
+               "/clients.js": "application/javascript",
+               "/icon.svg": "image/svg+xml",
+               "/manifest.webmanifest": "application/manifest+json"}
         if path in _CT:
             try:
                 return self._send(200, asset(path.lstrip("/")), _CT[path], {"Cache-Control": "max-age=3600"})
@@ -612,11 +664,23 @@ class H(BaseHTTPRequestHandler):
             if op == "add":
                 try: exp = max(0, int(b.get("expires") or 0))
                 except Exception: exp = 0
-                argv = ["add", name, str(exp)]
+                exit_ = str(b.get("exit") or "nl").strip().lower()
+                try:
+                    exit_ = normalize_exit(exit_)
+                except ValueError as e:
+                    return self._json(400, {"ok": False, "error": str(e)})
+                argv = ["add", name, str(exp), exit_]
             elif op == "setexpiry":
                 try: exp = max(0, int(b.get("expires") or 0))
                 except Exception: exp = 0
                 argv = ["setexpiry", pub, str(exp)]
+            elif op == "setexit":
+                exit_ = str(b.get("exit") or "").strip().lower()
+                try:
+                    exit_ = normalize_exit(exit_)
+                except ValueError as e:
+                    return self._json(400, {"ok": False, "error": str(e)})
+                argv = ["setexit", pub, exit_]
             elif op == "export":
                 argv = ["export"]
             elif op == "rename":

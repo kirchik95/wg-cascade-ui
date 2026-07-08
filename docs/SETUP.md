@@ -18,11 +18,12 @@ start, this node must already have the two WireGuard tunnels up via `wg-quick@`:
 
 - **`wg-cl`** — device → this entry node (clients connect here; the panel adds/
   removes their `[Peer]` blocks in `/etc/wireguard/wg-cl.conf`).
-- **`wg-do`** — this entry node → the exit node (the second cascade hop).
+- **`wg-do`** — this entry node → the NL exit node (default cascade hop).
+- **`wg-us`** — (optional, dual-exit) this entry node → the US exit node.
 
 So `/etc/wireguard/wg-cl.conf` and `wg-do.conf` must exist and be active
-(`wg show wg-cl` works). Building the cascade itself (keys, kill-switch, policy
-routing) is out of scope here.
+(`wg show wg-cl` works). For dual-exit, `wg-us.conf` must also be up. Building
+the cascade itself (keys, kill-switch, policy routing) is out of scope here.
 
 ---
 
@@ -157,6 +158,7 @@ two `wg` dumps, and invoke the root helper. Nothing else.
 cat > /etc/sudoers.d/wg-ui <<'EOF'
 wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-cl dump
 wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-do dump
+wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-us dump
 wgui ALL=(root) NOPASSWD: /usr/bin/python3 /opt/wg-ui/wg-admin.py *
 EOF
 chmod 440 /etc/sudoers.d/wg-ui
@@ -166,6 +168,9 @@ visudo -c -f /etc/sudoers.d/wg-ui        # must print "parsed OK"
 `wg-admin.py` (root, 755, in `/opt/wg-ui`) is what actually mutates WireGuard — it
 validates every name/pubkey against a regex before touching
 `/etc/wireguard/wg-cl.conf`. Keep it root-owned and never writable by `wgui`.
+
+> If you only have the NL exit yet, the `wg-us` line is harmless (the panel treats a
+> missing iface as "US down"). Add it once `wg-us` exists so dual-exit health works.
 
 ---
 
@@ -214,6 +219,50 @@ notes.
 > The kill-switch and policy routing live in the cascade, not this repo — the split
 > script edits iptables/`ip rule` on a live box. Snapshot `iptables-save` +
 > `ip rule` before enabling.
+
+---
+
+## 9b. Dual exit (NL + US) — per-client routing
+
+Clients always dial the same entry (`wg-cl`). The panel assigns each client an
+exit (`nl` default via `wg-do`, or `us` via `wg-us`) using fwmark policy routing
+on the entry node. Client `.conf` files do **not** change.
+
+### Prerequisites
+
+- `wg-us` already up (`wg-quick@wg-us`), peer to the US VPS, with NAT/forwarding
+  on the US side (same pattern as `wg-do`).
+- Kill-switch on the entry node must allow `FORWARD`/`MASQUERADE` for `wg-us`
+  (the `exit-route.sh` script also inserts ACCEPT/MASQUERADE rules above the DROP).
+
+### Enable
+
+```sh
+# on the entry node — snapshot first
+iptables-save > /root/iptables.before-dual-exit
+ip rule > /root/ip-rule.before-dual-exit
+
+# env: expected US egress IP (panel health check)
+# edit /etc/wg-ui/wg-ui.env and add, e.g.:
+#   WGUI_US_IFACE=wg-us
+#   WGUI_US_EXIT_IP=198.51.100.20
+
+# sudoers: allow reading wg-us (see step 7 — add the wg-us dump line)
+
+scp deploy/wg-exit-route.service root@$IP:/etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now wg-exit-route.service
+/opt/wg-ui/exit-route.sh status
+```
+
+Priority order on the entry node:
+
+1. RU-direct split (`fwmark 0x64`, pri 1000) — unchanged
+2. US clients (`fwmark 0x65`, pri 1100, table 65 → `wg-us`)
+3. Everyone else → default cascade via `wg-do` (NL)
+
+Changing a client's exit in the panel calls `setexit` → `exit-route.sh sync` and
+flushes that client's conntrack so existing flows don't stick to the old path.
 
 ---
 

@@ -7,15 +7,21 @@ the unprivileged web service.
 
 Usage: wg-admin.py <op> [args]
   list                         -> {clients:[...]}
-  add <name>                   -> {name,ip,pubkey,conf,qr}
+  add <name> [expires] [exit]  -> {name,ip,pubkey,conf,qr,exit}
   rename <pubkey> <newname>    -> {}
   setenabled <pubkey> <0|1>    -> {}
+  setexit <pubkey> <nl|us>     -> {name,exit}
   delete <pubkey>              -> {}
-  getconf <pubkey>             -> {name,ip,conf,qr}
+  getconf <pubkey>             -> {name,ip,conf,qr,exit}
   regenerate                   -> {}   (rewrite conf from clients.json, no change)
 All output is a single JSON line: {"ok":true,...} or {"ok":false,"error":...}.
 """
 import sys, os, re, json, time, base64, fcntl, shutil, tempfile, tarfile, io, subprocess
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+from exit_model import client_exit, normalize_exit as _normalize_exit
 
 CLIENTS_JSON = "/etc/wg-ui/clients.json"
 NAMES_JSON   = "/etc/wg-ui/names.json"
@@ -23,6 +29,7 @@ SPLIT_EXTRA  = "/etc/wg-ui/split-extra.txt"        # user extras (CIDR/IP/domain
 SPLIT_META   = "/etc/wg-ui/split-meta.json"
 BUILD_SPLIT  = "/opt/wg-ui/build-split.py"
 SPLIT_SH     = "/opt/wg-ui/split-server.sh"        # server-side global RU-direct toggle
+EXIT_SH      = "/opt/wg-ui/exit-route.sh"          # per-client NL/US exit routing
 CLIENT_DIR   = "/etc/wireguard/clients"
 LOCKFILE     = "/etc/wg-ui/.adminlock"
 AUDIT_LOG    = "/var/lib/wg-ui/audit.log"          # append-only admin action log (UI reads it)
@@ -206,8 +213,26 @@ def audit(op, detail=""):
     except Exception:
         pass
 
+def normalize_exit(val):
+    try:
+        return _normalize_exit(val)
+    except ValueError as e:
+        die(str(e))
+
+def sync_exit_routes(flush_ip=None):
+    """Re-apply per-client US marks from clients.json; optionally flush conntrack for one IP.
+
+    Always safe to call after client mutations — exit-route.sh sync is idempotent
+    and derives state from clients.json (no separate was_us / exit==us branches).
+    """
+    r = run([EXIT_SH, "sync"], timeout=30)
+    if r.returncode != 0:
+        die("exit-route sync failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
+    if flush_ip:
+        run([EXIT_SH, "flush-ct", flush_ip], timeout=10)
+
 # ---------------------------------------------------------------------- ops
-def op_add(name, expires="0"):
+def op_add(name, expires="0", exit_="nl"):
     name = name.strip()
     if not NAME_RE.match(name):
         die("invalid name (allowed: letters, digits, _ - ; max 32)")
@@ -215,6 +240,7 @@ def op_add(name, expires="0"):
         exp = int(expires)
     except Exception:
         exp = 0
+    exit_ = normalize_exit(exit_)
     clients = load_clients()
     if any(c["name"].lower() == name.lower() for c in clients):
         die("a client named '%s' already exists" % name)
@@ -225,13 +251,16 @@ def op_add(name, expires="0"):
     write_atomic(cpath, conf, 0o600)
     qr = qr_b64(cpath, ppath)
     entry = {"name": name, "ip": ip, "pubkey": pub, "enabled": True}
+    if exit_ != "nl":
+        entry["exit"] = exit_   # absence == nl (keep JSON lean)
     if exp > 0:
         entry["expires"] = exp
     clients.append(entry)
     save_clients(clients)
     regenerate(clients)
-    audit("add", name + (" (temporary)" if exp else ""))
-    ok({"name": name, "ip": ip, "pubkey": pub, "conf": conf, "qr": qr})
+    sync_exit_routes()
+    audit("add", name + (" (temporary)" if exp else "") + (" → us" if exit_ == "us" else ""))
+    ok({"name": name, "ip": ip, "pubkey": pub, "conf": conf, "qr": qr, "exit": exit_})
 
 def op_rename(pub, newname):
     if not PUB_RE.match(pub):
@@ -264,6 +293,7 @@ def op_setenabled(pub, val):
     c["enabled"] = (val == "1")
     save_clients(clients)
     regenerate(clients)
+    sync_exit_routes(flush_ip=c["ip"] if val == "0" else None)
     audit("enable" if val == "1" else "disable", c["name"])
     ok()
 
@@ -274,14 +304,34 @@ def op_delete(pub):
     c = find(clients, pub)
     cpath, ppath = paths(c["name"])
     nm = c["name"]
+    ip = c["ip"]
     clients = [x for x in clients if x["pubkey"] != pub]
     save_clients(clients)
     regenerate(clients)
     for p in (cpath, ppath):
         try: os.unlink(p)
         except OSError: pass
+    sync_exit_routes(flush_ip=ip)
     audit("delete", nm)
     ok()
+
+def op_setexit(pub, exit_):
+    if not PUB_RE.match(pub):
+        die("invalid pubkey")
+    exit_ = normalize_exit(exit_)
+    clients = load_clients()
+    c = find(clients, pub)
+    old = client_exit(c)
+    if old == exit_:
+        ok({"name": c["name"], "exit": exit_})
+    if exit_ == "nl":
+        c.pop("exit", None)   # absence == nl (keep JSON lean)
+    else:
+        c["exit"] = exit_
+    save_clients(clients)
+    sync_exit_routes(flush_ip=c["ip"])
+    audit("setexit", "%s %s -> %s" % (c["name"], old, exit_))
+    ok({"name": c["name"], "exit": exit_})
 
 def op_getconf(pub):
     if not PUB_RE.match(pub):
@@ -294,7 +344,8 @@ def op_getconf(pub):
     with open(cpath) as f:
         conf = f.read()
     qr = qr_b64(cpath, ppath) if len(conf) < 2500 else ""   # QR can't hold a big legacy split config
-    ok({"name": c["name"], "ip": c["ip"], "conf": conf, "qr": qr, "split": c.get("split", False)})
+    ok({"name": c["name"], "ip": c["ip"], "conf": conf, "qr": qr,
+        "split": c.get("split", False), "exit": client_exit(c)})
 
 def op_setexpiry(pub, ts):
     if not PUB_RE.match(pub):
@@ -322,6 +373,7 @@ def op_expire():
             c["enabled"] = False
         save_clients(clients)
         regenerate(clients)
+        sync_exit_routes()
         for c in expired:
             audit("expire", c["name"])
     ok({"expired": [c["name"] for c in expired]})
@@ -330,7 +382,8 @@ def op_export():
     """tar.gz of recovery-critical files (server + client keys, registry), returned base64. Sensitive."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for p in (WG_CONF, "/etc/wireguard/wg-do.conf", CLIENTS_JSON, SPLIT_EXTRA):
+        for p in (WG_CONF, "/etc/wireguard/wg-do.conf", "/etc/wireguard/wg-us.conf",
+                  CLIENTS_JSON, SPLIT_EXTRA):
             if os.path.exists(p):
                 tar.add(p, arcname=os.path.basename(p))
         if os.path.isdir(CLIENT_DIR):
@@ -399,8 +452,10 @@ def main():
     lock = open(LOCKFILE, "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     if   op == "list":                    ok({"clients": load_clients()})
-    elif op == "add"        and len(a) >= 1: op_add(a[0], a[1] if len(a) >= 2 else "0")
+    elif op == "add"        and len(a) >= 1: op_add(a[0], a[1] if len(a) >= 2 else "0",
+                                                    a[2] if len(a) >= 3 else "nl")
     elif op == "setexpiry"  and len(a) >= 2: op_setexpiry(a[0], a[1])
+    elif op == "setexit"    and len(a) >= 2: op_setexit(a[0], a[1])
     elif op == "expire":                  op_expire()
     elif op == "export":                  op_export()
     elif op == "rename"     and len(a) >= 2: op_rename(a[0], a[1])

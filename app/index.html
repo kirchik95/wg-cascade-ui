@@ -4,7 +4,10 @@
 <h1>WG&nbsp;Cascade <span class="sub">client status</span></h1>
 <div class="meta">
 <span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
-<span class="pill monthpill" id="monthuse" data-tip="Traffic this calendar month">…</span>
+<span class="monthpills" id="monthuse">
+<span class="pill monthpill" id="monthuse-nl" data-tip="NL calendar-month traffic · 500 GiB quota">…</span>
+<span class="pill monthpill" id="monthuse-us" data-tip="US calendar-month traffic · 500 GiB quota">…</span>
+</span>
 <div class="meta-tools">
 <button class="pill btn" id="lang" onclick="toggleLang()" data-tip="Language / Язык" aria-label="Language / Язык">RU</button>
 <button class="pill btn" id="theme" onclick="toggleTheme()" data-tip="Toggle theme" aria-label="Toggle theme" type="button"></button>
@@ -28,34 +31,46 @@
 <div class="card chartcard">
 <div class="charth"><div class="t">Throughput<span>last 5 min</span></div><div class="now" id="chartnow"></div></div>
 <div class="sparkwrap">
-<svg class="spark" id="spark" viewBox="0 0 600 56" preserveAspectRatio="none" role="img" aria-label="Throughput chart, last 5 minutes"></svg>
+<svg class="spark" id="spark" viewBox="0 0 600 62" preserveAspectRatio="none" role="img" aria-label="Throughput chart, last 5 minutes"></svg>
+<div class="sparkticks" id="sparkticks" aria-hidden="true"></div>
 <div class="charttip" id="charttip" aria-hidden="true"></div>
 </div>
 </div>
 <div class="card hosttile" id="hostbar"></div>
 </div>
 <div class="sech">
-<div class="sech-l">
 <div class="lt">Clients <b id="csum"></b></div>
+<div class="sech-top">
+<div class="sech-l">
 <input class="csearch" id="csearch" type="search" placeholder="Search clients…" autocomplete="off" spellcheck="false" aria-label="Search clients">
+<div class="viewfilt" id="viewfilt" role="group" aria-label="Clients view">
+<button type="button" class="vf on" data-view="cards" aria-pressed="true" onclick="setClientsView('cards')" data-tip="Cards view" aria-label="Cards view" data-ic="grid"></button>
+<button type="button" class="vf" data-view="list" aria-pressed="false" onclick="setClientsView('list')" data-tip="List view" aria-label="List view" data-ic="list"></button>
+</div>
 </div>
 <div class="sech-act">
 <div class="sech-sec">
-<button class="ghost" type="button" onclick="openSplitSettings()" data-tip="Split-tunnel policy (what bypasses the cascade)">Split</button>
-<button class="ghost" type="button" onclick="openUsage()" data-tip="Traffic history and monthly usage">Usage</button>
-<button class="ghost" type="button" onclick="openAudit()" data-tip="Audit log — recent admin actions">Log</button>
-<button class="ghost" type="button" onclick="doExport()" data-tip="Download a backup (configs + keys)">Backup</button>
+<button class="ghost ibtn" type="button" onclick="openSplitSettings()" data-tip="Split-tunnel policy (what bypasses the cascade)" aria-label="Split"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></button>
+<button class="ghost ibtn" type="button" onclick="openUsage()" data-tip="Traffic history and monthly usage" aria-label="Usage"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/></svg></button>
+<button class="ghost ibtn" type="button" onclick="openAudit()" data-tip="Audit log — recent admin actions" aria-label="Log"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></button>
+<button class="ghost ibtn" type="button" onclick="doExport()" data-tip="Download a backup (configs + keys)" aria-label="Backup"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg></button>
 </div>
 <div class="menuwrap sech-more">
-<button class="ghost" id="morebtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="moremenu" data-tip="More actions">More</button>
+<button class="ghost ibtn" id="morebtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="moremenu" data-tip="More actions" aria-label="More"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
 <div class="menudrop" id="moremenu" role="menu" hidden>
-<button class="menuitem" role="menuitem" type="button" onclick="openSplitSettings();closeMenus()">Split</button>
-<button class="menuitem" role="menuitem" type="button" onclick="openUsage();closeMenus()">Usage</button>
-<button class="menuitem" role="menuitem" type="button" onclick="openAudit();closeMenus()">Log</button>
-<button class="menuitem" role="menuitem" type="button" onclick="doExport();closeMenus()">Backup</button>
+<button class="menuitem" role="menuitem" type="button" onclick="openSplitSettings();closeMenus()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Split</button>
+<button class="menuitem" role="menuitem" type="button" onclick="openUsage();closeMenus()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/></svg>Usage</button>
+<button class="menuitem" role="menuitem" type="button" onclick="openAudit();closeMenus()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Log</button>
+<button class="menuitem" role="menuitem" type="button" onclick="doExport();closeMenus()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>Backup</button>
 </div>
 </div>
-<button class="primary" type="button" onclick="openAdd()" data-tip="Generate a new client config">+ Add client</button>
+<button class="primary" type="button" onclick="openAdd()" data-tip="Generate a new client config" aria-label="Add client"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="add-lbl">Client</span></button>
+</div>
+</div>
+<div class="exitfilt" id="exitfilt" role="group" aria-label="Filter by exit">
+<button type="button" class="xf on" data-xf="all" aria-pressed="true" onclick="setExitFilter('all')">All</button>
+<button type="button" class="xf" data-xf="nl" aria-pressed="false" onclick="setExitFilter('nl')">NL</button>
+<button type="button" class="xf" data-xf="us" aria-pressed="false" onclick="setExitFilter('us')">US</button>
 </div>
 </div>
 <div class="cards bento2" id="cards"></div>
@@ -77,4 +92,8 @@ function setThemeBtn(){var b=document.getElementById('theme');if(!b)return;
 function toggleTheme(){var h=document.documentElement;h.dataset.theme=h.dataset.theme==='light'?'dark':'light';
  try{localStorage.setItem('wgui-theme',h.dataset.theme)}catch(e){}setThemeBtn();}
 setThemeBtn();
-</script><script src="/app.js"></script></body></html>
+</script>
+<script src="/app.js"></script>
+<script src="/cascade.js"></script>
+<script src="/clients.js"></script>
+</body></html>
