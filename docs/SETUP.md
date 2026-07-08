@@ -128,6 +128,9 @@ WGUI_CERT=/etc/wg-ui/cert.pem
 WGUI_KEY=/etc/wg-ui/key.pem
 WGUI_IFACE=wg-cl
 WGUI_EXIT_IP=198.51.100.10
+WGUI_SERVER_PUB=$(wg show wg-cl public-key)   # or paste from wg-cl.conf
+WGUI_ENDPOINT=${IP}:51820
+WGUI_WAN_IFACE=ens3                           # entry-node WAN (for RU-direct split)
 EOF
 
 chown root:wgui /etc/wg-ui/wg-ui.env
@@ -140,12 +143,10 @@ a valid session cookie. Old env files with `WGUI_PASS_SHA256` (legacy salted
 SHA-256) still work as a fallback; migrate by adding `WGUI_PASS_PBKDF2` as above.
 
 `WGUI_EXIT_IP` is the expected cascade egress IP — the panel probes it to show the
-tunnel as healthy. See `deploy/wg-ui.env.example` for every tunable and its
-default; the block above is the minimum. The same file also carries the values
-`wg-admin.py` bakes into generated client configs (`WGUI_SERVER_PUB`,
-`WGUI_ENDPOINT`, `WGUI_CLIENT_DNS`, `WGUI_CLIENT_MTU`) — set them if your deploy
-differs from the reference. (The live box also sets `WGUI_NAMES`, a leftover
-from `refresh-names.sh` — the panel itself ignores it.)
+tunnel as healthy. `WGUI_SERVER_PUB` + `WGUI_ENDPOINT` are **required** for
+`wg-admin.py add/getconf/regenerate` (the helper refuses to bake client configs
+without them). `WGUI_WAN_IFACE` is **required** for split-server RU-direct.
+See `deploy/wg-ui.env.example` for every tunable and its default.
 
 ---
 

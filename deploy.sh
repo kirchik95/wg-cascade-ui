@@ -37,5 +37,6 @@ echo "→ fixing perms, restarting, health-checking"
   fi
   printf "  service: %s\n" "$(systemctl is-active wg-ui.service)"
   curl -sk --max-time 8 -o /dev/null -w "  https local: %{http_code} in %{time_total}s\n" https://127.0.0.1/login
+  curl -sk --max-time 5 -o /dev/null -w "  healthz: %{http_code}\n" https://127.0.0.1/healthz
 '
 echo "✓ deployed"

@@ -33,6 +33,7 @@ EXIT_SH      = "/opt/wg-ui/exit-route.sh"          # per-client NL/US exit routi
 CLIENT_DIR   = "/etc/wireguard/clients"
 LOCKFILE     = "/etc/wg-ui/.adminlock"
 AUDIT_LOG    = "/var/lib/wg-ui/audit.log"          # append-only admin action log (UI reads it)
+AUDIT_MAX_BYTES = 512 * 1024                       # rotate when larger — keep last half
 SUBNET_PRE   = "10.10.0."
 SERVER_IP    = 1                       # 10.10.0.1 reserved for the server
 
@@ -57,18 +58,33 @@ IFACE      = _ENV.get("WGUI_IFACE", "wg-cl")
 if not re.match(r'^[A-Za-z0-9_-]{1,15}$', IFACE):
     IFACE = "wg-cl"
 WG_CONF    = "/etc/wireguard/%s.conf" % IFACE
-SERVER_PUB = _ENV.get("WGUI_SERVER_PUB", "HoGl+zFzr1b6ldatws6PqYr2n74Rk3+e4ZPgf0Fb5F8=")
-ENDPOINT   = _ENV.get("WGUI_ENDPOINT", "203.0.113.10:51820")
+SERVER_PUB = _ENV.get("WGUI_SERVER_PUB", "")
+ENDPOINT   = _ENV.get("WGUI_ENDPOINT", "")
 DNS        = _ENV.get("WGUI_CLIENT_DNS", "1.1.1.1")
 MTU        = _ENV.get("WGUI_CLIENT_MTU", "1420")
+WAN_IFACE  = _ENV.get("WGUI_WAN_IFACE", "")   # used by split-server.sh via env; validated here for deploy sanity
 
 NAME_RE  = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')
 PUB_RE   = re.compile(r'^[A-Za-z0-9+/]{43}=$')
 ENTRY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.\-]{0,253}(/\d{1,2})?$')   # CIDR / IP / domain
+ENDPOINT_RE = re.compile(r'^[A-Za-z0-9.:_-]{3,253}:\d{1,5}$')
+IFACE_RE = re.compile(r'^[A-Za-z0-9_-]{1,15}$')
 
 def die(msg):
     sys.stdout.write(json.dumps({"ok": False, "error": str(msg)}) + "\n")
     sys.exit(1)
+
+def require_deploy_env(need_wan=False):
+    """Fail fast when client-config / split deploy values are missing — never bake host IPs."""
+    if not PUB_RE.match(SERVER_PUB or ""):
+        die("WGUI_SERVER_PUB unset or invalid in /etc/wg-ui/wg-ui.env")
+    if not ENDPOINT_RE.match(ENDPOINT or ""):
+        die("WGUI_ENDPOINT unset or invalid (host:port) in /etc/wg-ui/wg-ui.env")
+    if need_wan:
+        if not IFACE_RE.match(WAN_IFACE or ""):
+            die("WGUI_WAN_IFACE unset or invalid in /etc/wg-ui/wg-ui.env")
+    elif WAN_IFACE and not IFACE_RE.match(WAN_IFACE):
+        die("WGUI_WAN_IFACE invalid in /etc/wg-ui/wg-ui.env")
 
 def ok(data=None):
     out = {"ok": True}
@@ -207,6 +223,16 @@ def paths(name):
 def audit(op, detail=""):
     """Append-only admin-action log; the web service reads it for the UI Audit view."""
     try:
+        try:
+            if os.path.getsize(AUDIT_LOG) > AUDIT_MAX_BYTES:
+                with open(AUDIT_LOG, "rb") as f:
+                    f.seek(max(0, os.path.getsize(AUDIT_LOG) - AUDIT_MAX_BYTES // 2))
+                    f.readline()  # drop partial first line
+                    keep = f.read()
+                with open(AUDIT_LOG, "wb") as f:
+                    f.write(keep)
+        except OSError:
+            pass
         with open(AUDIT_LOG, "a") as f:
             f.write(json.dumps({"ts": int(time.time()), "op": op, "detail": detail}) + "\n")
         os.chmod(AUDIT_LOG, 0o644)
@@ -449,6 +475,11 @@ def main():
     if len(sys.argv) < 2:
         die("no operation")
     op, a = sys.argv[1], sys.argv[2:]
+    # Ops that bake client configs or touch routing need deploy values set explicitly.
+    if op in ("add", "getconf", "regenerate"):
+        require_deploy_env()
+    elif op in ("splitserver", "splitsave"):
+        require_deploy_env(need_wan=True)
     lock = open(LOCKFILE, "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     if   op == "list":                    ok({"clients": load_clients()})

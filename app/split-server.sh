@@ -5,7 +5,25 @@
 # keeps going through the cascade (-> DO). Applies to ALL clients; no per-client
 # config. Idempotent. State in /etc/wg-ui/split-server.state.
 set -u
-IFACE="ens3"
+# WAN iface for RU-direct MASQUERADE / FORWARD — must be set in /etc/wg-ui/wg-ui.env
+# (sudo strips the environment, so we read the file directly).
+IFACE=$(python3 -c '
+import re, sys
+vals = {}
+try:
+    for line in open("/etc/wg-ui/wg-ui.env"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            vals[k.strip()] = v.strip().strip("\"").strip("'\''")
+except Exception:
+    pass
+iface = vals.get("WGUI_WAN_IFACE", "")
+if not re.match(r"^[A-Za-z0-9_-]{1,15}$", iface or ""):
+    sys.stderr.write("split-server: WGUI_WAN_IFACE unset/invalid in /etc/wg-ui/wg-ui.env\n")
+    sys.exit(1)
+print(iface)
+') || exit 1
 SUBNET="10.10.0.0/24"
 MARK="0x64"
 PRI=1000

@@ -1,25 +1,25 @@
 function cardStructSig(p){
  return [p.pubkey,p.name,p.enabled?1:0,p.online?1:0,p.expires||0,clientExit(p),p.endpoint||'',p.ip||'',!!(p.spark&&p.spark.length>1),_clientsView].join('|');
 }
-function clientActsHTML(p,pj,nj,exit){
+function clientActsHTML(p,exit){
  const en=p.enabled?'Disable':'Enable';
- return '<button class="ib" data-tip="Show config / QR" aria-label="Show config / QR" type="button" onclick=\'showCfg('+pj+')\'>'+ic('qr')+'</button>'
-  +'<button class="ib" data-tip="Edit" aria-label="Edit" type="button" onclick=\'openEdit('+pj+','+nj+','+(p.expires||0)+','+JSON.stringify(exit)+')\'>'+ic('edit')+'</button>'
-  +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+en+'" aria-label="'+en+'" type="button" onclick=\'toggleEn('+pj+','+(p.enabled?'true':'false')+')\'>'+ic('pow')+'</button>'
-  +'<button class="ib danger" data-tip="Delete" aria-label="Delete" type="button" onclick=\'confirmDel('+pj+','+nj+')\'>'+ic('trash')+'</button>';
+ const pk=esc(p.pubkey), nm=esc(p.name);
+ return '<button class="ib" data-tip="Show config / QR" aria-label="Show config / QR" type="button" data-act="cfg" data-pk="'+pk+'">'+ic('qr')+'</button>'
+  +'<button class="ib" data-tip="Edit" aria-label="Edit" type="button" data-act="edit" data-pk="'+pk+'" data-name="'+nm+'" data-exp="'+(p.expires||0)+'" data-exit="'+esc(exit)+'">'+ic('edit')+'</button>'
+  +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+en+'" aria-label="'+en+'" type="button" data-act="toggle" data-pk="'+pk+'" data-en="'+(p.enabled?'1':'0')+'">'+ic('pow')+'</button>'
+  +'<button class="ib danger" data-tip="Delete" aria-label="Delete" type="button" data-act="del" data-pk="'+pk+'" data-name="'+nm+'">'+ic('trash')+'</button>';
 }
 function clientCardHTML(p){
- const pj=JSON.stringify(p.pubkey),nj=JSON.stringify(p.name);
  const exit=clientExit(p);
  const prevAge=_pv['age-'+p.pubkey];
  const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
  _pv['age-'+p.pubkey]=p.age;
  const prx=_pv['rx-'+p.pubkey],ptx=_pv['tx-'+p.pubkey];
- const acts=clientActsHTML(p,pj,nj,exit);
- const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="Click to switch exit" aria-label="Switch exit: '+exit.toUpperCase()+'" onclick=\'toggleExit('+pj+','+JSON.stringify(exit)+')\'>'+exit.toUpperCase()+'</button>'
+ const acts=clientActsHTML(p,exit);
+ const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="Click to switch exit" aria-label="Switch exit: '+exit.toUpperCase()+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
   +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="Temporary client (auto-disables)">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
   +(p.enabled?'':'<span class="chip">disabled</span>');
- const xfer='<div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+p.pubkey+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+p.pubkey+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
+ const xfer='<div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+esc(p.pubkey)+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+esc(p.pubkey)+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
  const cls='crow '+(_clientsView==='list'?'crow-list ':'')+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'');
  const head='<div class="'+cls+'" data-pk="'+esc(p.pubkey)+'" data-ssig="'+esc(cardStructSig(p))+'">';
  if(_clientsView==='list'){
@@ -28,7 +28,7 @@ function clientCardHTML(p){
    +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
    +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</span>'
    +'<span class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</span>'
-   +'<span class="ipa mono" data-tip="Tunnel address">'+p.ip+'</span>'
+   +'<span class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</span>'
    +xfer+'</div></div>'
    +'<div class="acts">'+acts+'</div></div>';
  }
@@ -36,8 +36,8 @@ function clientCardHTML(p){
  return head
   +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+ic(devIcon(p.name),20)+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
   +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
-  +'<div class="ipa mono" data-tip="Tunnel address">'+p.ip+'</div>'
-  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+p.endpoint+'</div>':'')+'</div></div>'
+  +'<div class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</div>'
+  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div></div>'
   +'<div class="stat '+(p.online?'':'o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
   +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div>'+xfer
   +((p.mrx||p.mtx)?'<div class="mo mono" data-tip="Traffic this calendar month">'+ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx)+'</div>':'')+'</div>'
@@ -47,7 +47,7 @@ function clientCardHTML(p){
 function emptyStateHTML(kind){
  if(kind==='none'){
   return '<div class="empty">'+ic('plus',28)+'<b>'+tr('No clients yet')+'</b><p>'+tr('Create a client to generate a WireGuard config and QR code.')+'</p>'
-   +'<button class="primary" type="button" onclick="openAdd()">'+tr('+ Add client')+'</button></div>';
+   +'<button class="primary" type="button" data-act="add">'+tr('+ Add client')+'</button></div>';
  }
  return '<div class="empty">'+ic('search',28)+'<b>'+tr('No matches')+'</b><p>'+tr('Try a different name or IP.')+'</p></div>';
 }
@@ -204,7 +204,7 @@ function setClientsView(v){
 }
 
 if(typeof navigator!=='undefined'&&'serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){})}
-setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindSearch();renderSkeleton();tick();setInterval(tick,5000);
+setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();renderSkeleton();tick();setInterval(tick,5000);
 if(typeof window!=='undefined'&&window.addEventListener){
  window.addEventListener('online',()=>{setOffline(false);tick();});
  window.addEventListener('offline',()=>setOffline(true));

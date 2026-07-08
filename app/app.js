@@ -231,6 +231,23 @@ function setOffline(on){
   el.innerHTML=ic('warn',15)+'<span>'+tr('Connection lost — reconnecting…')+'</span>';}
  else{if(el.classList&&el.classList.remove)el.classList.remove('show');el.innerHTML='';}
 }
+function renderSampler(s){
+ const el=document.getElementById('alert');
+ if(!el||!s)return;
+ const stale=s.age>=0&&s.age>30;
+ const bad=!!s.err||stale;
+ if(!bad){
+  if(el.__sampler){el.__sampler=0;if(!el.__k){el.style.display='none';el.innerHTML='';}}
+  return;
+ }
+ /* Don't clobber a cascade-down alert */
+ if(el.__k&&el.style.display!=='none'&&!el.__sampler)return;
+ el.__sampler=1;el.style.display='flex';el.className='alert warn';
+ const msg=s.err
+  ?('Sampler error: '+esc(s.err))
+  :('Status sampler stale ('+s.age+'s) — live peer data may lag');
+ el.innerHTML=ic('warn',17)+'<div><b>'+tr('Degraded')+'</b> <span>'+msg+'</span></div>';
+}
 function renderHost(h){
  const el=document.getElementById('hostbar');
  if(!h){el.style.display='none';return}
@@ -335,7 +352,7 @@ async function tick(){
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return}
   const d=await r.json();
   setOffline(false);
-  renderAlert(d.tunnel);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
+  renderAlert(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
   thrPills(d.thr.cur);
   _sparkSeries=d.thr.series||[];
   document.getElementById('spark').innerHTML=spark(_sparkSeries);
@@ -383,7 +400,7 @@ function openAdd(){openModal(
  +'<label class="fl">Exit<select id="ce" class="fsel" data-tip="Cascade exit for this client (NL default)"><option value="nl">Netherlands (NL)</option><option value="us">United States (US)</option></select></label>'
  +'<label class="fl">Expires<select id="cx" class="fsel"><option value="0">Never</option><option value="1">in 1 day</option><option value="7">in 7 days</option><option value="30">in 30 days</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
- +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">Cancel</button><button class="primary" id="ab" type="button" onclick="doAdd()">Create</button></div>');
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" id="ab" type="button" data-act="do-add">Create</button></div>');
  setTimeout(()=>{const i=document.getElementById('cn');if(!i)return;i.focus();i.onkeydown=e=>{if(e.key==="Enter")doAdd()}},30);}
 async function doAdd(){const n=document.getElementById('cn').value.trim();const days=+document.getElementById('cx').value;
  const exit=clientExit({exit:document.getElementById('ce').value});
@@ -399,15 +416,15 @@ function showResult(r){
  if(r.daily&&r.daily.length>1){const c=dayChart(r.daily,90);
   dh='<div class="ulh">'+ic('chart',13)+' Daily traffic · 30 days</div>'+c.head+c.svg+c.dates;}
  openModal(
- '<div class="mtitle" id="mtitle">'+ic('check',18)+' '+esc(r.name)+'<span class="mip">'+r.ip+'</span></div>'
+ '<div class="mtitle" id="mtitle">'+ic('check',18)+' '+esc(r.name)+'<span class="mip">'+esc(r.ip)+'</span></div>'
  +(r.split?'<div class="splitnote">'+ic('branch')+'<span>Split-tunnel: RU &amp; local IPs go <b>direct</b>, the rest via the cascade. Large config — import the <b>.conf file</b> (too big for QR), then re-import to apply.</span></div>':'')
  +(r.qr?'<div class="qrwrap"><img src="data:image/png;base64,'+r.qr+'" alt="WireGuard QR for '+esc(r.name)+'"></div>':'')
  +'<pre class="conf">'+esc(r.conf)+'</pre>'
  +dh
  +(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' Recent connections</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'')
- +'<div class="mrow"><button class="ghost" type="button" onclick="copyConf()">'+ic('copy')+' Copy</button>'
- +'<button class="ghost" type="button" onclick="dlConf()">'+ic('dl')+' .conf</button>'
- +'<button class="primary" type="button" onclick="closeModal()">Done</button></div>');
+ +'<div class="mrow"><button class="ghost" type="button" data-act="copy">'+ic('copy')+' Copy</button>'
+ +'<button class="ghost" type="button" data-act="dl">'+ic('dl')+' .conf</button>'
+ +'<button class="primary" type="button" data-act="close">Done</button></div>');
  window.__cf=r.conf;window.__cn=r.name;}
 function copyConf(){navigator.clipboard.writeText(window.__cf).then(()=>toast('Config copied'),()=>toast('Copy failed'))}
 function dlConf(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([window.__cf],{type:'text/plain'}));
@@ -434,7 +451,7 @@ async function openAudit(){
  let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent='failed to load';return}
  const ev=r.events||[];
  let h=ev.length?'<div class="connlist">'+ev.map(e=>'<div class="aurow"><span class="aop '+aopcls(e.op)+'">'+esc(e.op)+'</span><span class="ad">'+esc(e.detail||'')+'</span><span class="at">'+fmtTime(e.ts)+'</span></div>').join('')+'</div>':'<p class="mtext">No admin actions logged yet.</p>';
- h+='<div class="mrow"><button class="primary" type="button" onclick="closeModal()">Done</button></div>';
+ h+='<div class="mrow"><button class="primary" type="button" data-act="close">Done</button></div>';
  const b=document.getElementById('aubody');b.className='';b.innerHTML=h;applyI18n(b);
 }
 async function openUsage(){
@@ -486,7 +503,7 @@ function renderUsage(r){
     +'<div class="ub"><div class="ubf" style="width:'+(t/cmax*100).toFixed(1)+'%"></div></div>'
     +'<div class="ut mono">'+fmtB(t)+'</div></div>';});}
  }
- h+='<div class="mrow"><button class="primary" type="button" onclick="closeModal()">Done</button></div>';
+ h+='<div class="mrow"><button class="primary" type="button" data-act="close">Done</button></div>';
  const b=document.getElementById('ubody');b.className='';b.innerHTML=h;applyI18n(b);
  if(n)bindDayChart(b,d);
 }
@@ -500,15 +517,15 @@ function renderSplit(r){
  const m=r.meta||{},srv=r.server||{},on=(srv.state==='on');
  let h='<div class="sstoggle '+(on?'on':'')+'"><div><div class="sst-t">Route RU traffic direct</div>'
    +'<div class="sst-s">'+(on?'ON — RU exits via VDSina (RU IP); the rest via the cascade (NL)':'OFF — all client traffic goes through the cascade (NL exit)')+'</div></div>'
-   +'<button class="switch '+(on?'on':'')+'" type="button" role="switch" aria-checked="'+(on?'true':'false')+'" aria-label="Route RU traffic direct" onclick="splitServer('+(on?'false':'true')+')" data-tip="'+(on?'Turn OFF':'Turn ON')+'"><span></span></button></div>'
+   +'<button class="switch '+(on?'on':'')+'" type="button" role="switch" aria-checked="'+(on?'true':'false')+'" aria-label="Route RU traffic direct" data-act="split-server" data-on="'+(on?'0':'1')+'" data-tip="'+(on?'Turn OFF':'Turn ON')+'"><span></span></button></div>'
    +'<div class="ssrow"><div><b>'+(m.ru_count||0).toLocaleString()+'</b> RU subnets · <b>'+(srv.ipset||m.direct_count||0).toLocaleString()+'</b> in set</div>'
    +'<div class="dim">'+(m.built_at?('built '+m.built_at):'')+'</div></div>'
    +'<label class="fl">Also route DIRECT — extra IPs / CIDRs / domains, one per line'
    +'<textarea id="sx" class="ssarea" spellcheck="false" placeholder="example.com&#10;203.0.113.0/24">'+esc((r.extra||[]).join("\n"))+'</textarea></label>'
    +'<div class="merr" id="me" role="alert"></div>'
-   +'<div class="ssbtns"><button class="ghost" id="srf" type="button" onclick="splitSave(true)" data-tip="Re-download the RU list from the internet">'+ic('cal')+' Refresh RU list</button></div>'
+   +'<div class="ssbtns"><button class="ghost" id="srf" type="button" data-act="split-save" data-refresh="1" data-tip="Re-download the RU list from the internet">'+ic('cal')+' Refresh RU list</button></div>'
    +'<div class="splitnote">'+ic('branch')+'<span>Server-side &amp; global — applies to <b>all clients at once</b>, no per-client setup and no re-import. RU sites see VDSina’s RU IP.</span></div>'
-   +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">Close</button><button class="primary" id="ssave" type="button" onclick="splitSave(false)">Save list</button></div>';
+   +'<div class="mrow"><button class="ghost" type="button" data-act="close">Close</button><button class="primary" id="ssave" type="button" data-act="split-save" data-refresh="0">Save list</button></div>';
  const b=document.getElementById('sbody');b.className='';b.innerHTML=h;applyI18n(b);
 }
 async function splitServer(on){
@@ -537,7 +554,7 @@ function openEdit(pub,name,exp,exit){_act=pub;window.__en=name;window.__ex=clien
  +'<option value="7">'+tr('in 7 days')+'</option>'
  +'<option value="30">'+tr('in 30 days')+'</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
- +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">Cancel</button><button class="primary" type="button" onclick="doEdit()">Save</button></div>');
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" type="button" data-act="do-edit">Save</button></div>');
  setTimeout(()=>{const i=document.getElementById('rn');if(!i)return;i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doEdit()}},30);}
 async function doEdit(){
  const n=document.getElementById('rn').value.trim(),x=document.getElementById('rx').value;
@@ -565,8 +582,8 @@ function confirmLogoutAll(){
  openModal(
   '<div class="mtitle" id="mtitle">'+ic('warn',18)+' '+tr('Sign out everywhere?')+'</div>'
   +'<p class="mtext">'+tr("This revokes sessions on all devices. You'll need to sign in again.")+'</p>'
-  +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">'+tr('Cancel')+'</button>'
-  +'<button class="btn-danger" type="button" onclick="logoutAll()">'+tr('Sign out all devices')+'</button></div>');
+  +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button>'
+  +'<button class="btn-danger" type="button" data-act="logout-all">'+tr('Sign out all devices')+'</button></div>');
 }
 async function logoutAll(){
  try{await fetch('/logout-all',{method:'POST',headers:{'X-CSRF':CSRF}})}catch(e){}
@@ -575,7 +592,7 @@ async function logoutAll(){
 function confirmDel(pub,name){_act=pub;openModal(
  '<div class="mtitle" id="mtitle">'+ic('trash',18)+' Delete '+esc(name)+'?</div>'
  +'<p class="mtext">This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.</p>'
- +'<div class="mrow"><button class="ghost" type="button" onclick="closeModal()">Cancel</button><button class="btn-danger" type="button" onclick="doDel()">Delete</button></div>');}
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="btn-danger" type="button" data-act="do-del">Delete</button></div>');}
 async function doDel(){const r=await admin({op:'delete',pubkey:_act});closeModal();if(!r||!r.ok)toast((r&&r.error)||'failed');tick();}
 
 /* menus */
@@ -594,6 +611,40 @@ function bindMenus(){
  if(acct&&acct.addEventListener)acct.addEventListener('click',e=>{e.stopPropagation();toggleMenu('acctbtn','acctmenu');});
  if(more&&more.addEventListener)more.addEventListener('click',e=>{e.stopPropagation();toggleMenu('morebtn','moremenu');});
  if(document.addEventListener)document.addEventListener('click',()=>closeMenus());
+}
+
+/* Event delegation — no inline onclick (keeps CSP free of unsafe-inline scripts). */
+function bindActions(){
+ if(document.__actsBound||!document.addEventListener)return;document.__actsBound=1;
+ document.addEventListener('click',e=>{
+  const t=e.target&&e.target.closest&&e.target.closest('[data-act]');
+  if(!t)return;
+  const a=t.getAttribute('data-act');
+  if(a==='close'){closeModal();return;}
+  if(a==='add'||a==='do-add'){if(a==='add')openAdd();else doAdd();return;}
+  if(a==='copy'){copyConf();return;}
+  if(a==='dl'){dlConf();return;}
+  if(a==='do-edit'){doEdit();return;}
+  if(a==='do-del'){doDel();return;}
+  if(a==='logout-all'){logoutAll();return;}
+  if(a==='logout-confirm'){confirmLogoutAll();return;}
+  if(a==='cfg'){showCfg(t.getAttribute('data-pk'));return;}
+  if(a==='edit'){openEdit(t.getAttribute('data-pk'),t.getAttribute('data-name'),+(t.getAttribute('data-exp')||0),t.getAttribute('data-exit'));return;}
+  if(a==='toggle'){toggleEn(t.getAttribute('data-pk'),t.getAttribute('data-en')==='1');return;}
+  if(a==='del'){confirmDel(t.getAttribute('data-pk'),t.getAttribute('data-name'));return;}
+  if(a==='exit'){toggleExit(t.getAttribute('data-pk'),t.getAttribute('data-exit'));return;}
+  if(a==='split-save'){splitSave(t.getAttribute('data-refresh')==='1');return;}
+  if(a==='split-server'){splitServer(t.getAttribute('data-on')==='1');return;}
+  if(a==='lang'){toggleLang();return;}
+  if(a==='theme'){toggleTheme();return;}
+  if(a==='view'){setClientsView(t.getAttribute('data-view'));return;}
+  if(a==='exit-filter'){setExitFilter(t.getAttribute('data-xf'));return;}
+  if(a==='split'){openSplitSettings();closeMenus();return;}
+  if(a==='usage'){openUsage();closeMenus();return;}
+  if(a==='audit'){openAudit();closeMenus();return;}
+  if(a==='export'){doExport();closeMenus();return;}
+  if(a==='modal-bg'){if(e.target===t)closeModal();return;}
+ });
 }
 
 /* search */

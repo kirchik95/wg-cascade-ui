@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, base64, hmac, hashlib, sqlite3, subprocess, threading, sys
+import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -14,12 +14,24 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 from exit_model import client_exit, normalize_exit
+import auth
+from auth import (
+    BODY_ADMIN_MAX, BODY_LOGIN_MAX, LOGIN_MAX, SESSION_TTL,
+    bump_session_gen, check_body_length, check_token, creds_ok, csrf_for,
+    login_blocked, login_failed, login_ok, make_token,
+)
 
-USER        = os.environ.get("WGUI_USER", "admin")
-SALT        = os.environ.get("WGUI_SALT", "")
-PASS_SHA    = os.environ.get("WGUI_PASS_SHA256", "")          # legacy scheme, fallback
-PASS_PBKDF2 = os.environ.get("WGUI_PASS_PBKDF2", "")          # "iterations$hexdigest", preferred
-SECRET      = os.environ.get("WGUI_SESSION_SECRET", "").encode()
+# Re-export auth mutables so existing tests can patch wgui.USER / SECRET / …
+USER = auth.USER
+SALT = auth.SALT
+PASS_SHA = auth.PASS_SHA
+PASS_PBKDF2 = auth.PASS_PBKDF2
+SECRET = auth.SECRET
+GEN_FILE = auth.GEN_FILE
+_fails = auth._fails
+_fails_lock = auth._fails_lock
+_FAILS_MAX_IPS = auth._FAILS_MAX_IPS
+
 PORT        = int(os.environ.get("WGUI_PORT", "443"))
 CERT        = os.environ.get("WGUI_CERT", "/etc/wg-ui/cert.pem")
 KEY         = os.environ.get("WGUI_KEY", "/etc/wg-ui/key.pem")
@@ -31,91 +43,33 @@ EXIT_IP     = os.environ.get("WGUI_EXIT_IP", "198.51.100.10")      # expected NL
 US_EXIT_IP  = os.environ.get("WGUI_US_EXIT_IP", "")                 # expected US egress (empty = skip probe match)
 SRC_IP      = os.environ.get("WGUI_SRC_IP", "10.10.0.1")            # source for NL egress probe
 ONLINE_S    = int(os.environ.get("WGUI_ONLINE_SECS", "180"))
-SESSION_TTL = int(os.environ.get("WGUI_SESSION_TTL", str(7 * 24 * 3600)))
 SAMPLE_S    = int(os.environ.get("WGUI_SAMPLE_SECS", "5"))
 ADMIN       = ["sudo", "-n", "/usr/bin/python3", "/opt/wg-ui/wg-admin.py"]
 DB          = os.environ.get("WGUI_DB", "/var/lib/wg-ui/history.db")
 SPLIT_STATE = os.environ.get("WGUI_SPLIT_STATE", "/etc/wg-ui/split-server.state")
 AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/lib/wg-ui/audit.log")
-GEN_FILE    = os.environ.get("WGUI_GEN", "/var/lib/wg-ui/session.gen")
 MAX_CONN    = int(os.environ.get("WGUI_MAX_CONN", "64"))
+_STARTED_AT = time.time()
 
-# ---------------------------------------------------------------- auth helpers
-def creds_ok(u, p):
-    if PASS_PBKDF2:
-        try:
-            it, hx = PASS_PBKDF2.split("$", 1)
-            dk = hashlib.pbkdf2_hmac("sha256", p.encode(), SALT.encode(), int(it)).hex()
-            good = hmac.compare_digest(dk, hx)
-        except Exception:
-            good = False
-    else:   # legacy: single salted SHA-256 (kept so existing env files still work)
-        ph = hashlib.sha256((SALT + p).encode()).hexdigest()
-        good = hmac.compare_digest(ph, PASS_SHA) and bool(PASS_SHA)
-    return hmac.compare_digest(u, USER) and good
-
-def _b64e(b): return base64.urlsafe_b64encode(b).decode().rstrip("=")
-def _b64d(s): return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
-
-def session_gen():
-    """Server-side session generation; bumping it invalidates every issued token."""
+def log_event(event, **fields):
+    """Structured JSON log line to stderr (picked up by journald under systemd)."""
+    row = {"ts": int(time.time()), "event": event}
+    row.update(fields)
     try:
-        with open(GEN_FILE) as f:
-            return int(f.read().strip() or 0)
+        sys.stderr.write(json.dumps(row, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
     except Exception:
-        return 0
+        pass
 
-def bump_session_gen():
-    g = session_gen() + 1
-    with open(GEN_FILE, "w") as f:
-        f.write(str(g))
-    return g
+def healthz():
+    """Process liveness for deploy/monitoring — no auth, no secrets."""
+    return {
+        "ok": True,
+        "uptime_s": int(time.time() - _STARTED_AT),
+        "sampler": sampler_info(),
+        "threads": {"max_conn": MAX_CONN},
+    }
 
-def make_token(user, exp):
-    msg = ("%s|%d|%d" % (user, exp, session_gen())).encode()
-    return _b64e(msg) + "." + _b64e(hmac.new(SECRET, msg, hashlib.sha256).digest())
-
-def check_token(tok):
-    try:
-        m, s = tok.split(".", 1)
-        msg = _b64d(m)
-        if not hmac.compare_digest(_b64d(s), hmac.new(SECRET, msg, hashlib.sha256).digest()):
-            return None
-        user, exp, gen = msg.decode().split("|")
-        if int(gen) != session_gen():
-            return None
-        return user if int(exp) > int(time.time()) else None
-    except Exception:
-        return None
-
-def csrf_for(user):
-    msg = "csrf|%s|%d" % (user, session_gen())
-    return hmac.new(SECRET, msg.encode(), hashlib.sha256).hexdigest()[:32]
-
-# per-IP login throttle: max LOGIN_MAX failures per LOGIN_WIN, then locked out
-LOGIN_MAX, LOGIN_WIN = 5, 900
-_fails = {}                 # ip -> [fail_ts, ...]
-_fails_lock = threading.Lock()
-
-def login_blocked(ip):
-    now = time.time()
-    with _fails_lock:
-        ts = [t for t in _fails.get(ip, []) if now - t < LOGIN_WIN]
-        if ts:
-            _fails[ip] = ts
-        else:
-            _fails.pop(ip, None)
-        return len(ts) >= LOGIN_MAX
-
-def login_failed(ip):
-    with _fails_lock:
-        if len(_fails) > 1000:      # bound memory under scanner floods
-            _fails.clear()
-        _fails.setdefault(ip, []).append(time.time())
-
-def login_ok(ip):
-    with _fails_lock:
-        _fails.pop(ip, None)
 
 # ------------------------------------------------------------- data collection
 def _dump(iface):
@@ -132,17 +86,58 @@ def load_registry():
     except Exception:
         return None   # not bootstrapped yet
 
-def clients_status():
-    reg = load_registry()
-    live = {}
+def _parse_cl_dump(lines):
+    """Parse wg-cl dump lines → (live, per, eps, rx_total, tx_total)."""
+    live, per, eps = {}, {}, {}
+    rx = tx = 0
+    for ln in lines[1:]:
+        p = ln.split("\t")
+        if len(p) >= 7:
+            r, t = int(p[5]), int(p[6])
+            rx += r; tx += t; per[p[0]] = (r, t)
+        if len(p) >= 8:
+            live[p[0]] = {"ep": "" if p[2] == "(none)" else p[2], "ip": p[3].split("/")[0],
+                          "hs": int(p[4]), "rx": int(p[5]), "tx": int(p[6])}
+            eps[p[0]] = (live[p[0]]["ep"], int(p[4]))
+    return live, per, eps, rx, tx
+
+def _peer_from_dump(lines):
+    """Handshake age / up for the first peer on a cascade exit dump."""
+    if len(lines) < 2:
+        return None
+    p = lines[1].split("\t")
+    hs = int(p[4])
+    return {"age": (int(time.time()) - hs) if hs else -1,
+            "up": bool(hs and (int(time.time()) - hs) < ONLINE_S)}
+
+def wg_peer(iface):
+    """Handshake age / up for the first peer on a cascade exit iface (wg-do / wg-us)."""
     try:
-        for ln in _dump(IFACE)[1:]:
-            p = ln.split("\t")
-            if len(p) >= 8:
-                live[p[0]] = {"ep": "" if p[2] == "(none)" else p[2], "ip": p[3].split("/")[0],
-                              "hs": int(p[4]), "rx": int(p[5]), "tx": int(p[6])}
+        return _peer_from_dump(_dump(iface))
     except Exception:
-        pass
+        return None
+
+# background sampler: throughput ring buffer + cached egress probe + host stats
+_samples = deque(maxlen=120)          # (t, total_rx, total_tx)
+_psamples = deque(maxlen=30)          # (t, {pubkey: (rx, tx)}) — for per-client sparklines
+_egress = {                           # per-exit egress probe cache
+    "nl": {"ok": False, "seen": None, "at": 0},
+    "us": {"ok": False, "seen": None, "at": 0},
+}
+_host = {"cpu": 0, "prev": None}      # cpu% (computed from /proc/stat deltas)
+_live = {}                            # pubkey -> {ep,ip,hs,rx,tx} from last wg-cl dump
+_exit_peers = {"nl": None, "us": None}  # cached wg_peer() for cascade exits
+_month_usage = {}                     # pubkey -> {rx,tx} calendar-month totals
+_status_snap = None                   # last assembled /api/status payload
+_sampler_meta = {"ok_at": 0, "err": None, "err_at": 0}
+_lock = threading.Lock()
+
+def clients_status():
+    """Assemble peer rows from sampler caches — no wg dump on the request path."""
+    reg = load_registry()
+    with _lock:
+        live = dict(_live)
+        mu = dict(_month_usage)
     now = int(time.time())
     if reg is None:   # registry not bootstrapped yet -> derive from live peers
         reg = []
@@ -153,7 +148,6 @@ def clients_status():
             except Exception:
                 nm = pk[:8]
             reg.append({"name": nm, "ip": ip, "pubkey": pk, "enabled": True})
-    mu = usage_month()
     sp = client_sparks()
     out = []
     for c in reg:
@@ -172,29 +166,6 @@ def clients_status():
                     "spark": sp.get(c["pubkey"], [])[-24:]})
     out.sort(key=lambda x: (not x["online"], not x["enabled"], x["name"].lower()))
     return out
-
-def wg_peer(iface):
-    """Handshake age / up for the first peer on a cascade exit iface (wg-do / wg-us)."""
-    try:
-        lines = _dump(iface)
-        if len(lines) < 2:
-            return None
-        p = lines[1].split("\t")
-        hs = int(p[4])
-        return {"age": (int(time.time()) - hs) if hs else -1,
-                "up": bool(hs and (int(time.time()) - hs) < ONLINE_S)}
-    except Exception:
-        return None
-
-# background sampler: throughput ring buffer + cached egress probe + host stats
-_samples = deque(maxlen=120)          # (t, total_rx, total_tx)
-_psamples = deque(maxlen=30)          # (t, {pubkey: (rx, tx)}) — for per-client sparklines
-_egress = {                           # per-exit egress probe cache
-    "nl": {"ok": False, "seen": None, "at": 0},
-    "us": {"ok": False, "seen": None, "at": 0},
-}
-_host = {"cpu": 0, "prev": None}      # cpu% (computed from /proc/stat deltas)
-_lock = threading.Lock()
 
 def _read_cpu():
     with open("/proc/stat") as f:
@@ -250,32 +221,57 @@ def _probe_egress():
         us_ok, us_ip = False, None
     return {"nl": (nl_ok, nl_ip), "us": (us_ok, us_ip)}
 
+def _sampler_note(ok=True, err=None):
+    with _lock:
+        if ok:
+            _sampler_meta["ok_at"] = int(time.time())
+            _sampler_meta["err"] = None
+        else:
+            _sampler_meta["err"] = str(err)[:200] if err else "error"
+            _sampler_meta["err_at"] = int(time.time())
+
+def sampler_info():
+    with _lock:
+        m = dict(_sampler_meta)
+    return {
+        "ok_at": m.get("ok_at", 0),
+        "err": m.get("err"),
+        "err_at": m.get("err_at", 0),
+        "age": (int(time.time()) - m["ok_at"]) if m.get("ok_at") else -1,
+    }
+
 def _sampler():
     i = 0
     while True:
         per = {}; eps = {}
         try:
-            rx = tx = 0
-            for ln in _dump(IFACE)[1:]:
-                p = ln.split("\t")
-                if len(p) >= 7:
-                    r, t = int(p[5]), int(p[6])
-                    rx += r; tx += t; per[p[0]] = (r, t)
-                if len(p) >= 8:
-                    eps[p[0]] = ("" if p[2] == "(none)" else p[2], int(p[4]))
+            live, per, eps, rx, tx = _parse_cl_dump(_dump(IFACE))
             with _lock:
                 ts = int(time.time())
+                _live.clear(); _live.update(live)
                 _samples.append((ts, rx, tx))
                 if per:
                     _psamples.append((ts, per))
-        except Exception:
-            pass
+            _sampler_note(True)
+        except Exception as e:
+            _sampler_note(False, e)
+        # Cascade exit peer health — cached for tunnel(); request path never dumps.
+        for key, iface in (("nl", DO_IFACE), ("us", US_IFACE)):
+            try:
+                peer = _peer_from_dump(_dump(iface))
+            except Exception:
+                peer = None
+            with _lock:
+                _exit_peers[key] = peer
         if eps:
             try: log_connections(eps)
             except Exception: pass
         if per and i % 12 == 0:        # persist per-client usage every ~60s
             try:
                 record_usage(per)
+                mu = usage_month()
+                with _lock:
+                    _month_usage.clear(); _month_usage.update(mu)
             except Exception:
                 pass
         if i and i % 720 == 0:         # auto-disable expired clients ~hourly
@@ -301,6 +297,10 @@ def _sampler():
                         _egress[key].update(ok=ok_, seen=ip, at=now)
             except Exception:
                 pass
+        try:
+            refresh_status_cache()
+        except Exception:
+            pass
         i += 1
         time.sleep(SAMPLE_S)
 
@@ -350,9 +350,11 @@ def _exit_status(key, iface, expect_ip, peer):
     }
 
 def tunnel():
+    with _lock:
+        peers = {k: (dict(v) if isinstance(v, dict) else None) for k, v in _exit_peers.items()}
     exits = {
-        "nl": _exit_status("nl", DO_IFACE, EXIT_IP, wg_peer(DO_IFACE)),
-        "us": _exit_status("us", US_IFACE, US_EXIT_IP or None, wg_peer(US_IFACE)),
+        "nl": _exit_status("nl", DO_IFACE, EXIT_IP, peers.get("nl")),
+        "us": _exit_status("us", US_IFACE, US_EXIT_IP or None, peers.get("us")),
     }
     any_ok = any(e["ok"] for e in exits.values())
     any_wg = any(e["wg_up"] for e in exits.values())
@@ -366,9 +368,21 @@ def rud_on():
     except Exception:
         return False
 
+def refresh_status_cache():
+    """Build /api/status payload from caches; called by the sampler thread."""
+    global _status_snap
+    snap = {"now": int(time.time()), "tunnel": tunnel(), "host": host(), "rud": rud_on(),
+            "peers": clients_status(), "thr": throughput(), "sampler": sampler_info()}
+    with _lock:
+        _status_snap = snap
+    return json.loads(json.dumps(snap))
+
 def status():
-    return {"now": int(time.time()), "tunnel": tunnel(), "host": host(), "rud": rud_on(),
-            "peers": clients_status(), "thr": throughput()}
+    with _lock:
+        snap = _status_snap
+    if snap is None:
+        return refresh_status_cache()
+    return json.loads(json.dumps(snap))
 
 def call_admin(argv, timeout=30):
     try:
@@ -432,10 +446,20 @@ def connections_for(pub, limit=20):
         return []
 
 def audit_tail(limit=50):
+    """Read the last `limit` JSON lines without loading the whole file into memory."""
     try:
-        with open(AUDIT_LOG) as f:
-            lines = f.read().strip().splitlines()[-limit:]
-        return [json.loads(l) for l in reversed(lines) if l.strip()]
+        with open(AUDIT_LOG, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 4096
+            data = b""
+            while size > 0 and data.count(b"\n") <= limit:
+                step = min(block, size)
+                size -= step
+                f.seek(size)
+                data = f.read(step) + data
+            lines = [l for l in data.decode("utf-8", "replace").splitlines() if l.strip()][-limit:]
+        return [json.loads(l) for l in reversed(lines)]
     except Exception:
         return []
 
@@ -501,7 +525,7 @@ def asset(name):
         return f.read()
 
 
-CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+CSP = ("default-src 'self'; script-src 'self'; "
        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; "
        "frame-ancestors 'none'; form-action 'self'")
@@ -519,7 +543,8 @@ class H(BaseHTTPRequestHandler):
         self.request.do_handshake()
         super().setup()
 
-    def _send(self, code, body=b"", ctype="text/plain", extra=None):
+    def _send(self, code, body=b"", ctype="text/plain", extra=None, _log=True):
+        t0 = getattr(self, "_t0", None)
         self.send_response(code)
         if ctype:
             self.send_header("Content-Type", ctype)
@@ -534,6 +559,14 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
+        if _log:
+            path = urlparse(self.path).path
+            # Skip noisy public assets + high-frequency status polls
+            if path not in ("/api/status", "/healthz") and not path.startswith(
+                    ("/app.", "/icon", "/inter.", "/sw.js", "/manifest", "/cascade.", "/clients.")):
+                ms = int((time.time() - t0) * 1000) if t0 else None
+                log_event("http", method=self.command, path=path, status=code,
+                          ms=ms, ip=self.client_address[0])
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj).encode(), "application/json", {"Cache-Control": "no-store"})
@@ -545,15 +578,25 @@ class H(BaseHTTPRequestHandler):
                 return check_token(part[len("wgui_session="):])
         return None
 
-    def _body(self):
-        n = int(self.headers.get("Content-Length", "0") or 0)
+    def _body(self, limit=BODY_ADMIN_MAX):
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            raise ValueError("bad content-length")
+        check_body_length(n, limit)
         return self.rfile.read(n) if n else b""
 
     def do_GET(self):
+        self._t0 = time.time()
         path = urlparse(self.path).path
+        if path in ("/healthz", "/health"):
+            return self._json(200, healthz())
         # PWA assets — public (no sensitive data), so the install/login page can load them
         _CT = {"/app.css": "text/css",
                "/app.js": "application/javascript",
+               "/boot.js": "application/javascript",
+               "/theme.js": "application/javascript",
+               "/login.js": "application/javascript",
                "/cascade.js": "application/javascript",
                "/clients.js": "application/javascript",
                "/icon.svg": "image/svg+xml",
@@ -620,12 +663,17 @@ class H(BaseHTTPRequestHandler):
             self._send(404, b"not found")
 
     def do_POST(self):
+        self._t0 = time.time()
         path = urlparse(self.path).path
         if path == "/login":
             ip = self.client_address[0]
             if login_blocked(ip):
+                log_event("login", ok=False, reason="throttled", ip=ip)
                 return self._send(303, b"", None, {"Location": "/login?e=2"})
-            form = parse_qs(self._body().decode("utf-8", "replace"))
+            try:
+                form = parse_qs(self._body(BODY_LOGIN_MAX).decode("utf-8", "replace"))
+            except ValueError:
+                return self._send(413, b"payload too large")
             u = form.get("username", [""])[0]
             p = form.get("password", [""])[0]
             if creds_ok(u, p):
@@ -633,8 +681,10 @@ class H(BaseHTTPRequestHandler):
                 tok = make_token(u, int(time.time()) + SESSION_TTL)
                 cookie = ("wgui_session=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d"
                           % (tok, SESSION_TTL))
+                log_event("login", ok=True, user=u, ip=ip)
                 return self._send(303, b"", None, {"Location": "/", "Set-Cookie": cookie})
             login_failed(ip)
+            log_event("login", ok=False, reason="bad_creds", ip=ip)
             time.sleep(1.0)
             return self._send(303, b"", None, {"Location": "/login?e=1"})
         if path == "/logout-all":
@@ -647,6 +697,7 @@ class H(BaseHTTPRequestHandler):
                 bump_session_gen()
             except Exception as e:
                 return self._json(500, {"ok": False, "error": "cannot bump session gen: %s" % e})
+            log_event("logout_all", user=user, ip=self.client_address[0])
             return self._json(200, {"ok": True})
         if path == "/api/admin":
             user = self._user()
@@ -655,7 +706,11 @@ class H(BaseHTTPRequestHandler):
             if not hmac.compare_digest(self.headers.get("X-CSRF", ""), csrf_for(user)):
                 return self._json(403, {"ok": False, "error": "bad csrf token"})
             try:
-                b = json.loads(self._body() or b"{}")
+                raw = self._body(BODY_ADMIN_MAX)
+            except ValueError:
+                return self._json(413, {"ok": False, "error": "payload too large"})
+            try:
+                b = json.loads(raw or b"{}")
             except Exception:
                 return self._json(400, {"ok": False, "error": "bad json"})
             op = b.get("op")
@@ -705,19 +760,21 @@ class H(BaseHTTPRequestHandler):
             # split ops run build-split (RU-zone download, up to 90 s) + ipset reload —
             # the default 30 s would kill the helper mid-operation
             res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
+            log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
+                      ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)
         self._send(404, b"not found")
 
     def log_message(self, *a):
-        pass
+        pass  # structured logging via log_event / _send
 
 def main():
     # Fail fast on a missing/placeholder signing key: with a guessable SECRET
     # anyone can mint a valid session cookie, so refusing to start is safer
     # than serving. Same for a missing password hash.
-    if len(SECRET) < 24 or SECRET.startswith(b"change-me") or SECRET.startswith(b"replace-with"):
+    if len(auth.SECRET) < 24 or auth.SECRET.startswith(b"change-me") or auth.SECRET.startswith(b"replace-with"):
         raise SystemExit("wg-ui: WGUI_SESSION_SECRET is unset, too short (<24) or a placeholder — refusing to start")
-    if not (PASS_PBKDF2 or PASS_SHA):
+    if not (auth.PASS_PBKDF2 or auth.PASS_SHA):
         raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
     threading.Thread(target=_sampler, daemon=True).start()
