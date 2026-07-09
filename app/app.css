@@ -426,7 +426,7 @@ overflow:auto;margin:0 0 14px;max-height:170px;line-height:1.5;font-family:ui-mo
 /* usage / history */
 .stat .mo{color:var(--dim);font-size:11px;margin-top:3px;opacity:.85}
 .monthpills{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
-.monthpill{padding:5px 11px;min-width:0}
+.monthpill{padding:5px 11px;min-width:11em}
 .monthpill .dn,.utotal .dn{color:var(--dn)}.monthpill .up,.utotal .up{color:var(--up)}
 .monthpill .mlbl{color:var(--txt);font-weight:700;letter-spacing:.04em;font-size:11px}
 .monthpill .msum{color:var(--dim);font-variant-numeric:tabular-nums}
