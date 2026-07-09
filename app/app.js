@@ -135,7 +135,7 @@ const RU={
  "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Client":"+ Клиент","+ Add client":"+ Клиент","Add client":"Добавить клиента",
  "Client":"Клиент","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
  "in 7 days":"через 7 дней","in 30 days":"через 30 дней","Cancel":"Отмена","Create":"Создать","Done":"Готово",
- "Copy":"Копировать","Edit":"Изменить","Edit client":"Редактировать клиента","Keep current":"Оставить как есть","Save":"Сохранить",
+ "Copy":"Копировать","Edit":"Изменить","Rename":"Переименовать","Config":"Конфиг","Edit client":"Редактировать клиента","Keep current":"Оставить как есть","Save":"Сохранить",
  "Delete":"Удалить","Recent connections":"Недавние подключения","Daily traffic · 30 days":"Трафик по дням · 30 дней",
  "Audit log":"Журнал действий","Split-tunnel":"Сплит-туннель",
  "Cascade is down":"Каскад упал","Cascade degraded":"Каскад деградировал",
