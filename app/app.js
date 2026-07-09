@@ -130,8 +130,11 @@ let LANG=(function(){try{return localStorage.getItem('wgui-lang')||'ru'}catch(e)
 const RU={
  "client status":"статус клиентов","Throughput":"Трафик","last 5 min":"за 5 мин","Clients":"Клиенты",
  "online":"онлайн","offline":"оффлайн","never":"никогда","reconnecting…":"переподключение…","updated":"обновлено",
- "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL","exit · US":"выход · US","exit":"выход",
+ "collecting throughput…":"собираю данные…","devices":"устройства","device":"устройство","entry · RU":"вход · РФ","RU · entry node":"РФ · входная нода","exit · NL":"выход · NL","exit · US":"выход · US","exit":"выход",
+ "NL exit":"NL выход","US exit":"US выход","wg-cl tunnel":"туннель wg-cl","handshake":"handshake","no handshake":"нет handshake",
  "You":"Вы","Internet":"Интернет","Cascade topology":"Топология каскада","egress checked":"выход проверен","total":"всего","Month":"Месяц",
+ "Load":"Нагрузка","Uptime":"Аптайм","down":"недоступен",
+ "Traffic · 5 min":"Трафик · 5 мин",
  "Exit":"Выход","Netherlands (NL)":"Нидерланды (NL)","United States (US)":"США (US)",
  "All":"Все","Switch exit":"Сменить exit","Switching…":"Переключаю…",
  "cascade up":"каскад работает","tunnel up · no exit":"туннель есть · нет выхода","tunnel down":"туннель упал",
@@ -252,10 +255,13 @@ function thrPills(c){
  const thr=document.getElementById('thr');
  if(!thr.__i){thr.__i=1;thr.innerHTML='<span class="dn">↓ <b id="thrd">0</b></span> <span class="up">↑ <b id="thru">0</b></span> Mbit/s';}
  const cn=document.getElementById('chartnow');
- if(!cn.__i){cn.__i=1;cn.innerHTML='<span class="dn">↓ <b id="cnd">0</b></span> <span class="up">↑ <b id="cnu">0</b></span> Mbit/s';}
+ if(cn&&!cn.__i){
+  cn.__i=1;
+  const dn=LANG==='ru'?'Вниз':'Down',up=LANG==='ru'?'Вверх':'Up';
+  cn.innerHTML='<span class="leg dn"><i></i>'+dn+'</span><span class="leg up"><i></i>'+up+'</span>';
+ }
  const md=mbN(c.down),mu=mbN(c.up);
  tw(document.getElementById('thrd'),'thrd',md,mbF);tw(document.getElementById('thru'),'thru',mu,mbF);
- tw(document.getElementById('cnd'),'cnd',md,mbF);tw(document.getElementById('cnu'),'cnu',mu,mbF);
 }
 function renderHealthChip(t){
  const el=document.getElementById('healthchip');
@@ -306,19 +312,23 @@ function renderHost(h){
  if(!h){el.style.display='none';return}
  el.style.display='flex';
  if(!el.__i){el.__i=1;el.innerHTML=
-   '<div class="ht-h" data-tip="'+esc(tr('VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)'))+'">'+tr('VDSina host')+' <span>'+tr('entry · RU')+'</span></div>'
-  +'<div class="ht-cpu"><span>CPU</span><b id="vcpu">0</b><span>%</span><div class="ht-bar"><i id="cpubar"></i></div></div>'
+   '<div class="ht-h" data-tip="'+esc(tr('VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)'))+'">'+tr('VDSina host')+'</div>'
+  +'<div class="ht-body">'
+  +'<div class="ht-row"><span>CPU</span><b id="vcpu">0%</b></div>'
+  +'<div class="ht-bar"><i id="cpubar"></i></div>'
   +'<div class="ht-row"><span>RAM</span><b id="hbram"></b></div>'
-  +'<div class="ht-row"><span>load avg</span><b id="hbload"></b></div>'
-  +'<div class="ht-row"><span>uptime</span><b id="hbup"></b></div>';applyI18n(el);}
+  +'<div class="ht-row"><span>'+tr('Load')+'</span><b id="hbload"></b></div>'
+  +'<div class="ht-row"><span>'+tr('Uptime')+'</span><b id="hbup"></b></div>'
+  +'</div>';applyI18n(el);}
  const cc=h.cpu>=85?'bad':(h.cpu>=60?'warn':'');
  const bar=document.getElementById('cpubar');
  bar.style.width=Math.min(100,h.cpu)+'%';
- bar.style.background=cc==='bad'?'var(--red)':(cc==='warn'?'var(--amber)':'var(--green)');
- tw(document.getElementById('vcpu'),'cpu',h.cpu,v=>Math.round(v));
+ bar.className=cc?('ht-fill '+cc):'ht-fill';
+ const vcpu=document.getElementById('vcpu');
+ tw(vcpu,'cpu',h.cpu,v=>Math.round(v)+'%');
  const gb=b=>(b/1073741824).toFixed(1);
  document.getElementById('hbram').textContent=gb(h.mem_used)+' / '+gb(h.mem_total)+' GB';
- document.getElementById('hbload').textContent=h.load.map(x=>x.toFixed(2)).join('  ');
+ document.getElementById('hbload').textContent=h.load.map(x=>x.toFixed(2)).join(' ');
  document.getElementById('hbup').textContent=(h.uptime/86400|0)+'d '+((h.uptime%86400)/3600|0)+'h';
 }
 const fmtClock=ts=>{const d=new Date((+ts||0)*1000),p=n=>(''+n).padStart(2,'0');return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())};

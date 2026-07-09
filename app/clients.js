@@ -41,7 +41,7 @@ function clientCardHTML(p){
  if(_clientsView==='list'){
   return head
    +'<div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
-   +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
+   +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
    +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</span>'
    +'<span class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</span>'
    +'<span class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</span>'
@@ -51,7 +51,7 @@ function clientCardHTML(p){
  const sv=csparkSVG(p.spark);
  return head
   +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
-  +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
+  +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
   +'<div class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</div>'
   +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div>'
   +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
