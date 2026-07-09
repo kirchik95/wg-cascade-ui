@@ -1,5 +1,6 @@
 function cardStructSig(p){
- return [p.pubkey,p.name,p.enabled?1:0,p.online?1:0,p.expires||0,clientExit(p),p.endpoint||'',p.ip||'',!!(p.spark&&p.spark.length>1),_clientsView].join('|');
+ /* Omit online/spark/endpoint — those update in place so card height stays stable (no CLS). */
+ return [p.pubkey,p.name,p.enabled?1:0,p.expires||0,clientExit(p),p.ip||'',_clientsView].join('|');
 }
 function clientActsHTML(p,exit,mode){
  const labeled=mode==='labeled';
@@ -56,8 +57,8 @@ function clientCardHTML(p){
   +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
   +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
   +'<div class="stat">'+xfer
-  +((p.mrx||p.mtx)?'<div class="mo mono" data-tip="Traffic this calendar month">'+ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx)+'</div>':'')+'</div>'
-  +(sv?'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+sv+'</div>':'')
+  +'<div class="mo mono" data-tip="Traffic this calendar month">'+(p.mrx||p.mtx?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'')+'</div></div>'
+  +'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+(sv||'')+'</div>'
   +'<div class="acts">'+acts+'</div></div>';
 }
 function emptyStateHTML(kind){
@@ -72,6 +73,12 @@ function updateCardLive(el,p){
  const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
  _pv['age-'+p.pubkey]=p.age;
  if(fresh){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
+ el.classList.toggle('on',!!p.online);
+ const av=el.querySelector('.av');
+ if(av){
+  av.setAttribute('data-tip',p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'));
+  const avdot=av.querySelector('.avdot');if(avdot)avdot.classList.toggle('on',!!p.online);
+ }
  const age=el.querySelector('.age');if(age)age.innerHTML=ic('clock',11)+fmtAge(p.age);
  const hs=el.querySelector('.hs');
  if(hs){
@@ -84,27 +91,30 @@ function updateCardLive(el,p){
   const k=b.dataset.k;const to=k.indexOf('rx-')===0?p.rx:p.tx;b.dataset.to=to;tw(b,k,+to,fmtB);
  });
  if(el.classList.contains('crow-list'))return;
- const mo=el.querySelector('.mo');
- if(p.mrx||p.mtx){
-  const html=ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx);
-  if(mo)mo.innerHTML=html;else{
-   const stat=el.querySelector('.stat');
-   if(stat){const d=document.createElement('div');d.className='mo mono';d.setAttribute('data-tip','Traffic this calendar month');d.innerHTML=html;stat.appendChild(d);applyI18n(d);}
-  }
- }
- const sparkEl=el.querySelector('.cspark');
- const sv=csparkSVG(p.spark);
- if(sv){
-  const tip=csparkTip(p.spark);
-  if(sparkEl){sparkEl.innerHTML=sv;sparkEl.setAttribute('data-tip',tip);}
+ const ep=el.querySelector('.ep');
+ if(p.endpoint){
+  const html=ic('net',11)+esc(p.endpoint);
+  if(ep){ep.innerHTML=html;ep.hidden=false;}
   else{
-   const actsEl=el.querySelector('.acts');
-   const html='<div class="cspark" data-tip="'+esc(tip)+'">'+sv+'</div>';
-   if(actsEl)actsEl.insertAdjacentHTML('beforebegin',html);
-   else el.insertAdjacentHTML('beforeend',html);
+   const idc=el.querySelector('.idc');
+   if(idc)idc.insertAdjacentHTML('beforeend','<div class="ep mono" data-tip="Client public endpoint">'+html+'</div>');
   }
+ }else if(ep){ep.innerHTML='';ep.hidden=true;}
+ const mo=el.querySelector('.mo');
+ if(mo)mo.innerHTML=(p.mrx||p.mtx)?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'';
+ let sparkEl=el.querySelector('.cspark');
+ if(!sparkEl){
+  const actsEl=el.querySelector('.acts');
+  const html='<div class="cspark"></div>';
+  if(actsEl)actsEl.insertAdjacentHTML('beforebegin',html);
+  else el.insertAdjacentHTML('beforeend',html);
+  sparkEl=el.querySelector('.cspark');
  }
- else if(sparkEl)sparkEl.remove();
+ if(sparkEl){
+  const sv=csparkSVG(p.spark);
+  sparkEl.innerHTML=sv||'';
+  sparkEl.setAttribute('data-tip',csparkTip(p.spark));
+ }
 }
 function renderClients(peers){
  _peers=peers||[];
