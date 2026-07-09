@@ -39,6 +39,17 @@ function devIcon(name){const s=(name||'').toLowerCase();
  if(/router|gateway|keenetic|mikrotik|openwrt|\brt-|nas|vps|server|srv/.test(s))return 'router';
  if(/^[a-zа-я]+[-_][a-zа-я]+$/i.test(s))return 'user';
  return 'd';}
+function initials(name){
+ const s=String(name||'').trim();
+ if(!s)return'?';
+ const parts=s.split(/[\s._\-]+/).filter(Boolean);
+ if(parts.length>=2){
+  const a=parts[0][0]||'',b=parts[1][0]||'';
+  return(a+b).toUpperCase();
+ }
+ const alnum=s.replace(/[^a-zA-Zа-яА-Я0-9]/g,'');
+ return(alnum.slice(0,2)||s.slice(0,2)).toUpperCase();
+}
 function csparkSVG(s){
  if(!s||s.length<2)return '';
  const mx=Math.max.apply(null,s);if(mx<=0)return '';
@@ -119,7 +130,7 @@ let LANG=(function(){try{return localStorage.getItem('wgui-lang')||'ru'}catch(e)
 const RU={
  "client status":"статус клиентов","Throughput":"Трафик","last 5 min":"за 5 мин","Clients":"Клиенты",
  "online":"онлайн","offline":"оффлайн","never":"никогда","reconnecting…":"переподключение…","updated":"обновлено",
- "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL","exit · US":"выход · US",
+ "collecting throughput…":"собираю данные…","devices":"устройства","entry · RU":"вход · РФ","exit · NL":"выход · NL","exit · US":"выход · US","exit":"выход",
  "You":"Вы","Internet":"Интернет","Cascade topology":"Топология каскада","egress checked":"выход проверен","total":"всего","Month":"Месяц",
  "Exit":"Выход","Netherlands (NL)":"Нидерланды (NL)","United States (US)":"США (US)",
  "All":"Все","Switch exit":"Сменить exit","Switching…":"Переключаю…",
@@ -394,6 +405,7 @@ async function tick(){
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return}
   const d=await r.json();
   setOffline(false);
+  _peers=d.peers||[];
   renderAlert(d.tunnel);renderHealthChip(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
   thrPills(d.thr.cur);
   _sparkSeries=d.thr.series||[];
@@ -403,7 +415,7 @@ async function tick(){
   const updTs=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
   document.getElementById('upd').textContent=updTs;
   setStatusSub(updTs);
-  applyI18n(document.getElementById('tline'));
+  applyI18n(document.getElementById('cascade'));
  }catch(e){setOffline(true);const rc=tr('reconnecting…');document.getElementById('upd').textContent=rc;setStatusSub(rc)}
 }
 /* admin */
