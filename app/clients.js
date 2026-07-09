@@ -47,7 +47,7 @@ function clientCardHTML(p){
 function emptyStateHTML(kind){
  if(kind==='none'){
   return '<div class="empty">'+ic('plus',28)+'<b>'+tr('No clients yet')+'</b><p>'+tr('Create a client to generate a WireGuard config and QR code.')+'</p>'
-   +'<button class="primary" type="button" data-act="add">'+tr('+ Add client')+'</button></div>';
+   +'<button class="primary" type="button" data-act="add">'+tr('+ Client')+'</button></div>';
  }
  return '<div class="empty">'+ic('search',28)+'<b>'+tr('No matches')+'</b><p>'+tr('Try a different name or IP.')+'</p></div>';
 }

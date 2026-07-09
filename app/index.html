@@ -55,16 +55,8 @@
 <div class="card hosttile" id="hostbar"></div>
 </div>
 <div class="sech">
-<div class="lt">Clients <b id="csum"></b></div>
 <div class="sech-top">
-<div class="sech-l">
-<input class="csearch" id="csearch" type="search" placeholder="Search clients…" autocomplete="off" spellcheck="false" aria-label="Search clients">
-<div class="viewfilt" id="viewfilt" role="group" aria-label="Clients view">
-<button type="button" class="vf on" data-view="cards" aria-pressed="true" data-act="view" data-tip="Cards view" aria-label="Cards view" data-ic="grid"></button>
-<button type="button" class="vf" data-view="list" aria-pressed="false" data-act="view" data-tip="List view" aria-label="List view" data-ic="list"></button>
-</div>
-</div>
-<div class="sech-act">
+<div class="lt">Clients <b id="csum"></b></div>
 <div class="menuwrap sech-more">
 <button class="ghost ibtn" id="morebtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="moremenu" data-tip="More actions" aria-label="More"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
 <div class="menudrop" id="moremenu" role="menu" hidden>
@@ -74,15 +66,22 @@
 <button class="menuitem" role="menuitem" type="button" data-act="export"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>Backup</button>
 </div>
 </div>
+</div>
+<div class="sech-controls">
+<input class="csearch" id="csearch" type="search" placeholder="Search clients…" autocomplete="off" spellcheck="false" aria-label="Search clients">
 <div class="exitfilt" id="exitfilt" role="group" aria-label="Filter by exit">
 <button type="button" class="xf on" data-xf="all" aria-pressed="true" data-act="exit-filter">All</button>
 <button type="button" class="xf" data-xf="nl" aria-pressed="false" data-act="exit-filter">NL</button>
 <button type="button" class="xf" data-xf="us" aria-pressed="false" data-act="exit-filter">US</button>
 </div>
+<div class="viewfilt" id="viewfilt" role="group" aria-label="Clients view">
+<button type="button" class="vf on" data-view="cards" aria-pressed="true" data-act="view" data-tip="Cards view" aria-label="Cards view" data-ic="grid"></button>
+<button type="button" class="vf" data-view="list" aria-pressed="false" data-act="view" data-tip="List view" aria-label="List view" data-ic="list"></button>
+</div>
+</div>
 </div>
 <div class="cards bento2" id="cards"></div>
 <footer><span id="upd">…</span><span>read-only status · writes via secure helper</span></footer>
-</div>
 <div class="mbg" id="mbg" data-act="modal-bg"><div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="mtitle" tabindex="-1"></div></div>
 <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script src="/theme.js"></script>

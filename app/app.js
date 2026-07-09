@@ -132,7 +132,7 @@ const RU={
  "RU → direct":"РФ → напрямую","logout":"выход","logout all":"выйти везде","Sign out on all devices":"Выйти на всех устройствах",
  "disabled":"выключен","load avg":"загрузка","uptime":"аптайм",
  "read-only status · writes via secure helper":"только чтение · запись через защищённый хелпер",
- "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Add client":"+ Клиент","Add client":"Добавить клиента",
+ "Split":"Сплит","Usage":"Трафик","Log":"Журнал","Backup":"Бэкап","+ Client":"+ Клиент","+ Add client":"+ Клиент","Add client":"Добавить клиента",
  "Client":"Клиент","Name":"Имя","Expires":"Истекает","Never":"Никогда","in 1 day":"через 1 день",
  "in 7 days":"через 7 дней","in 30 days":"через 30 дней","Cancel":"Отмена","Create":"Создать","Done":"Готово",
  "Copy":"Копировать","Edit":"Изменить","Edit client":"Редактировать клиента","Keep current":"Оставить как есть","Save":"Сохранить",
