@@ -188,7 +188,7 @@ const RU={
  "Session expired — sign in again":"Сессия истекла — войдите снова",
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
  "Tap a day for details":"Нажми день для деталей",
- "Throughput chart, last 5 minutes":"График трафика за 5 минут",
+ "Traffic chart, last 5 minutes":"График трафика за 5 минут",
  "Traffic":"Трафик","· 5 min":"· 5 мин","Healthy":"Работает","Degraded":"Деградация","Down":"Недоступен","VDSina host":"Хост VDSina",
  "Admin tools":"Админ-инструменты","Language / Язык":"Язык / Language",
  "Creates a peer via the secure helper (sudo).":"Создаёт peer через защищённый хелпер (sudo).",
