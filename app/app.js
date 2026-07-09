@@ -394,6 +394,12 @@ async function admin(body){
  return r.json();
 }
 const mbg=()=>document.getElementById('mbg');
+function mClose(){
+ return '<button class="mclose" type="button" data-act="close" aria-label="Close" data-tip="Close">×</button>';
+}
+function mTitle(iconName,titleHtml){
+ return '<div class="mtitle" id="mtitle">'+(iconName?ic(iconName,18):'')+' <span class="mtitle-t">'+titleHtml+'</span>'+mClose()+'</div>';
+}
 function focusables(root){
  return [...root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
   .filter(el=>el.offsetParent!==null||el===document.activeElement);
@@ -420,10 +426,11 @@ function closeModal(){
 }
 function toast(m,kind){const t=document.getElementById('toast');const ok=kind==='ok'||/copied|saved|enabled|disabled|deleted|created|updated/i.test(m);t.className=ok?'toast-ok':'';t.innerHTML=(ok?'<span class="toast-dot"></span>':'')+'<span>'+esc(tr(m))+'</span>';t.style.display='inline-flex';clearTimeout(window.__tt);window.__tt=setTimeout(()=>t.style.display='none',3200)}
 function openAdd(){openModal(
- '<div class="mtitle" id="mtitle">'+ic('plus',18)+' Add client</div>'
+ mTitle('plus','Add client')
+ +'<div class="splitnote mnote"><span>Creates a peer via the secure helper (sudo).</span></div>'
  +'<label class="fl">Name<input id="cn" placeholder="e.g. iphone, laptop" autocomplete="off" maxlength="32"></label>'
- +'<label class="fl">Exit<select id="ce" class="fsel" data-tip="Cascade exit for this client (NL default)"><option value="nl">Netherlands (NL)</option><option value="us">United States (US)</option></select></label>'
  +'<label class="fl">Expires<select id="cx" class="fsel"><option value="0">Never</option><option value="1">in 1 day</option><option value="7">in 7 days</option><option value="30">in 30 days</option></select></label>'
+ +'<label class="fl">Exit<select id="ce" class="fsel" data-tip="Cascade exit for this client (NL default)"><option value="nl">Netherlands (NL)</option><option value="us">United States (US)</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
  +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" id="ab" type="button" data-act="do-add">Create</button></div>');
  setTimeout(()=>{const i=document.getElementById('cn');if(!i)return;i.focus();i.onkeydown=e=>{if(e.key==="Enter")doAdd()}},30);}
@@ -441,7 +448,7 @@ function showResult(r){
  if(r.daily&&r.daily.length>1){const c=dayChart(r.daily,90);
   dh='<div class="ulh">'+ic('chart',13)+' Daily traffic · 30 days</div>'+c.head+c.svg+c.dates;}
  openModal(
- '<div class="mtitle" id="mtitle">'+ic('check',18)+' '+esc(r.name)+'<span class="mip">'+esc(r.ip)+'</span></div>'
+ mTitle('check',esc(r.name)+'<span class="mip">'+esc(r.ip)+'</span>')
  +(r.split?'<div class="splitnote">'+ic('branch')+'<span>Split-tunnel: RU &amp; local IPs go <b>direct</b>, the rest via the cascade. Large config — import the <b>.conf file</b> (too big for QR), then re-import to apply.</span></div>':'')
  +(r.qr?'<div class="qrwrap"><img src="data:image/png;base64,'+r.qr+'" alt="WireGuard QR for '+esc(r.name)+'"></div>':'')
  +'<pre class="conf">'+esc(r.conf)+'</pre>'
@@ -472,7 +479,7 @@ async function doExport(){
 }
 function aopcls(op){if(op==='delete'||op==='disable'||op==='expire')return'bad';if(op==='add'||op==='enable'||op==='setexit')return'ok';return''}
 async function openAudit(){
- openModal('<div class="mtitle" id="mtitle">'+ic('list',18)+' Audit log</div><div id="aubody" class="mtext">loading…</div>');
+ openModal(mTitle('list','Audit log')+'<div id="aubody" class="mtext">loading…</div>');
  let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent='failed to load';return}
  const ev=r.events||[];
  let h=ev.length?'<div class="connlist">'+ev.map(e=>'<div class="aurow"><span class="aop '+aopcls(e.op)+'">'+esc(e.op)+'</span><span class="ad">'+esc(e.detail||'')+'</span><span class="at">'+fmtTime(e.ts)+'</span></div>').join('')+'</div>':'<p class="mtext">No admin actions logged yet.</p>';
@@ -480,7 +487,7 @@ async function openAudit(){
  const b=document.getElementById('aubody');b.className='';b.innerHTML=h;applyI18n(b);
 }
 async function openUsage(){
- openModal('<div class="mtitle" id="mtitle">'+ic('chart',18)+' Usage <span class="mip" id="umo"></span></div><div id="ubody" class="mtext">loading…</div>');
+ openModal(mTitle('chart','Usage <span class="mip" id="umo"></span>')+'<div id="ubody" class="mtext">loading…</div>');
  let r;try{r=await(await fetch('/api/history',{cache:'no-store'})).json()}catch(e){document.getElementById('ubody').textContent='failed to load';return}
  document.getElementById('umo').textContent=r.month;renderUsage(r);
 }
@@ -515,7 +522,11 @@ function bindDayChart(container,d){
 function renderUsage(r){
  const d=r.daily||[],n=d.length;
  const mt=trafficTotals(r.clients||[]);
- let h='<div class="utotal">'+monthSummaryHTML(mt)+'</div>';
+ let h='';
+ if(_peers&&_peers.length){h+='<div class="monthpills um-exits">';EXITS.forEach(ex=>{
+  h+='<span class="monthpill">'+monthExitHTML(ex.toUpperCase(),trafficTotals(peersByExit(_peers,ex),'mrx','mtx'))+'</span>';
+ });h+='</div>';}
+ h+='<div class="utotal">'+monthSummaryHTML(mt)+'</div>';
  if(!n){h+='<p class="mtext">No usage recorded yet — history accrues from now (sampled every minute). Check back later.</p>';}
  else{
   const c=dayChart(d,120);
@@ -533,7 +544,7 @@ function renderUsage(r){
  if(n)bindDayChart(b,d);
 }
 async function openSplitSettings(){
- openModal('<div class="mtitle" id="mtitle">'+ic('branch',18)+' Split-tunnel <span class="mip">RU + custom direct</span></div><div id="sbody" class="mtext">loading…</div>');
+ openModal(mTitle('branch','Split-tunnel <span class="mip">RU + custom direct</span>')+'<div id="sbody" class="mtext">loading…</div>');
  const r=await admin({op:'splitinfo'});
  if(!r||!r.ok){document.getElementById('sbody').textContent=(r&&r.error)||'failed to load';return}
  renderSplit(r);
@@ -567,17 +578,17 @@ async function splitSave(refresh){
 }
 function openEdit(pub,name,exp,exit){_act=pub;window.__en=name;window.__ex=clientExit({exit:exit});
  const now=Date.now()/1000|0;openModal(
- '<div class="mtitle" id="mtitle">'+ic('edit',18)+' Edit client</div>'
+ mTitle('edit','Edit client')
  +'<label class="fl">Name<input id="rn" value="'+esc(name)+'" maxlength="32"></label>'
- +'<label class="fl">Exit<select id="re" class="fsel" data-tip="Cascade exit for this client (NL default)">'
- +'<option value="nl"'+(window.__ex==='nl'?' selected':'')+'>Netherlands (NL)</option>'
- +'<option value="us"'+(window.__ex==='us'?' selected':'')+'>United States (US)</option></select></label>'
  +'<label class="fl">Expires<select id="rx" class="fsel">'
  +'<option value="keep">'+tr('Keep current')+' · '+(exp?fmtLeft(exp-now):tr('Never').toLowerCase())+'</option>'
  +'<option value="0">'+tr('Never')+'</option>'
  +'<option value="1">'+tr('in 1 day')+'</option>'
  +'<option value="7">'+tr('in 7 days')+'</option>'
  +'<option value="30">'+tr('in 30 days')+'</option></select></label>'
+ +'<label class="fl">Exit<select id="re" class="fsel" data-tip="Cascade exit for this client (NL default)">'
+ +'<option value="nl"'+(window.__ex==='nl'?' selected':'')+'>Netherlands (NL)</option>'
+ +'<option value="us"'+(window.__ex==='us'?' selected':'')+'>United States (US)</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
  +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" type="button" data-act="do-edit">Save</button></div>');
  setTimeout(()=>{const i=document.getElementById('rn');if(!i)return;i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doEdit()}},30);}
@@ -605,7 +616,7 @@ async function toggleEn(pub,en){const r=await admin({op:'enabled',pubkey:pub,ena
 function confirmLogoutAll(){
  closeMenus();
  openModal(
-  '<div class="mtitle" id="mtitle">'+ic('warn',18)+' '+tr('Sign out everywhere?')+'</div>'
+  mTitle('warn',tr('Sign out everywhere?'))
   +'<p class="mtext">'+tr("This revokes sessions on all devices. You'll need to sign in again.")+'</p>'
   +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button>'
   +'<button class="btn-danger" type="button" data-act="logout-all">'+tr('Sign out all devices')+'</button></div>');
@@ -615,7 +626,7 @@ async function logoutAll(){
  location.href='/login';
 }
 function confirmDel(pub,name){_act=pub;openModal(
- '<div class="mtitle" id="mtitle">'+ic('trash',18)+' Delete '+esc(name)+'?</div>'
+ mTitle('trash','Delete '+esc(name)+'?')
  +'<p class="mtext">This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.</p>'
  +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="btn-danger" type="button" data-act="do-del">Delete</button></div>');}
 async function doDel(){const r=await admin({op:'delete',pubkey:_act});closeModal();if(!r||!r.ok)toast((r&&r.error)||'failed');tick();}
