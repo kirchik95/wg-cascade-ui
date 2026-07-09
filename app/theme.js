@@ -6,7 +6,7 @@ function themeIcon(light){
 function setThemeBtn(){var b=document.getElementById('theme');if(!b)return;
  var light=document.documentElement.dataset.theme==='light';b.innerHTML=themeIcon(light);
  var meta=document.querySelectorAll('meta[name=theme-color]');
- meta.forEach(function(m){if(!m.media||m.media.indexOf(light?'light':'dark')>=0)m.content=light?'#f6f8fa':'#0b0e14'});
+ meta.forEach(function(m){if(!m.media||m.media.indexOf(light?'light':'dark')>=0)m.content=light?'#FFFFFF':'#101010'});
 }
 function toggleTheme(){var h=document.documentElement;h.dataset.theme=h.dataset.theme==='light'?'dark':'light';
  try{localStorage.setItem('wgui-theme',h.dataset.theme)}catch(e){}setThemeBtn();}
