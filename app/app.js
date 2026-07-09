@@ -189,7 +189,26 @@ const RU={
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
  "Tap a day for details":"Нажми день для деталей",
  "Throughput chart, last 5 minutes":"График трафика за 5 минут",
- "Traffic":"Трафик","· 5 min":"· 5 мин","Healthy":"Работает","Degraded":"Деградация","Down":"Недоступен","VDSina host":"Хост VDSina"
+ "Traffic":"Трафик","· 5 min":"· 5 мин","Healthy":"Работает","Degraded":"Деградация","Down":"Недоступен","VDSina host":"Хост VDSina",
+ "Admin tools":"Админ-инструменты","Language / Язык":"Язык / Language",
+ "Creates a peer via the secure helper (sudo).":"Создаёт peer через защищённый хелпер (sudo).",
+ "This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.":"Доступ клиента к каскаду будет отозван навсегда. Устройство больше не сможет подключиться.",
+ "loading…":"загрузка…","failed to load":"не удалось загрузить","export failed":"экспорт не удался",
+ "e.g. iphone, laptop":"напр. iphone, laptop",
+ "VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)":"Входная нода VDSina — потолок производительности каскада (1 vCPU, двойное шифрование)",
+ "Sampler error":"Ошибка сэмплера","live peer data may lag":"данные по пирам могут отставать",
+ "Status sampler stale":"Сэмплер статуса устарел",
+ "↓ down · ↑ up":"↓ приём · ↑ передача","/day":"/день",
+ "Split-tunnel: RU & local IPs go direct, the rest via the cascade. Large config — import the .conf file (too big for QR), then re-import to apply.":"Сплит-туннель: РФ и локальные IP — напрямую, остальное через каскад. Большой конфиг — импортируйте <b>.conf файл</b> (слишком большой для QR), затем переимпортируйте.",
+ "ON — RU exits via VDSina (RU IP); the rest via the cascade (NL)":"ВКЛ — РФ выходит через VDSina (РФ IP); остальное через каскад (NL)",
+ "OFF — all client traffic goes through the cascade (NL exit)":"ВЫКЛ — весь трафик клиентов идёт через каскад (выход NL)",
+ "RU subnets":"подсетей РФ","in set":"в наборе","built":"собрано",
+ "Also route DIRECT — extra IPs / CIDRs / domains, one per line":"Также DIRECT — доп. IP / CIDR / домены, по одному на строку",
+ "example.com\n203.0.113.0/24":"example.com\n203.0.113.0/24",
+ "Server-side & global — applies to ":"Серверно и глобально — для ","all clients at once":"всех клиентов сразу",
+ ", no per-client setup and no re-import. RU sites see VDSina’s RU IP.":", без настройки на клиенте и переимпорта. РФ-сайты видят РФ IP VDSina.",
+ "RU-direct enabled for all clients":"RU-direct включён для всех клиентов","RU-direct disabled for all clients":"RU-direct выключен для всех клиентов",
+ "List rebuilt · ":"Список пересобран · "," direct routes":" маршрутов напрямую"
 };
 function tr(s){return LANG==='ru'&&RU[s]?RU[s]:s}
 function applyI18n(root){
@@ -267,8 +286,8 @@ function renderSampler(s){
  if(el.__k&&el.style.display!=='none'&&!el.__sampler)return;
  el.__sampler=1;el.style.display='flex';el.className='alert warn';
  const msg=s.err
-  ?('Sampler error: '+esc(s.err))
-  :('Status sampler stale ('+s.age+'s) — live peer data may lag');
+  ?(tr('Sampler error')+': '+esc(s.err))
+  :(tr('Status sampler stale')+' ('+s.age+'s) — '+tr('live peer data may lag'));
  el.innerHTML=ic('warn',17)+'<div><b>'+tr('Degraded')+'</b> <span>'+msg+'</span></div>';
 }
 function renderHost(h){
@@ -276,7 +295,7 @@ function renderHost(h){
  if(!h){el.style.display='none';return}
  el.style.display='flex';
  if(!el.__i){el.__i=1;el.innerHTML=
-   '<div class="ht-h" data-tip="VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)">'+tr('VDSina host')+' <span>'+tr('entry · RU')+'</span></div>'
+   '<div class="ht-h" data-tip="'+esc(tr('VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)'))+'">'+tr('VDSina host')+' <span>'+tr('entry · RU')+'</span></div>'
   +'<div class="ht-cpu"><span>CPU</span><b id="vcpu">0</b><span>%</span><div class="ht-bar"><i id="cpubar"></i></div></div>'
   +'<div class="ht-row"><span>RAM</span><b id="hbram"></b></div>'
   +'<div class="ht-row"><span>load avg</span><b id="hbload"></b></div>'
@@ -426,13 +445,13 @@ function closeModal(){
 }
 function toast(m,kind){const t=document.getElementById('toast');const ok=kind==='ok'||/copied|saved|enabled|disabled|deleted|created|updated/i.test(m);t.className=ok?'toast-ok':'';t.innerHTML=(ok?'<span class="toast-dot"></span>':'')+'<span>'+esc(tr(m))+'</span>';t.style.display='inline-flex';clearTimeout(window.__tt);window.__tt=setTimeout(()=>t.style.display='none',3200)}
 function openAdd(){openModal(
- mTitle('plus','Add client')
- +'<div class="splitnote mnote"><span>Creates a peer via the secure helper (sudo).</span></div>'
- +'<label class="fl">Name<input id="cn" placeholder="e.g. iphone, laptop" autocomplete="off" maxlength="32"></label>'
- +'<label class="fl">Expires<select id="cx" class="fsel"><option value="0">Never</option><option value="1">in 1 day</option><option value="7">in 7 days</option><option value="30">in 30 days</option></select></label>'
- +'<label class="fl">Exit<select id="ce" class="fsel" data-tip="Cascade exit for this client (NL default)"><option value="nl">Netherlands (NL)</option><option value="us">United States (US)</option></select></label>'
+ mTitle('plus',tr('Add client'))
+ +'<div class="splitnote mnote"><span>'+tr('Creates a peer via the secure helper (sudo).')+'</span></div>'
+ +'<label class="fl">'+tr('Name')+'<input id="cn" placeholder="'+esc(tr('e.g. iphone, laptop'))+'" autocomplete="off" maxlength="32"></label>'
+ +'<label class="fl">'+tr('Expires')+'<select id="cx" class="fsel"><option value="0">'+tr('Never')+'</option><option value="1">'+tr('in 1 day')+'</option><option value="7">'+tr('in 7 days')+'</option><option value="30">'+tr('in 30 days')+'</option></select></label>'
+ +'<label class="fl">'+tr('Exit')+'<select id="ce" class="fsel" data-tip="'+esc(tr('Cascade exit for this client (NL default)'))+'"><option value="nl">'+tr('Netherlands (NL)')+'</option><option value="us">'+tr('United States (US)')+'</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
- +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" id="ab" type="button" data-act="do-add">Create</button></div>');
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button><button class="primary" id="ab" type="button" data-act="do-add">'+tr('Create')+'</button></div>');
  setTimeout(()=>{const i=document.getElementById('cn');if(!i)return;i.focus();i.onkeydown=e=>{if(e.key==="Enter")doAdd()}},30);}
 async function doAdd(){const n=document.getElementById('cn').value.trim();const days=+document.getElementById('cx').value;
  const exit=clientExit({exit:document.getElementById('ce').value});
@@ -446,17 +465,17 @@ async function doAdd(){const n=document.getElementById('cn').value.trim();const 
 function showResult(r){
  let dh='';
  if(r.daily&&r.daily.length>1){const c=dayChart(r.daily,90);
-  dh='<div class="ulh">'+ic('chart',13)+' Daily traffic · 30 days</div>'+c.head+c.svg+c.dates;}
+  dh='<div class="ulh">'+ic('chart',13)+' '+tr('Daily traffic · 30 days')+'</div>'+c.head+c.svg+c.dates;}
  openModal(
  mTitle('check',esc(r.name)+'<span class="mip">'+esc(r.ip)+'</span>')
- +(r.split?'<div class="splitnote">'+ic('branch')+'<span>Split-tunnel: RU &amp; local IPs go <b>direct</b>, the rest via the cascade. Large config — import the <b>.conf file</b> (too big for QR), then re-import to apply.</span></div>':'')
+ +(r.split?'<div class="splitnote">'+ic('branch')+'<span>'+tr('Split-tunnel: RU & local IPs go direct, the rest via the cascade. Large config — import the .conf file (too big for QR), then re-import to apply.')+'</span></div>':'')
  +(r.qr?'<div class="qrwrap"><img src="data:image/png;base64,'+r.qr+'" alt="WireGuard QR for '+esc(r.name)+'"></div>':'')
  +'<pre class="conf">'+esc(r.conf)+'</pre>'
  +dh
- +(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' Recent connections</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'')
- +'<div class="mrow"><button class="ghost" type="button" data-act="copy">'+ic('copy')+' Copy</button>'
+ +(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' '+tr('Recent connections')+'</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'')
+ +'<div class="mrow"><button class="ghost" type="button" data-act="copy">'+ic('copy')+' '+tr('Copy')+'</button>'
  +'<button class="ghost" type="button" data-act="dl">'+ic('dl')+' .conf</button>'
- +'<button class="primary" type="button" data-act="close">Done</button></div>');
+ +'<button class="primary" type="button" data-act="close">'+tr('Done')+'</button></div>');
  window.__cf=r.conf;window.__cn=r.name;}
 function copyConf(){navigator.clipboard.writeText(window.__cf).then(()=>toast('Config copied'),()=>toast('Copy failed'))}
 function dlConf(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([window.__cf],{type:'text/plain'}));
@@ -471,7 +490,7 @@ async function showCfg(pub){const r=await admin({op:'getconf',pubkey:pub});if(!r
 async function doExport(){
  closeMenus();
  toast('Preparing backup…');const r=await admin({op:'export'});
- if(!r||!r.ok){toast((r&&r.error)||'export failed');return}
+ if(!r||!r.ok){toast(tr((r&&r.error)||'export failed'));return}
  const bin=atob(r.archive),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([arr],{type:'application/gzip'}));
  a.download=r.name||'wg-cascade-backup.tar.gz';a.click();URL.revokeObjectURL(a.href);
@@ -479,16 +498,16 @@ async function doExport(){
 }
 function aopcls(op){if(op==='delete'||op==='disable'||op==='expire')return'bad';if(op==='add'||op==='enable'||op==='setexit')return'ok';return''}
 async function openAudit(){
- openModal(mTitle('list','Audit log')+'<div id="aubody" class="mtext">loading…</div>');
- let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent='failed to load';return}
+ openModal(mTitle('list',tr('Audit log'))+'<div id="aubody" class="mtext">'+tr('loading…')+'</div>');
+ let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent=tr('failed to load');return}
  const ev=r.events||[];
- let h=ev.length?'<div class="connlist">'+ev.map(e=>'<div class="aurow"><span class="aop '+aopcls(e.op)+'">'+esc(e.op)+'</span><span class="ad">'+esc(e.detail||'')+'</span><span class="at">'+fmtTime(e.ts)+'</span></div>').join('')+'</div>':'<p class="mtext">No admin actions logged yet.</p>';
- h+='<div class="mrow"><button class="primary" type="button" data-act="close">Done</button></div>';
+ let h=ev.length?'<div class="connlist">'+ev.map(e=>'<div class="aurow"><span class="aop '+aopcls(e.op)+'">'+esc(e.op)+'</span><span class="ad">'+esc(e.detail||'')+'</span><span class="at">'+fmtTime(e.ts)+'</span></div>').join('')+'</div>':'<p class="mtext">'+tr('No admin actions logged yet.')+'</p>';
+ h+='<div class="mrow"><button class="primary" type="button" data-act="close">'+tr('Done')+'</button></div>';
  const b=document.getElementById('aubody');b.className='';b.innerHTML=h;applyI18n(b);
 }
 async function openUsage(){
- openModal(mTitle('chart','Usage <span class="mip" id="umo"></span>')+'<div id="ubody" class="mtext">loading…</div>');
- let r;try{r=await(await fetch('/api/history',{cache:'no-store'})).json()}catch(e){document.getElementById('ubody').textContent='failed to load';return}
+ openModal(mTitle('chart',tr('Usage')+' <span class="mip" id="umo"></span>')+'<div id="ubody" class="mtext">'+tr('loading…')+'</div>');
+ let r;try{r=await(await fetch('/api/history',{cache:'no-store'})).json()}catch(e){document.getElementById('ubody').textContent=tr('failed to load');return}
  document.getElementById('umo').textContent=r.month;renderUsage(r);
 }
 function dayChart(d,H){
@@ -499,7 +518,7 @@ function dayChart(d,H){
        +'<rect x="'+X.toFixed(1)+'" y="'+(base-hr).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hr.toFixed(1)+'" class="bd"/>'
        +'<rect class="bhit" data-i="'+i+'" x="'+X.toFixed(1)+'" y="0" width="'+Math.max(bw,slot-1).toFixed(1)+'" height="'+H+'" />';});
  return {max:max,
-  head:'<div class="umax"><span><b class="dn">↓</b> down · <b class="up">↑</b> up</span><span>peak '+fmtB(max)+'/day</span></div>',
+  head:'<div class="umax"><span>'+tr('↓ down · ↑ up')+'</span><span>'+tr('peak')+' '+fmtB(max)+tr('/day')+'</span></div>',
   svg:'<svg class="ubar" style="height:'+H+'px" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+bars+'<line x1="0" y1="'+base+'" x2="'+W+'" y2="'+base+'" class="bax"/></svg>',
   dates:'<div class="udates"><span>'+d[0].day.slice(5)+'</span><span>'+d[d.length-1].day.slice(5)+'</span></div>',
   data:d};
@@ -527,70 +546,70 @@ function renderUsage(r){
   h+='<span class="monthpill">'+monthExitHTML(ex.toUpperCase(),trafficTotals(peersByExit(_peers,ex),'mrx','mtx'))+'</span>';
  });h+='</div>';}
  h+='<div class="utotal">'+monthSummaryHTML(mt)+'</div>';
- if(!n){h+='<p class="mtext">No usage recorded yet — history accrues from now (sampled every minute). Check back later.</p>';}
+ if(!n){h+='<p class="mtext">'+tr('No usage recorded yet — history accrues from now (sampled every minute). Check back later.')+'</p>';}
  else{
   const c=dayChart(d,120);
   h=c.head+'<div class="daytip">'+tr('Tap a day for details')+'</div>'+c.svg+c.dates;
   const cl=r.clients||[];
-  h+='<div class="ulh">By client · this month</div>';
-  if(!cl.length){h+='<p class="mtext" style="margin:0 0 6px">No traffic yet this month.</p>';}
+  h+='<div class="ulh">'+tr('By client · this month')+'</div>';
+  if(!cl.length){h+='<p class="mtext" style="margin:0 0 6px">'+tr('No traffic yet this month.')+'</p>';}
   else{const cmax=Math.max(1,...cl.map(c=>c.rx+c.tx));
    cl.forEach(c=>{const t=c.rx+c.tx;h+='<div class="urow"><div class="un">'+esc(c.name)+'</div>'
     +'<div class="ub"><div class="ubf" style="width:'+(t/cmax*100).toFixed(1)+'%"></div></div>'
     +'<div class="ut mono">'+fmtB(t)+'</div></div>';});}
  }
- h+='<div class="mrow"><button class="primary" type="button" data-act="close">Done</button></div>';
+ h+='<div class="mrow"><button class="primary" type="button" data-act="close">'+tr('Done')+'</button></div>';
  const b=document.getElementById('ubody');b.className='';b.innerHTML=h;applyI18n(b);
  if(n)bindDayChart(b,d);
 }
 async function openSplitSettings(){
- openModal(mTitle('branch','Split-tunnel <span class="mip">RU + custom direct</span>')+'<div id="sbody" class="mtext">loading…</div>');
+ openModal(mTitle('branch',tr('Split-tunnel')+' <span class="mip">'+tr('RU + custom direct')+'</span>')+'<div id="sbody" class="mtext">'+tr('loading…')+'</div>');
  const r=await admin({op:'splitinfo'});
- if(!r||!r.ok){document.getElementById('sbody').textContent=(r&&r.error)||'failed to load';return}
+ if(!r||!r.ok){document.getElementById('sbody').textContent=tr((r&&r.error)||'failed to load');return}
  renderSplit(r);
 }
 function renderSplit(r){
  const m=r.meta||{},srv=r.server||{},on=(srv.state==='on');
- let h='<div class="sstoggle '+(on?'on':'')+'"><div><div class="sst-t">Route RU traffic direct</div>'
-   +'<div class="sst-s">'+(on?'ON — RU exits via VDSina (RU IP); the rest via the cascade (NL)':'OFF — all client traffic goes through the cascade (NL exit)')+'</div></div>'
-   +'<button class="switch '+(on?'on':'')+'" type="button" role="switch" aria-checked="'+(on?'true':'false')+'" aria-label="Route RU traffic direct" data-act="split-server" data-on="'+(on?'0':'1')+'" data-tip="'+(on?'Turn OFF':'Turn ON')+'"><span></span></button></div>'
-   +'<div class="ssrow"><div><b>'+(m.ru_count||0).toLocaleString()+'</b> RU subnets · <b>'+(srv.ipset||m.direct_count||0).toLocaleString()+'</b> in set</div>'
-   +'<div class="dim">'+(m.built_at?('built '+m.built_at):'')+'</div></div>'
-   +'<label class="fl">Also route DIRECT — extra IPs / CIDRs / domains, one per line'
-   +'<textarea id="sx" class="ssarea" spellcheck="false" placeholder="example.com&#10;203.0.113.0/24">'+esc((r.extra||[]).join("\n"))+'</textarea></label>'
+ let h='<div class="sstoggle '+(on?'on':'')+'"><div><div class="sst-t">'+tr('Route RU traffic direct')+'</div>'
+   +'<div class="sst-s">'+(on?tr('ON — RU exits via VDSina (RU IP); the rest via the cascade (NL)'):tr('OFF — all client traffic goes through the cascade (NL exit)'))+'</div></div>'
+   +'<button class="switch '+(on?'on':'')+'" type="button" role="switch" aria-checked="'+(on?'true':'false')+'" aria-label="'+esc(tr('Route RU traffic direct'))+'" data-act="split-server" data-on="'+(on?'0':'1')+'" data-tip="'+esc(tr(on?'Turn OFF':'Turn ON'))+'"><span></span></button></div>'
+   +'<div class="ssrow"><div><b>'+(m.ru_count||0).toLocaleString()+'</b> '+tr('RU subnets')+' · <b>'+(srv.ipset||m.direct_count||0).toLocaleString()+'</b> '+tr('in set')+'</div>'
+   +'<div class="dim">'+(m.built_at?(tr('built')+' '+m.built_at):'')+'</div></div>'
+   +'<label class="fl">'+tr('Also route DIRECT — extra IPs / CIDRs / domains, one per line')
+   +'<textarea id="sx" class="ssarea" spellcheck="false" placeholder="'+esc(tr('example.com\n203.0.113.0/24'))+'">'+esc((r.extra||[]).join("\n"))+'</textarea></label>'
    +'<div class="merr" id="me" role="alert"></div>'
-   +'<div class="ssbtns"><button class="ghost" id="srf" type="button" data-act="split-save" data-refresh="1" data-tip="Re-download the RU list from the internet">'+ic('cal')+' Refresh RU list</button></div>'
-   +'<div class="splitnote">'+ic('branch')+'<span>Server-side &amp; global — applies to <b>all clients at once</b>, no per-client setup and no re-import. RU sites see VDSina’s RU IP.</span></div>'
-   +'<div class="mrow"><button class="ghost" type="button" data-act="close">Close</button><button class="primary" id="ssave" type="button" data-act="split-save" data-refresh="0">Save list</button></div>';
+   +'<div class="ssbtns"><button class="ghost" id="srf" type="button" data-act="split-save" data-refresh="1" data-tip="'+esc(tr('Re-download the RU list from the internet'))+'">'+ic('cal')+' '+tr('Refresh RU list')+'</button></div>'
+   +'<div class="splitnote">'+ic('branch')+'<span>'+tr('Server-side & global — applies to ')+'<b>'+tr('all clients at once')+'</b>'+tr(', no per-client setup and no re-import. RU sites see VDSina’s RU IP.')+'</span></div>'
+   +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Close')+'</button><button class="primary" id="ssave" type="button" data-act="split-save" data-refresh="0">'+tr('Save list')+'</button></div>';
  const b=document.getElementById('sbody');b.className='';b.innerHTML=h;applyI18n(b);
 }
 async function splitServer(on){
  const r=await admin({op:'splitserver',split:on});
  if(!r||!r.ok){toast((r&&r.error)||'failed');return}
- toast('RU-direct '+(on?'enabled':'disabled')+' for all clients');renderSplit(r);
+ toast(tr(on?'RU-direct enabled for all clients':'RU-direct disabled for all clients'));renderSplit(r);
 }
 async function splitSave(refresh){
  const entries=document.getElementById('sx').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
  const btn=document.getElementById(refresh?'srf':'ssave'),old=btn.innerHTML;btn.disabled=true;btn.textContent=tr(refresh?'Refreshing…':'Saving…');
  const r=await admin({op:'splitsave',refresh:refresh,entries:entries});
  if(!r||!r.ok){document.getElementById('me').textContent=tr((r&&r.error)||'failed');btn.disabled=false;btn.innerHTML=old;return}
- toast('List rebuilt · '+(((r.meta&&r.meta.direct_count)||0)).toLocaleString()+' direct routes');renderSplit(r);
+ toast(tr('List rebuilt · ')+(((r.meta&&r.meta.direct_count)||0)).toLocaleString()+tr(' direct routes'));renderSplit(r);
 }
 function openEdit(pub,name,exp,exit){_act=pub;window.__en=name;window.__ex=clientExit({exit:exit});
  const now=Date.now()/1000|0;openModal(
- mTitle('edit','Edit client')
- +'<label class="fl">Name<input id="rn" value="'+esc(name)+'" maxlength="32"></label>'
- +'<label class="fl">Expires<select id="rx" class="fsel">'
+ mTitle('edit',tr('Edit client'))
+ +'<label class="fl">'+tr('Name')+'<input id="rn" value="'+esc(name)+'" maxlength="32"></label>'
+ +'<label class="fl">'+tr('Expires')+'<select id="rx" class="fsel">'
  +'<option value="keep">'+tr('Keep current')+' · '+(exp?fmtLeft(exp-now):tr('Never').toLowerCase())+'</option>'
  +'<option value="0">'+tr('Never')+'</option>'
  +'<option value="1">'+tr('in 1 day')+'</option>'
  +'<option value="7">'+tr('in 7 days')+'</option>'
  +'<option value="30">'+tr('in 30 days')+'</option></select></label>'
- +'<label class="fl">Exit<select id="re" class="fsel" data-tip="Cascade exit for this client (NL default)">'
- +'<option value="nl"'+(window.__ex==='nl'?' selected':'')+'>Netherlands (NL)</option>'
- +'<option value="us"'+(window.__ex==='us'?' selected':'')+'>United States (US)</option></select></label>'
+ +'<label class="fl">'+tr('Exit')+'<select id="re" class="fsel" data-tip="'+esc(tr('Cascade exit for this client (NL default)'))+'">'
+ +'<option value="nl"'+(window.__ex==='nl'?' selected':'')+'>'+tr('Netherlands (NL)')+'</option>'
+ +'<option value="us"'+(window.__ex==='us'?' selected':'')+'>'+tr('United States (US)')+'</option></select></label>'
  +'<div class="merr" id="me" role="alert"></div>'
- +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="primary" type="button" data-act="do-edit">Save</button></div>');
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button><button class="primary" type="button" data-act="do-edit">'+tr('Save')+'</button></div>');
  setTimeout(()=>{const i=document.getElementById('rn');if(!i)return;i.focus();i.select();i.onkeydown=e=>{if(e.key==="Enter")doEdit()}},30);}
 async function doEdit(){
  const n=document.getElementById('rn').value.trim(),x=document.getElementById('rx').value;
@@ -626,9 +645,9 @@ async function logoutAll(){
  location.href='/login';
 }
 function confirmDel(pub,name){_act=pub;openModal(
- mTitle('trash','Delete '+esc(name)+'?')
- +'<p class="mtext">This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.</p>'
- +'<div class="mrow"><button class="ghost" type="button" data-act="close">Cancel</button><button class="btn-danger" type="button" data-act="do-del">Delete</button></div>');}
+ mTitle('trash',tr('Delete')+' '+esc(name)+'?')
+ +'<p class="mtext">'+tr("This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.")+'</p>'
+ +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button><button class="btn-danger" type="button" data-act="do-del">'+tr('Delete')+'</button></div>');}
 async function doDel(){const r=await admin({op:'delete',pubkey:_act});closeModal();if(!r||!r.ok)toast((r&&r.error)||'failed');tick();}
 
 /* menus */

@@ -61,7 +61,7 @@ button.btn{padding:6px 11px;min-height:32px}
 .logincard input:focus-visible,.csearch:focus-visible{border-color:var(--accent);box-shadow:var(--focus)}
 .primary:focus-visible,.ghost:focus-visible,.btn-danger:focus-visible,.pill.btn:focus-visible,
 .iconbtn:focus-visible,.acctbtn:focus-visible,.nav-tool:focus-visible,.nav-text:focus-visible,
-.ib:focus-visible,.switch:focus-visible,.menuitem:focus-visible{box-shadow:var(--focus)}
+.ib:focus-visible,.act:focus-visible,.switch:focus-visible,.menuitem:focus-visible{box-shadow:var(--focus)}
 /* animations */
 @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
@@ -368,7 +368,7 @@ display:flex;align-items:center;justify-content:center;cursor:pointer;transition
 .ib:hover{background:var(--panel2);border-color:var(--line);color:var(--txt)}
 .ib.danger:hover{color:var(--red);border-color:rgba(248,81,73,.4)}
 .ib.good:hover{color:var(--green);border-color:rgba(63,185,80,.4)}
-footer{margin-top:22px;color:var(--dim);font-size:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+footer{margin-top:22px;padding-block:10px;color:var(--dim);font-size:12px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
 /* buttons */
 .primary{height:var(--btn-h);box-sizing:border-box;padding:0 18px;gap:6px;background:var(--txt);color:var(--bg);border:0;
 border-radius:var(--radius-ctrl);font:600 13px inherit;cursor:pointer;display:inline-flex;align-items:center}

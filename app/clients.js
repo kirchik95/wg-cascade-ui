@@ -3,7 +3,7 @@ function cardStructSig(p){
 }
 function clientActsHTML(p,exit,mode){
  const labeled=mode==='labeled';
- const en=p.enabled?'Disable':'Enable';
+ const en=tr(p.enabled?'Disable':'Enable');
  const pk=esc(p.pubkey), nm=esc(p.name);
  function mk(act,tip,label,icon,opts){
   opts=opts||{};
@@ -14,8 +14,9 @@ function clientActsHTML(p,exit,mode){
   else if(act==='edit')data+=' data-pk="'+pk+'" data-name="'+nm+'" data-exp="'+(p.expires||0)+'" data-exit="'+esc(exit)+'"';
   else if(act==='toggle')data+=' data-pk="'+pk+'" data-en="'+(p.enabled?'1':'0')+'"';
   else if(act==='del')data+=' data-pk="'+pk+'" data-name="'+nm+'"';
-  const tipAttr=' data-tip="'+esc(tip)+'" aria-label="'+esc(labeled?label:tip)+'"';
-  if(labeled)return '<button class="act'+danger+'"'+data+tipAttr+'>'+ic(icon)+'<span>'+label+'</span></button>';
+  const tipTr=tr(tip), labelTr=tr(label);
+  const tipAttr=' data-tip="'+esc(tipTr)+'" aria-label="'+esc(labeled?labelTr:tipTr)+'"';
+  if(labeled)return '<button class="act'+danger+'"'+data+tipAttr+'>'+ic(icon)+'<span>'+labelTr+'</span></button>';
   return '<button class="ib'+danger+good+'"'+data+tipAttr+'>'+ic(icon)+'</button>';
  }
  return mk('cfg','Show config / QR','Config','qr')
@@ -30,9 +31,9 @@ function clientCardHTML(p){
  _pv['age-'+p.pubkey]=p.age;
  const prx=_pv['rx-'+p.pubkey],ptx=_pv['tx-'+p.pubkey];
  const acts=clientActsHTML(p,exit,_clientsView==='list'?'icon':'labeled');
- const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="Click to switch exit" aria-label="Switch exit: '+exit.toUpperCase()+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
-  +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="Temporary client (auto-disables)">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
-  +(p.enabled?'':'<span class="chip">disabled</span>');
+ const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="'+esc(tr('Click to switch exit'))+'" aria-label="'+esc(tr('Switch exit')+': '+exit.toUpperCase())+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
+  +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="'+esc(tr('Temporary client (auto-disables)'))+'">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
+  +(p.enabled?'':'<span class="chip">'+tr('disabled')+'</span>');
  const xfer='<div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+esc(p.pubkey)+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+esc(p.pubkey)+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
  const cls='crow '+(_clientsView==='list'?'crow-list ':'')+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'');
  const head='<div class="'+cls+'" data-pk="'+esc(p.pubkey)+'" data-ssig="'+esc(cardStructSig(p))+'">';
