@@ -124,7 +124,9 @@ const RU={
  "Exit":"Выход","Netherlands (NL)":"Нидерланды (NL)","United States (US)":"США (US)",
  "All":"Все","Switch exit":"Сменить exit","Switching…":"Переключаю…",
  "cascade up":"каскад работает","tunnel up · no exit":"туннель есть · нет выхода","tunnel down":"туннель упал",
- "both exits up":"оба выхода работают","NL up · US down":"NL ок · US нет","US up · NL down":"US ок · NL нет",
+ "both exits up":"оба выхода работают","Both exits online":"Оба выхода в сети","Both exits down":"Оба выхода недоступны",
+ "NL up · US down":"NL ок · US нет","US up · NL down":"US ок · NL нет",
+ "Dashboard":"Панель","panel read-only · writes via helper":"панель только чтение · запись через хелпер",
  "Click to switch exit":"Нажми, чтобы сменить exit",
  "Filter by exit":"Фильтр по exit",
  "RU → direct":"РФ → напрямую","logout":"выход","logout all":"выйти везде","Sign out on all devices":"Выйти на всех устройствах",
@@ -223,6 +225,26 @@ function thrPills(c){
  const md=mbN(c.down),mu=mbN(c.up);
  tw(document.getElementById('thrd'),'thrd',md,mbF);tw(document.getElementById('thru'),'thru',mu,mbF);
  tw(document.getElementById('cnd'),'cnd',md,mbF);tw(document.getElementById('cnu'),'cnu',mu,mbF);
+}
+function renderHealthChip(t){
+ const el=document.getElementById('healthchip');
+ if(!el)return;
+ if(!t){el.className='pill healthchip';el.textContent='…';return;}
+ const nl=typeof exitOf==='function'?exitOf(t,'nl'):((t.exits&&t.exits.nl)||{});
+ const us=typeof exitOf==='function'?exitOf(t,'us'):((t.exits&&t.exits.us)||{});
+ const nlOk=!!nl.ok,usOk=!!us.ok;
+ let cls='ok',copy='Both exits online';
+ if(nlOk&&usOk){cls='ok';copy='Both exits online';}
+ else if(nlOk&&!usOk){cls='warn';copy='NL up · US down';}
+ else if(!nlOk&&usOk){cls='warn';copy='US up · NL down';}
+ else{cls='bad';copy='Both exits down';}
+ el.className='pill healthchip '+cls;
+ el.innerHTML='<span class="ep-dot"></span><span>'+tr(copy)+'</span>';
+}
+function setStatusSub(prefix){
+ const sub=document.getElementById('status-sub');
+ if(!sub)return;
+ sub.textContent=prefix+' · '+tr('panel read-only · writes via helper');
 }
 
 function setOffline(on){
@@ -352,15 +374,17 @@ async function tick(){
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return}
   const d=await r.json();
   setOffline(false);
-  renderAlert(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
+  renderAlert(d.tunnel);renderHealthChip(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
   thrPills(d.thr.cur);
   _sparkSeries=d.thr.series||[];
   document.getElementById('spark').innerHTML=spark(_sparkSeries);
   sparkMeta(_sparkSeries);
   bindSpark();
-  document.getElementById('upd').textContent=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
+  const updTs=tr('updated')+' '+new Date(d.now*1000).toLocaleTimeString();
+  document.getElementById('upd').textContent=updTs;
+  setStatusSub(updTs);
   applyI18n(document.getElementById('tline'));
- }catch(e){setOffline(true);document.getElementById('upd').textContent=tr('reconnecting…')}
+ }catch(e){setOffline(true);const rc=tr('reconnecting…');document.getElementById('upd').textContent=rc;setStatusSub(rc)}
 }
 /* admin */
 async function admin(body){

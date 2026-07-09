@@ -25,6 +25,20 @@
 <button class="primary" type="button" data-act="add" data-tip="Generate a new client config" aria-label="Add client"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="add-lbl">Client</span></button>
 </div>
 </header>
+<section class="status-strip">
+<div class="status-copy">
+<h1 class="page-title">Dashboard</h1>
+<p class="page-sub" id="status-sub">updated just now · panel read-only · writes via helper</p>
+</div>
+<div class="status-pills" id="status-pills">
+<span class="pill healthchip" id="healthchip">…</span>
+<span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
+<span class="monthpills" id="monthuse">
+<span class="pill monthpill" id="monthuse-nl" data-tip="NL calendar-month traffic · 500 GiB quota">…</span>
+<span class="pill monthpill" id="monthuse-us" data-tip="US calendar-month traffic · 500 GiB quota">…</span>
+</span>
+</div>
+</section>
 <div class="banner" id="offline" role="status" aria-live="polite"></div>
 <div class="alert" id="alert" style="display:none" role="alert"></div>
 <div class="bento">
