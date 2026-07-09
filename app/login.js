@@ -1,10 +1,11 @@
 (function(){
  var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(e){L='ru'}
  if(L==='ru'){
-  var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти","Show password":"Показать пароль","Hide password":"Скрыть пароль"};
+  var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти","Show password":"Показать пароль","Hide password":"Скрыть пароль","Toggle theme":"Переключить тему"};
   var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),ns=[],n;while(n=w.nextNode())ns.push(n);
   ns.forEach(function(t){var k=t.nodeValue.trim();if(k&&R[k])t.nodeValue=t.nodeValue.replace(k,R[k])});
   document.querySelectorAll('[aria-label]').forEach(function(e){var k=e.getAttribute('aria-label');if(R[k])e.setAttribute('aria-label',R[k]);});
+  document.querySelectorAll('[data-tip]').forEach(function(e){var k=e.getAttribute('data-tip');if(R[k])e.setAttribute('data-tip',R[k]);});
  }
 })();
 (function(){var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}

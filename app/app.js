@@ -188,7 +188,8 @@ const RU={
  "Session expired — sign in again":"Сессия истекла — войдите снова",
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
  "Tap a day for details":"Нажми день для деталей",
- "Throughput chart, last 5 minutes":"График трафика за 5 минут"
+ "Throughput chart, last 5 minutes":"График трафика за 5 минут",
+ "Traffic":"Трафик","· 5 min":"· 5 мин","Healthy":"Работает","Degraded":"Деградация","Down":"Недоступен","VDSina host":"Хост VDSina"
 };
 function tr(s){return LANG==='ru'&&RU[s]?RU[s]:s}
 function applyI18n(root){
@@ -275,7 +276,7 @@ function renderHost(h){
  if(!h){el.style.display='none';return}
  el.style.display='flex';
  if(!el.__i){el.__i=1;el.innerHTML=
-   '<div class="ht-h" data-tip="VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)">VDSina <span>entry · RU</span></div>'
+   '<div class="ht-h" data-tip="VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)">'+tr('VDSina host')+' <span>'+tr('entry · RU')+'</span></div>'
   +'<div class="ht-cpu"><span>CPU</span><b id="vcpu">0</b><span>%</span><div class="ht-bar"><i id="cpubar"></i></div></div>'
   +'<div class="ht-row"><span>RAM</span><b id="hbram"></b></div>'
   +'<div class="ht-row"><span>load avg</span><b id="hbload"></b></div>'
@@ -417,7 +418,7 @@ function closeModal(){
  if(_prevFocus&&typeof _prevFocus.focus==='function'){try{_prevFocus.focus()}catch(e){}}
  _prevFocus=null;
 }
-function toast(m){const t=document.getElementById('toast');t.textContent=tr(m);t.style.display='block';clearTimeout(window.__tt);window.__tt=setTimeout(()=>t.style.display='none',3200)}
+function toast(m,kind){const t=document.getElementById('toast');const ok=kind==='ok'||/copied|saved|enabled|disabled|deleted|created|updated/i.test(m);t.className=ok?'toast-ok':'';t.innerHTML=(ok?'<span class="toast-dot"></span>':'')+'<span>'+esc(tr(m))+'</span>';t.style.display='inline-flex';clearTimeout(window.__tt);window.__tt=setTimeout(()=>t.style.display='none',3200)}
 function openAdd(){openModal(
  '<div class="mtitle" id="mtitle">'+ic('plus',18)+' Add client</div>'
  +'<label class="fl">Name<input id="cn" placeholder="e.g. iphone, laptop" autocomplete="off" maxlength="32"></label>'
