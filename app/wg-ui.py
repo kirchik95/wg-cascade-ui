@@ -590,6 +590,13 @@ def seed_exit_usage(registry, month=None):
 
 
 def seed_exit_usage_from_registry(month=None):
+    c = _conn()
+    seeded = c.execute(
+        "SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'"
+    ).fetchone()
+    c.close()
+    if seeded:
+        return False
     registry = load_registry()
     if registry is None:
         raise RuntimeError("client registry unavailable; exit usage migration not seeded")

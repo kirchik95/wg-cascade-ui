@@ -121,6 +121,32 @@ class TestExitAccounting(unittest.TestCase):
         finally:
             wgui.CLIENTS = old_clients
 
+    def test_completed_seed_does_not_require_registry(self):
+        c = wgui._conn()
+        c.execute("INSERT INTO schema_meta(key,value) VALUES('exit_usage_v1_seeded','original')")
+        c.commit(); c.close()
+        malformed = os.path.join(self.tmp.name, "malformed-clients.json")
+        with open(malformed, "w") as f:
+            f.write("{")
+        old_clients = wgui.CLIENTS
+        try:
+            for clients in (os.path.join(self.tmp.name, "missing-clients.json"), malformed):
+                with self.subTest(clients=clients):
+                    wgui.CLIENTS = clients
+                    try:
+                        result = wgui.seed_exit_usage_from_registry("2026-07-01")
+                    except Exception as exc:
+                        self.fail("completed seed required registry: %s" % exc)
+                    self.assertFalse(result)
+                    c = wgui._conn()
+                    marker = c.execute(
+                        "SELECT value FROM schema_meta WHERE key='exit_usage_v1_seeded'"
+                    ).fetchone()
+                    c.close()
+                    self.assertEqual(marker["value"], "original")
+        finally:
+            wgui.CLIENTS = old_clients
+
     def test_collection_success_preserves_persistence_error(self):
         persistence_note = getattr(wgui, "_sampler_persistence_note", None)
         self.assertIsNotNone(persistence_note)
