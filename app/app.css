@@ -573,6 +573,8 @@ padding:18px 18px calc(18px + var(--safe-b)) 18px}
 .monthpill{min-width:0;min-height:var(--ctrl-min)}.xpolicy{grid-template-columns:minmax(0,1fr)}
 .xptoggle{align-items:flex-start}.modal-wide .mrow button,.xpconfirm .mrow button{min-height:var(--ctrl-min);white-space:normal;overflow-wrap:anywhere}
 .desktop-only{display:none!important}
+/* iOS Safari zooms focused inputs when font-size < 16px — keep a11y pinch-zoom */
+.fl input,.fl select.fsel,.ssarea,.csearch,.logincard input{font-size:16px}
 }
 @media(min-width:561px){
 .mobile-only{display:none!important}
@@ -586,7 +588,7 @@ padding:calc(20px + var(--safe-t)) calc(20px + var(--safe-r)) calc(20px + var(--
 .login-sub{color:var(--dim);font-size:12.5px;margin:0 0 22px;text-align:center;line-height:1.35}
 .logincard label{display:block;font-size:12.5px;color:var(--dim);margin-bottom:14px}
 .logincard input{display:block;width:100%;margin-top:6px;padding:10px 12px;border-radius:9px;border:1px solid var(--line);
-background:var(--inputbg);color:var(--txt);font:14px inherit;outline:none;min-height:42px}
+background:var(--inputbg);color:var(--txt);font:16px inherit;outline:none;min-height:42px}
 .logincard input:focus{border-color:var(--accent)}
 .logincard button[type=submit]{width:100%;margin-top:8px;padding:11px;border-radius:var(--radius-ctrl);border:0;background:var(--txt);color:var(--bg);font:600 14px inherit;cursor:pointer;min-height:var(--btn-h)}
 .logincard button[type=submit]:focus-visible{box-shadow:var(--focus)}
