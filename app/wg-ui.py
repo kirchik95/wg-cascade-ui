@@ -14,6 +14,7 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 from exit_model import client_exit, normalize_exit
+import exit_policy
 import auth
 from auth import (
     BODY_ADMIN_MAX, BODY_LOGIN_MAX, LOGIN_MAX, SESSION_TTL,
@@ -108,7 +109,9 @@ def _peer_from_dump(lines):
     p = lines[1].split("\t")
     hs = int(p[4])
     return {"age": (int(time.time()) - hs) if hs else -1,
-            "up": bool(hs and (int(time.time()) - hs) < ONLINE_S)}
+            "up": bool(hs and (int(time.time()) - hs) < ONLINE_S),
+            "rx": int(p[5]),
+            "tx": int(p[6])}
 
 def wg_peer(iface):
     """Handshake age / up for the first peer on a cascade exit iface (wg-do / wg-us)."""
@@ -127,7 +130,9 @@ _egress = {                           # per-exit egress probe cache
 _host = {"cpu": 0, "prev": None}      # cpu% (computed from /proc/stat deltas)
 _live = {}                            # pubkey -> {ep,ip,hs,rx,tx} from last wg-cl dump
 _exit_peers = {"nl": None, "us": None}  # cached wg_peer() for cascade exits
+_exit_totals = {"nl": None, "us": None}
 _month_usage = {}                     # pubkey -> {rx,tx} calendar-month totals
+_exit_month_usage = {"nl": {"rx": 0, "tx": 0}, "us": {"rx": 0, "tx": 0}}
 _status_snap = None                   # last assembled /api/status payload
 _sampler_meta = {"ok_at": 0, "err": None, "err_at": 0}
 _lock = threading.Lock()
@@ -263,17 +268,25 @@ def _sampler():
                 peer = None
             with _lock:
                 _exit_peers[key] = peer
+                _exit_totals[key] = (peer["rx"], peer["tx"]) if peer else None
         if eps:
             try: log_connections(eps)
             except Exception: pass
-        if per and i % 12 == 0:        # persist per-client usage every ~60s
+        if i % 12 == 0:                # persist usage every ~60s
             try:
-                record_usage(per)
-                mu = usage_month()
+                if per:
+                    record_usage(per)
                 with _lock:
-                    _month_usage.clear(); _month_usage.update(mu)
-            except Exception:
-                pass
+                    exit_totals = {key: value for key, value in _exit_totals.items() if value is not None}
+                if exit_totals:
+                    record_exit_usage(exit_totals)
+                client_month = usage_month()
+                exit_month = exit_usage_month()
+                with _lock:
+                    _month_usage.clear(); _month_usage.update(client_month)
+                    _exit_month_usage.clear(); _exit_month_usage.update(exit_month)
+            except Exception as exc:
+                _sampler_note(False, "usage persistence: %s" % exc)
         if i and i % 720 == 0:         # auto-disable expired clients ~hourly
             try: call_admin(["expire"])
             except Exception: pass
@@ -405,6 +418,10 @@ def db_init():
         c.execute("CREATE TABLE IF NOT EXISTS usage(pubkey TEXT, day TEXT, rx INTEGER DEFAULT 0, "
                   "tx INTEGER DEFAULT 0, PRIMARY KEY(pubkey, day))")
         c.execute("CREATE TABLE IF NOT EXISTS counters(pubkey TEXT PRIMARY KEY, rx INTEGER, tx INTEGER)")
+        c.execute("CREATE TABLE IF NOT EXISTS exit_usage(exit TEXT, day TEXT, rx INTEGER DEFAULT 0, "
+                  "tx INTEGER DEFAULT 0, PRIMARY KEY(exit, day))")
+        c.execute("CREATE TABLE IF NOT EXISTS exit_counters(exit TEXT PRIMARY KEY, rx INTEGER, tx INTEGER)")
+        c.execute("CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS connections(pubkey TEXT, ts INTEGER, endpoint TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_conn ON connections(pubkey, ts)")
         c.commit(); c.close()
@@ -484,6 +501,60 @@ def record_usage(cur):
         c.execute("INSERT INTO counters(pubkey, rx, tx) VALUES(?,?,?) "
                   "ON CONFLICT(pubkey) DO UPDATE SET rx=?, tx=?", (pub, rx, tx, rx, tx))
     c.commit(); c.close()
+
+def record_exit_usage(cur, day=None):
+    c = _conn()
+    previous = {r["exit"]: (r["rx"], r["tx"])
+                for r in c.execute("SELECT exit,rx,tx FROM exit_counters")}
+    day = day or time.strftime("%Y-%m-%d")
+    for key in exit_policy.EXITS:
+        pair = cur.get(key)
+        if pair is None:
+            continue
+        rx, tx = map(int, pair)
+        old = previous.get(key)
+        drx = dtx = 0
+        if old is not None:
+            drx = rx - old[0] if rx >= old[0] else rx
+            dtx = tx - old[1] if tx >= old[1] else tx
+        if drx or dtx:
+            c.execute("INSERT INTO exit_usage(exit,day,rx,tx) VALUES(?,?,?,?) "
+                      "ON CONFLICT(exit,day) DO UPDATE SET rx=rx+?,tx=tx+?",
+                      (key, day, drx, dtx, drx, dtx))
+        c.execute("INSERT INTO exit_counters(exit,rx,tx) VALUES(?,?,?) "
+                  "ON CONFLICT(exit) DO UPDATE SET rx=?,tx=?",
+                  (key, rx, tx, rx, tx))
+    c.commit(); c.close()
+
+
+def exit_usage_month(now=None):
+    month = time.strftime("%Y-%m-01", time.localtime(now or time.time()))
+    out = {key: {"rx": 0, "tx": 0} for key in exit_policy.EXITS}
+    c = _conn()
+    rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
+                     "WHERE day>=? GROUP BY exit", (month,)).fetchall()
+    c.close()
+    for row in rows:
+        if row["exit"] in out:
+            out[row["exit"]] = {"rx": row["rx"] or 0, "tx": row["tx"] or 0}
+    return out
+
+
+def seed_exit_usage(registry, month=None):
+    month = month or time.strftime("%Y-%m-01")
+    c = _conn()
+    if c.execute("SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
+        c.close(); return False
+    assignments = {x.get("pubkey"): client_exit(x) for x in registry}
+    rows = c.execute("SELECT pubkey,day,rx,tx FROM usage WHERE day>=?", (month,)).fetchall()
+    for row in rows:
+        key = assignments.get(row["pubkey"], "nl")
+        c.execute("INSERT INTO exit_usage(exit,day,rx,tx) VALUES(?,?,?,?) "
+                  "ON CONFLICT(exit,day) DO UPDATE SET rx=rx+?,tx=tx+?",
+                  (key, row["day"], row["rx"], row["tx"], row["rx"], row["tx"]))
+    c.execute("INSERT INTO schema_meta(key,value) VALUES('exit_usage_v1_seeded','1')")
+    c.commit(); c.close(); return True
+
 
 def usage_month():
     try:
@@ -777,6 +848,7 @@ def main():
     if not (auth.PASS_PBKDF2 or auth.PASS_SHA):
         raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
+    seed_exit_usage(load_registry() or [])
     threading.Thread(target=_sampler, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
