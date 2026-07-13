@@ -37,8 +37,9 @@ apt install -y python3 wireguard-tools ipset conntrack qrencode openssl
 # reference: python3 3.12, wireguard-tools 1.0.x, ipset 7.x, conntrack 1.4.x, qrencode 4.x
 ```
 
-`ipset` + `conntrack` are only needed if you use the server-side split-tunnel
-(step 9); the rest are required.
+`ipset` is only needed for the server-side split-tunnel (step 9). `conntrack`
+is used there and for best-effort flow cleanup after client exit changes; the
+rest are required.
 
 ---
 
@@ -262,8 +263,8 @@ Priority order on the entry node:
 2. US clients (`fwmark 0x65`, pri 1100, table 65 → `wg-us`)
 3. Everyone else → default cascade via `wg-do` (NL)
 
-Changing a client's exit in the panel calls `setexit` → `exit-route.sh sync` and
-flushes that client's conntrack so existing flows don't stick to the old path.
+Changing a client's exit in the panel calls `setexit` → `exit-route.sh sync`,
+then attempts conntrack cleanup so existing flows do not stick to the old path.
 
 ### Bulk and automatic exit switching
 
@@ -274,11 +275,17 @@ client registry, including disabled clients. Manual and automatic switching
 use the same guard: the target must have a successful egress probe no more than
 60 seconds old and must remain below its monthly quota. There is no force mode.
 
-Quota use is calendar-month RX+TX collected directly from the exit peers on
-`wg-do` and `wg-us`, rather than regrouped client history. Automatic switching
-runs server-side and triggers exactly at `used >= quota`; the browser does not
-need to remain open. Month rollover starts a new usage window but leaves every
-client on its current exit—there is no automatic return to NL.
+Quota use is calendar-month RX+TX. On the first upgraded start, existing
+current-month per-client history is seeded once into exit buckets using each
+client's current assignment. If clients switched earlier that month, this
+seeded allocation is best-effort. The upgrade month is therefore a hybrid:
+subsequent usage comes directly from the exit peer counters on `wg-do` and
+`wg-us`. These local WireGuard counters are control-plane quota estimates, not
+provider billing totals; provider accounting and protocol overhead may differ.
+Automatic switching runs server-side and triggers exactly at `used >= quota`;
+the browser does not need to remain open. Month rollover starts a new usage
+window but leaves every client on its current exit—there is no automatic return
+to NL.
 
 If the target is unhealthy, its probe is stale, or its quota is exhausted, the
 switch is blocked and assignments stay unchanged. Manual target controls show
@@ -291,9 +298,11 @@ sudoers rules, and the service is collecting samples. For `helper_failed`, check
 
 The helper applies and verifies the new registry and routing as one operation.
 If routing fails, it restores the prior registry and routing; an explicit
-rollback-failed error is critical and requires operator repair. On success,
-conntrack is flushed for changed active clients, so existing connections may
-briefly reconnect.
+rollback-failed error is critical and requires operator repair. After a
+successful commit, it attempts conntrack cleanup for changed active clients.
+Cleanup is best-effort: a cleanup failure neither rolls back the switch nor
+turns it into a failure. Active connections may briefly reconnect when cleanup
+succeeds; otherwise established flows can remain until they expire or reconnect.
 
 The UI and privileged helper generate and manage
 `/etc/wg-ui/exit-policy.json` atomically as `root:wgui` with mode `0640`. Use

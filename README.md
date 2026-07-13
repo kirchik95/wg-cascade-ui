@@ -19,8 +19,13 @@ The exit quota controls can move the complete client registry, including
 disabled clients, in one confirmed operation. Manual and automatic moves both
 require a fresh, healthy, non-exhausted target; there is no force option.
 Optional **Auto switch** runs on the server and triggers exactly when
-`used >= quota` for calendar-month RX+TX measured from the `wg-do` / `wg-us`
-WireGuard peer counters, so the browser need not remain open. Each exit has an
+`used >= quota` for calendar-month RX+TX. On the first upgraded start, existing
+current-month client history is seeded once using each client's current exit;
+if clients switched earlier that month, that seed is a best-effort estimate.
+The upgrade month is therefore a hybrid: subsequent usage comes directly from
+the `wg-do` / `wg-us` WireGuard peer counters. The browser need not remain open.
+These local counters guide switching but are not provider billing totals;
+provider accounting and protocol overhead can differ. Each exit has an
 independent whole-GiB quota (500 GiB by default) under **Exit routing**, opened
 from either NL/US header quota control. A new month resets the usage window but
 does not automatically return clients to NL.
