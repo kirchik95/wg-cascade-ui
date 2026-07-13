@@ -408,8 +408,10 @@ border:1px solid var(--line);background:var(--inputbg);color:var(--txt);font:12.
 .switch span{position:absolute;top:3px;left:3px;width:19px;height:19px;border-radius:50%;background:#fff;transition:left .2s}
 .switch.on span{left:22px}
 /* exit routing policy */
-.policyalert{margin-bottom:12px;overflow-wrap:anywhere}
-.policyalert>span{min-width:0}.policyalert-detail{opacity:.9}
+.policyalert{margin-bottom:12px;overflow-wrap:anywhere;color:var(--txt)}
+.policyalert span{opacity:1}.policyalert>span{min-width:0}
+.policyalert.bad>svg{color:var(--red)}.policyalert.warn>svg{color:var(--amber)}
+.policyalert b,.policyalert-detail{color:var(--txt)}
 .modal.modal-wide{max-width:720px}
 .xpolicy{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-bottom:16px}
 .xprow{min-width:0;padding:12px;border:1px solid var(--line);border-radius:11px;background:var(--panel2)}
