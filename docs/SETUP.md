@@ -65,7 +65,7 @@ install -d -o wgui -g wgui  -m 750 /var/lib/wg-ui      # history.db + audit.log
 | Dir | Owner | Mode | Holds |
 | --- | --- | --- | --- |
 | `/opt/wg-ui` | `root:root` | 755 | the code (from `app/`) |
-| `/etc/wg-ui` | `root:wgui` | 750 | `cert.pem`, `key.pem`, `wg-ui.env`, `clients.json`, split data |
+| `/etc/wg-ui` | `root:wgui` | 750 | `cert.pem`, `key.pem`, `wg-ui.env`, `clients.json`, `exit-policy.json`, split data |
 | `/var/lib/wg-ui` | `wgui:wgui` | 750 | `history.db` (service), `audit.log` (helper, as root) |
 
 ---
@@ -264,6 +264,42 @@ Priority order on the entry node:
 
 Changing a client's exit in the panel calls `setexit` → `exit-route.sh sync` and
 flushes that client's conntrack so existing flows don't stick to the old path.
+
+### Bulk and automatic exit switching
+
+The NL and US quota controls in the header open **Exit routing**. Configure an
+independent whole-GiB monthly quota for each exit (500 GiB by default), enable
+or disable **Auto switch**, or confirm **Switch all** to update the complete
+client registry, including disabled clients. Manual and automatic switching
+use the same guard: the target must have a successful egress probe no more than
+60 seconds old and must remain below its monthly quota. There is no force mode.
+
+Quota use is calendar-month RX+TX collected directly from the exit peers on
+`wg-do` and `wg-us`, rather than regrouped client history. Automatic switching
+runs server-side and triggers exactly at `used >= quota`; the browser does not
+need to remain open. Month rollover starts a new usage window but leaves every
+client on its current exit—there is no automatic return to NL.
+
+If the target is unhealthy, its probe is stale, or its quota is exhausted, the
+switch is blocked and assignments stay unchanged. Manual target controls show
+the reason; an automatic block remains as a critical main-screen alert and is
+retried by the server. For `counter_unavailable`, verify that both exit
+interfaces are up, their `wg show ... dump` commands work through the configured
+sudoers rules, and the service is collecting samples. For `helper_failed`, check
+`journalctl -u wg-ui.service`, `/var/lib/wg-ui/audit.log`, and
+`/opt/wg-ui/exit-route.sh status` before retrying.
+
+The helper applies and verifies the new registry and routing as one operation.
+If routing fails, it restores the prior registry and routing; an explicit
+rollback-failed error is critical and requires operator repair. On success,
+conntrack is flushed for changed active clients, so existing connections may
+briefly reconnect.
+
+The UI and privileged helper generate and manage
+`/etc/wg-ui/exit-policy.json` atomically as `root:wgui` with mode `0640`. Use
+**Exit routing** to save changes; do not create or hand-edit this file. Missing
+or invalid policy data safely disables Auto switch, uses 500 GiB per exit, and
+shows a configuration warning until valid settings are saved.
 
 ---
 

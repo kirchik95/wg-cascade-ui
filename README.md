@@ -15,6 +15,16 @@ their configs (with QR) — plus a **server-side global split-tunnel** that rout
 RU services (Wildberries, Ozon, Kinopoisk, …) directly out of the entry node
 instead of through the cascade.
 
+The exit quota controls can move the complete client registry, including
+disabled clients, in one confirmed operation. Manual and automatic moves both
+require a fresh, healthy, non-exhausted target; there is no force option.
+Optional **Auto switch** runs on the server and triggers exactly when
+`used >= quota` for calendar-month RX+TX measured from the `wg-do` / `wg-us`
+WireGuard peer counters, so the browser need not remain open. Each exit has an
+independent whole-GiB quota (500 GiB by default) under **Exit routing**, opened
+from either NL/US header quota control. A new month resets the usage window but
+does not automatically return clients to NL.
+
 ## Design
 
 - **Zero dependencies, no build step.** Pure Python standard library
@@ -62,10 +72,13 @@ All sensitive and stateful files live on the server, outside the code dir:
 | `/etc/wg-ui/wg-ui.env` | `WGUI_SALT`, `WGUI_PASS_PBKDF2` (or legacy `WGUI_PASS_SHA256`), `WGUI_SESSION_SECRET` |
 | `/etc/wg-ui/{cert,key}.pem` | TLS cert/key (self-signed) |
 | `/etc/wg-ui/clients.json`, `names.json` | client registry |
+| `/etc/wg-ui/exit-policy.json` | UI/helper-managed Auto switch and per-exit quotas (`root:wgui`, mode `0640`) |
 | `/etc/wg-ui/split-*`, `ru-zone.cache` | generated split-tunnel data |
 | `/var/lib/wg-ui/history.db`, `audit.log`, `session.gen` | traffic history + audit trail + session generation |
 
 See `deploy/wg-ui.env.example` for how to generate the auth values.
+Save policy changes through **Exit routing**; the privileged helper generates
+and updates `exit-policy.json` atomically. Do not hand-edit the policy file.
 
 ## Deploy
 
