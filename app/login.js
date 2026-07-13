@@ -1,7 +1,10 @@
 (function(){
  var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(e){L='ru'}
+ document.documentElement.lang=L==='ru'?'ru':'en';
+ var langBtn=document.getElementById('lang');
+ if(langBtn)langBtn.textContent=L==='ru'?'EN':'RU';
  if(L==='ru'){
-  var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти","Show password":"Показать пароль","Hide password":"Скрыть пароль","Toggle theme":"Переключить тему"};
+  var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти","Show password":"Показать пароль","Hide password":"Скрыть пароль","Toggle theme":"Сменить тему","Language / Язык":"Язык / Language","Too many attempts — try again in a few minutes":"Слишком много попыток — подождите несколько минут"};
   var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),ns=[],n;while(n=w.nextNode())ns.push(n);
   ns.forEach(function(t){var k=t.nodeValue.trim();if(k&&R[k])t.nodeValue=t.nodeValue.replace(k,R[k])});
   document.querySelectorAll('[aria-label]').forEach(function(e){var k=e.getAttribute('aria-label');if(R[k])e.setAttribute('aria-label',R[k]);});
@@ -9,8 +12,9 @@
  }
 })();
 (function(){var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
- if(location.search.indexOf('e=2')>=0){e.textContent=ru?'Слишком много попыток — подождите несколько минут':'Too many attempts — try again in a few minutes';e.style.display='block'}
- else if(location.search.indexOf('e=1')>=0)e.style.display='block';})();
+ if(location.search.indexOf('e=2')>=0){e.textContent=ru?'Слишком много попыток — подождите несколько минут':'Too many attempts — try again in a few minutes';e.style.display='block';e.setAttribute('role','alert')}
+ else if(location.search.indexOf('e=1')>=0){e.style.display='block';e.setAttribute('role','alert')}
+})();
 (function(){
  var btn=document.getElementById('pwtoggle'),inp=document.getElementById('pw');
  if(!btn||!inp)return;
@@ -26,6 +30,14 @@
  });
 })();
 document.addEventListener('click',function(e){
- var t=e.target&&e.target.closest&&e.target.closest('[data-act="theme"]');
- if(t&&typeof toggleTheme==='function')toggleTheme();
+ var t=e.target&&e.target.closest&&e.target.closest('[data-act]');
+ if(!t)return;
+ var a=t.getAttribute('data-act');
+ if(a==='theme'&&typeof toggleTheme==='function')toggleTheme();
+ if(a==='lang'){
+  var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(x){L='ru'}
+  L=L==='ru'?'en':'ru';
+  try{localStorage.setItem('wgui-lang',L)}catch(x){}
+  location.reload();
+ }
 });

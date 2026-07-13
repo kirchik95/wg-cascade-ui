@@ -35,29 +35,31 @@ function clientCardHTML(p){
  const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="'+esc(tr('Click to switch exit'))+'" aria-label="'+esc(tr('Switch exit')+': '+exit.toUpperCase())+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
   +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="'+esc(tr('Temporary client (auto-disables)'))+'">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
   +(p.enabled?'':'<span class="chip">'+tr('disabled')+'</span>');
- const xfer='<div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+esc(p.pubkey)+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+esc(p.pubkey)+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
+ const xfer='<div class="xfer mono" data-tip="'+esc(tr('Total since connect'))+'"><span class="dn">↓ <b class="vx" data-k="rx-'+esc(p.pubkey)+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+esc(p.pubkey)+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
  const cls='crow '+(_clientsView==='list'?'crow-list ':'')+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'');
  const head='<div class="'+cls+'" data-pk="'+esc(p.pubkey)+'" data-ssig="'+esc(cardStructSig(p))+'">';
+ const onlineTip=tr(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'));
+ const onlineLbl=tr(p.online?'online':'offline');
  if(_clientsView==='list'){
   return head
-   +'<div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
+   +'<div class="av" data-tip="'+esc(onlineTip)+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
    +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
-   +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</span>'
-   +'<span class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</span>'
-   +'<span class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</span>'
+   +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="'+esc(tr('Last WireGuard handshake'))+'">'+onlineLbl+'</span>'
+   +'<span class="age" data-tip="'+esc(tr('Last handshake'))+'">'+ic('clock',11)+fmtAge(p.age)+'</span>'
+   +'<span class="ipa mono" data-tip="'+esc(tr('Tunnel address'))+'">'+esc(p.ip)+'</span>'
    +xfer+'</div></div>'
    +'<div class="acts">'+acts+'</div></div>';
  }
  const sv=csparkSVG(p.spark);
  return head
-  +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
+  +'<div class="ctop"><div class="av" data-tip="'+esc(onlineTip)+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
   +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
-  +'<div class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</div>'
-  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div>'
-  +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
-  +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
+  +'<div class="ipa mono" data-tip="'+esc(tr('Tunnel address'))+'">'+esc(p.ip)+'</div>'
+  +(p.endpoint?'<div class="ep mono" data-tip="'+esc(tr('Client public endpoint'))+'">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div>'
+  +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="'+esc(tr('Last WireGuard handshake'))+'">'+onlineLbl+'</div>'
+  +'<div class="age" data-tip="'+esc(tr('Last handshake'))+'">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
   +'<div class="stat">'+xfer
-  +'<div class="mo mono" data-tip="Traffic this calendar month">'+(p.mrx||p.mtx?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'')+'</div></div>'
+  +'<div class="mo mono" data-tip="'+esc(tr('Traffic this calendar month'))+'">'+(p.mrx||p.mtx?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'')+'</div></div>'
   +'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+(sv||'')+'</div>'
   +'<div class="acts">'+acts+'</div></div>';
 }
@@ -76,13 +78,13 @@ function updateCardLive(el,p){
  el.classList.toggle('on',!!p.online);
  const av=el.querySelector('.av');
  if(av){
-  av.setAttribute('data-tip',p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'));
+  av.setAttribute('data-tip',tr(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled')));
   const avdot=av.querySelector('.avdot');if(avdot)avdot.classList.toggle('on',!!p.online);
  }
  const age=el.querySelector('.age');if(age)age.innerHTML=ic('clock',11)+fmtAge(p.age);
  const hs=el.querySelector('.hs');
  if(hs){
-  hs.textContent=p.online?'online':'offline';
+  hs.textContent=tr(p.online?'online':'offline');
   hs.classList.toggle('o',!p.online);
  }
  const pillstat=el.querySelector('.pillstat');
@@ -97,7 +99,7 @@ function updateCardLive(el,p){
   if(ep){ep.innerHTML=html;ep.hidden=false;}
   else{
    const idc=el.querySelector('.idc');
-   if(idc)idc.insertAdjacentHTML('beforeend','<div class="ep mono" data-tip="Client public endpoint">'+html+'</div>');
+   if(idc)idc.insertAdjacentHTML('beforeend','<div class="ep mono" data-tip="'+esc(tr('Client public endpoint'))+'">'+html+'</div>');
   }
  }else if(ep){ep.innerHTML='';ep.hidden=true;}
  const mo=el.querySelector('.mo');
@@ -178,7 +180,11 @@ function renderClients(peers){
   }
   existing.delete(p.pubkey);
  });
- existing.forEach(el=>{if(typeof el.remove==='function')el.remove();});
+ existing.forEach(el=>{
+  const pk=el.dataset&&el.dataset.pk;
+  if(pk){delete _pv['age-'+pk];delete _pv['rx-'+pk];delete _pv['tx-'+pk];}
+  if(typeof el.remove==='function')el.remove();
+ });
  /* preserve visual order */
  order.forEach(pk=>{
   const el=findCard(root,pk);
@@ -236,8 +242,9 @@ function setClientsView(v){
 }
 
 if(typeof navigator!=='undefined'&&'serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){})}
-setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();renderSkeleton();tick();setInterval(tick,5000);
+setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();renderSkeleton();tick();scheduleTick(5000);
 if(typeof window!=='undefined'&&window.addEventListener){
  window.addEventListener('online',()=>{setOffline(false);tick();});
  window.addEventListener('offline',()=>setOffline(true));
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick();});
 }

@@ -15,9 +15,9 @@ function renderAlert(t){
  const bad=t.state==='down';
  el.className='alert '+(bad?'bad':'warn');
  const detail=bad
-  ?'No fresh handshake on either exit link — client traffic fails closed.'
-  :'One exit is down or unverified — clients on that path may fail.';
- el.innerHTML=ic('warn',17)+'<div><b>'+(bad?'Cascade is down':'Cascade degraded')+'</b> <span>'+detail+'</span></div>';
+  ?tr('No fresh handshake on either exit link — client traffic fails closed.')
+  :tr('One exit is down or unverified — clients on that path may fail.');
+ el.innerHTML=ic('warn',17)+'<div><b>'+tr(bad?'Cascade is down':'Cascade degraded')+'</b> <span>'+detail+'</span></div>';
  applyI18n(el);
 }
 let _cascKey="";
@@ -77,7 +77,7 @@ function renderCascade(t,rud){
  const key=[t.state,nlCls,usCls,entCls,nlIP,usIP,hs,nlQ,usQ,rud?1:0,health.label,LANG].join('|');
  if(key===_cascKey)return;
  _cascKey=key;
- const rudBadge=rud?'<span class="casc-rud" data-tip="RU traffic bypasses the cascade and exits directly via VDSina (RU IP)">'+tr('RU → direct')+'</span>':'';
+ const rudBadge=rud?'<span class="casc-rud" data-tip="'+esc(tr('RU traffic bypasses the cascade and exits directly via VDSina (RU IP)'))+'">'+tr('RU → direct')+'</span>':'';
  const head='<div class="casc-head">'
   +'<div class="casc-title">'+tr('Cascade topology')+'</div>'
   +'<div class="casc-badges">'+rudBadge
