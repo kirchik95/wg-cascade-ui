@@ -128,23 +128,16 @@ count_owned_marks() {
 
 policy_rule_present() {
     local rules
-    rules=$(ip rule show) || return 2
+    rules=$(ip -N rule show) || return 2
     awk -v mark="$MARK" -v table="$TABLE" -v priority="$PRI" '
         {
             line_priority = $1
             sub(/:$/, "", line_priority)
-            priority_ok = (line_priority == priority)
-            mark_ok = 0
-            table_ok = 0
-            for (i = 1; i < NF; i++) {
-                if ($i == "pref" && $(i + 1) == priority)
-                    priority_ok = 1
-                if ($i == "fwmark" && ($(i + 1) == mark || $(i + 1) == mark "/0xffffffff"))
-                    mark_ok = 1
-                if (($i == "lookup" || $i == "table") && $(i + 1) == table)
-                    table_ok = 1
-            }
-            if (priority_ok && mark_ok && table_ok)
+            if (NF == 7 &&
+                line_priority == priority &&
+                $2 == "from" && $3 == "all" &&
+                $4 == "fwmark" && ($5 == mark || $5 == mark "/0xffffffff") &&
+                ($6 == "lookup" || $6 == "table") && $7 == table)
                 found = 1
         }
         END { exit !found }

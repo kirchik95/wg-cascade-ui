@@ -30,6 +30,7 @@ class TestExitRoute(unittest.TestCase):
         failures=(),
         silent_applies=(),
         quote_comments=False,
+        table_alias=None,
     ):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -80,12 +81,23 @@ class TestExitRoute(unittest.TestCase):
                         if "route" not in silent:
                             route.write_text("wg-us|65\n")
                         sys.exit(0)
-                    if args == ["rule", "show"]:
+                    if args in (["rule", "show"], ["-N", "rule", "show"]):
                         count = int(rule_show_count.read_text()) + 1
                         rule_show_count.write_text(str(count))
                         if "rule_inspect" in failures or ("rule_verify" in failures and count >= 2):
                             sys.exit(1)
-                        sys.stdout.write(policy.read_text())
+                        rules = policy.read_text()
+                        alias = os.environ["FAKE_TABLE_ALIAS"]
+                        if args[0] == "-N" and alias:
+                            rendered = []
+                            for line in rules.splitlines():
+                                tokens = line.split()
+                                for i, token in enumerate(tokens[:-1]):
+                                    if token in ("lookup", "table") and tokens[i + 1] == alias:
+                                        tokens[i + 1] = "65"
+                                rendered.append(" ".join(tokens))
+                            rules = "".join(f"{line}\n" for line in rendered)
+                        sys.stdout.write(rules)
                         sys.exit(0)
                     if args == ["rule", "add", "fwmark", "0x65", "lookup", "65", "priority", "1100"]:
                         if "rule" in failures:
@@ -214,6 +226,7 @@ class TestExitRoute(unittest.TestCase):
                 FAKE_NAT_STATE=str(nat),
                 FAKE_RULE_SHOW_COUNT=str(rule_show_count),
                 FAKE_QUOTE_COMMENTS="1" if quote_comments else "0",
+                FAKE_TABLE_ALIAS=table_alias or "",
             )
             result = subprocess.run(
                 ["bash", str(SCRIPT), "sync"],
@@ -332,6 +345,37 @@ class TestExitRoute(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["policy"], [wrong, CORRECT_POLICY])
+
+    def test_restricted_source_policy_rule_does_not_suppress_global_rule(self):
+        restricted = "1100: from 10.10.0.99 fwmark 0x65 lookup 65"
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(restricted,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["policy"], [restricted, CORRECT_POLICY])
+
+    def test_interface_selector_policy_rule_does_not_suppress_global_rule(self):
+        restricted = "1100: from all iif wg-cl fwmark 0x65 lookup 65"
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(restricted,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["policy"], [restricted, CORRECT_POLICY])
+
+    def test_numeric_rule_output_recognizes_named_table_alias(self):
+        named = "1100: from all fwmark 0x65 lookup cascade-us"
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(named,),
+            table_alias="cascade-us",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["policy"], [named])
 
     def test_wrong_interface_does_not_satisfy_route_verification(self):
         result, _ = self.run_sync(
