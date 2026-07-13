@@ -47,6 +47,7 @@ ONLINE_S    = int(os.environ.get("WGUI_ONLINE_SECS", "180"))
 SAMPLE_S    = int(os.environ.get("WGUI_SAMPLE_SECS", "5"))
 ADMIN       = ["sudo", "-n", "/usr/bin/python3", "/opt/wg-ui/wg-admin.py"]
 DB          = os.environ.get("WGUI_DB", "/var/lib/wg-ui/history.db")
+EXIT_POLICY = os.environ.get("WGUI_EXIT_POLICY", "/etc/wg-ui/exit-policy.json")
 SPLIT_STATE = os.environ.get("WGUI_SPLIT_STATE", "/etc/wg-ui/split-server.state")
 AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/lib/wg-ui/audit.log")
 MAX_CONN    = int(os.environ.get("WGUI_MAX_CONN", "64"))
@@ -139,6 +140,171 @@ _sampler_meta = {
     "persistence": {"ok_at": 0, "err": None, "err_at": 0},
 }
 _lock = threading.Lock()
+_policy_lock = threading.Lock()
+_policy_runtime = {"blocked": None, "last_switch": None}
+
+
+def load_exit_policy():
+    return exit_policy.load_policy(EXIT_POLICY)
+
+
+def assignment_counts(registry=None):
+    counts = {key: 0 for key in exit_policy.EXITS}
+    clients = registry if registry is not None else (load_registry() or [])
+    for client in clients:
+        counts[client_exit(client)] += 1
+    return counts
+
+
+def policy_inputs(tunnel_data=None, peers=None):
+    policy, warning = load_exit_policy()
+    with _lock:
+        usage = {
+            key: int((_exit_month_usage.get(key) or {}).get("rx", 0))
+                 + int((_exit_month_usage.get(key) or {}).get("tx", 0))
+            for key in exit_policy.EXITS
+        }
+        if tunnel_data is None:
+            now = int(time.time())
+            health = {
+                key: {
+                    "ok": bool((_egress.get(key) or {}).get("ok")),
+                    "checked_age": now - int((_egress.get(key) or {}).get("at", 0))
+                                   if (_egress.get(key) or {}).get("at") else -1,
+                }
+                for key in exit_policy.EXITS
+            }
+        else:
+            health = None
+    if tunnel_data is not None:
+        exits = tunnel_data.get("exits", {}) if isinstance(tunnel_data, dict) else {}
+        health = {
+            key: {
+                "ok": bool((exits.get(key) or {}).get("ok")),
+                "checked_age": int((exits.get(key) or {}).get("checked_age", -1)),
+            }
+            for key in exit_policy.EXITS
+        }
+    return policy, usage, assignment_counts(peers), health, warning
+
+
+def exit_policy_status(tunnel_data=None, peers=None):
+    policy, usage, assignments, health, warning = policy_inputs(tunnel_data, peers)
+    with _lock:
+        runtime = json.loads(json.dumps(_policy_runtime))
+    exits = {}
+    for key in exit_policy.EXITS:
+        age = int(health[key]["checked_age"])
+        exits[key] = {
+            "used": usage[key],
+            "quota": policy["quota_bytes"][key],
+            "clients": assignments[key],
+            "healthy": bool(health[key]["ok"] and 0 <= age <= exit_policy.HEALTH_MAX_AGE),
+            "checked_age": age,
+            "exhausted": usage[key] >= policy["quota_bytes"][key],
+        }
+    return {
+        "auto_switch": policy["auto_switch"],
+        "exits": exits,
+        "blocked": runtime["blocked"],
+        "last_switch": runtime["last_switch"],
+        "warning": warning,
+    }
+
+
+_BLOCK_MESSAGES = {
+    "invalid_target": "The requested exit is invalid.",
+    "target_unhealthy": "The target exit health check failed.",
+    "target_stale": "The target exit health check is stale.",
+    "target_exhausted": "The target exit monthly quota is exhausted.",
+    "both_exhausted": "Both exit monthly quotas are exhausted.",
+    "helper_failed": "The exit switch helper failed.",
+}
+
+
+def _with_block_message(blocked):
+    value = dict(blocked)
+    value.setdefault("source", None)
+    value.setdefault("target", None)
+    value.setdefault("message", _BLOCK_MESSAGES.get(value.get("code"), "Exit switching is blocked."))
+    return value
+
+
+def _set_policy_block(blocked):
+    value = _with_block_message(blocked)
+    with _lock:
+        _policy_runtime["blocked"] = value
+    return value
+
+
+def _clear_policy_block():
+    with _lock:
+        _policy_runtime["blocked"] = None
+
+
+def _blocked_result(blocked):
+    value = _with_block_message(blocked)
+    return {"ok": False, "error": value["code"], "http_status": 409, **value}
+
+
+def guarded_exit_switch(target, reason):
+    with _policy_lock:
+        policy, usage, assignments, health, warning = policy_inputs()
+        source = "us" if target == "nl" else "nl"
+        if reason == "quota":
+            decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
+            if decision["blocked"]:
+                blocked = _set_policy_block(decision["blocked"])
+                return _blocked_result(blocked)
+            action = decision["action"]
+            if not action:
+                _clear_policy_block()
+                return {"ok": True, "exit": target, "changed": 0}
+            target = action["target"]
+            source = action["source"]
+        blocked = exit_policy.target_block(target, policy, usage, health)
+        if blocked:
+            if reason == "quota":
+                blocked = _set_policy_block(dict(blocked, source=source))
+            return _blocked_result(blocked)
+        if assignments.get(target, 0) == sum(assignments.values()):
+            _clear_policy_block()
+            return {"ok": True, "exit": target, "changed": 0}
+        result = call_admin(["setexitall", target, reason])
+        if result.get("ok"):
+            event = {
+                "ts": int(time.time()),
+                "source": source,
+                "target": target,
+                "reason": reason,
+                "changed": result.get("changed", 0),
+            }
+            with _lock:
+                _policy_runtime["blocked"] = None
+                _policy_runtime["last_switch"] = event
+        elif reason == "quota":
+            _set_policy_block({
+                "code": "helper_failed",
+                "source": source,
+                "target": target,
+                "error": result.get("error", "helper failed"),
+            })
+        log_event("exit_switch", ok=bool(result.get("ok")), reason=reason,
+                  target=target, changed=result.get("changed", 0),
+                  error=result.get("error"))
+        return result
+
+
+def evaluate_auto_switch():
+    policy, usage, assignments, health, warning = policy_inputs()
+    decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
+    if decision["blocked"]:
+        blocked = _set_policy_block(decision["blocked"])
+        return {"ok": False, **blocked}
+    if not decision["action"]:
+        _clear_policy_block()
+        return {"ok": True, "changed": 0}
+    return guarded_exit_switch(decision["action"]["target"], "quota")
 
 def clients_status():
     """Assemble peer rows from sampler caches — no wg dump on the request path."""
@@ -289,6 +455,7 @@ def _sampler():
             try: log_connections(eps)
             except Exception: pass
         if i % 12 == 0:                # persist usage every ~60s
+            exit_totals = {}
             try:
                 if per:
                     record_usage(per)
@@ -304,6 +471,12 @@ def _sampler():
                 _sampler_persistence_note(True)
             except Exception as exc:
                 _sampler_persistence_note(False, "usage persistence: %s" % exc)
+            else:
+                if len(exit_totals) == len(exit_policy.EXITS):
+                    try:
+                        evaluate_auto_switch()
+                    except Exception as exc:
+                        log_event("exit_auto_switch", ok=False, error=str(exc)[:200])
         if i and i % 720 == 0:         # auto-disable expired clients ~hourly
             try: call_admin(["expire"])
             except Exception: pass
@@ -401,8 +574,11 @@ def rud_on():
 def refresh_status_cache():
     """Build /api/status payload from caches; called by the sampler thread."""
     global _status_snap
-    snap = {"now": int(time.time()), "tunnel": tunnel(), "host": host(), "rud": rud_on(),
-            "peers": clients_status(), "thr": throughput(), "sampler": sampler_info()}
+    tunnel_data = tunnel()
+    peers = clients_status()
+    snap = {"now": int(time.time()), "tunnel": tunnel_data, "host": host(), "rud": rud_on(),
+            "peers": peers, "thr": throughput(), "sampler": sampler_info(),
+            "exit_policy": exit_policy_status(tunnel_data, peers)}
     with _lock:
         _status_snap = snap
     return json.loads(json.dumps(snap))
@@ -831,6 +1007,8 @@ class H(BaseHTTPRequestHandler):
                 b = json.loads(raw or b"{}")
             except Exception:
                 return self._json(400, {"ok": False, "error": "bad json"})
+            if not isinstance(b, dict):
+                return self._json(400, {"ok": False, "error": "request body must be an object"})
             op = b.get("op")
             pub = str(b.get("pubkey", ""))
             name = str(b.get("name", ""))
@@ -854,6 +1032,39 @@ class H(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
                 argv = ["setexit", pub, exit_]
+            elif op == "setexitall":
+                raw_target = b.get("exit")
+                if not isinstance(raw_target, str) or not raw_target.strip():
+                    return self._json(400, {"ok": False, "error": "invalid exit"})
+                target = raw_target.strip().lower()
+                try:
+                    target = normalize_exit(target)
+                except ValueError as e:
+                    return self._json(400, {"ok": False, "error": str(e)})
+                res = guarded_exit_switch(target, "manual")
+                log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
+                          ip=self.client_address[0], name=None)
+                payload = dict(res)
+                http_status = payload.pop("http_status", 200 if payload.get("ok") else 400)
+                return self._json(http_status, payload)
+            elif op == "setexitpolicy":
+                auto_switch = b.get("auto_switch")
+                quotas = b.get("quotas_gib")
+                if (not isinstance(auto_switch, bool) or not isinstance(quotas, dict)
+                        or set(quotas) != set(exit_policy.EXITS)
+                        or any(type(quotas[key]) is not int for key in exit_policy.EXITS)):
+                    return self._json(400, {"ok": False, "error": "invalid exit policy"})
+                try:
+                    validated = exit_policy.policy_from_gib(
+                        auto_switch, quotas["nl"], quotas["us"])
+                except (KeyError, TypeError, ValueError) as e:
+                    return self._json(400, {"ok": False, "error": str(e)})
+                argv = [
+                    "setexitpolicy",
+                    "1" if validated["auto_switch"] else "0",
+                    str(validated["quota_bytes"]["nl"] // exit_policy.GIB),
+                    str(validated["quota_bytes"]["us"] // exit_policy.GIB),
+                ]
             elif op == "export":
                 argv = ["export"]
             elif op == "rename":
@@ -878,6 +1089,8 @@ class H(BaseHTTPRequestHandler):
             # split ops run build-split (RU-zone download, up to 90 s) + ipset reload —
             # the default 30 s would kill the helper mid-operation
             res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
+            if op == "setexitpolicy" and res.get("ok"):
+                refresh_status_cache()
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)

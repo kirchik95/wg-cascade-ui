@@ -418,6 +418,7 @@ class TestStatusCache(unittest.TestCase):
             self.assertIsNotNone(wgui._status_snap)
             self.assertEqual(wgui._status_snap["tunnel"]["state"], "up")
             self.assertIn("sampler", wgui._status_snap)
+            self.assertIn("exit_policy", wgui._status_snap)
 
 
 class TestAuditRotate(unittest.TestCase):

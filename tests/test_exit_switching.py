@@ -8,6 +8,8 @@ import pathlib
 import stat
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -18,6 +20,13 @@ sys.path.insert(0, str(APP))
 spec = importlib.util.spec_from_file_location("wgadmin_exit_switching", str(APP / "wg-admin.py"))
 wgadmin = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wgadmin)
+
+os.environ.setdefault("WGUI_SESSION_SECRET", "exit-switching-test-secret-0123456789")
+os.environ.setdefault("WGUI_GEN", os.path.join(tempfile.gettempdir(), "wgui-exit-switching.gen"))
+wgui_spec = importlib.util.spec_from_file_location("wgui_exit_switching", str(APP / "wg-ui.py"))
+wgui = importlib.util.module_from_spec(wgui_spec)
+wgui_spec.loader.exec_module(wgui)
+import exit_policy
 
 
 class TestBulkAdmin(unittest.TestCase):
@@ -325,6 +334,355 @@ class TestBulkAdmin(unittest.TestCase):
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
             wgadmin.sync_exit_routes("10.10.0.2")
         self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "route failed"})
+
+
+class TestServerPolicy(unittest.TestCase):
+    def setUp(self):
+        runtime = getattr(wgui, "_policy_runtime", None)
+        if runtime is not None:
+            with wgui._lock:
+                runtime["blocked"] = None
+                runtime["last_switch"] = None
+
+    def patch(self, name, value):
+        old = getattr(wgui, name)
+        setattr(wgui, name, value)
+        self.addCleanup(setattr, wgui, name, old)
+
+    @staticmethod
+    def inputs(auto=True, nl_used=0, us_used=0, nl_clients=1, us_clients=0,
+               nl_health=None, us_health=None):
+        return (
+            exit_policy.policy_from_gib(auto, 1, 1),
+            {"nl": nl_used, "us": us_used},
+            {"nl": nl_clients, "us": us_clients},
+            {
+                "nl": nl_health or {"ok": True, "checked_age": 1},
+                "us": us_health or {"ok": True, "checked_age": 1},
+            },
+            None,
+        )
+
+    def request(self, body, *, csrf=True, user="admin"):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+
+        class Fake(wgui.H):
+            def __init__(self):
+                self.path = "/api/admin"
+                self.command = "POST"
+                self.client_address = ("127.0.0.1", 1)
+                token = wgui.csrf_for(user) if csrf and user else "wrong"
+                self.headers = {"X-CSRF": token, "Content-Length": str(len(raw))}
+                self.rfile = io.BytesIO(raw)
+                self._code = None
+                self._body_bytes = b""
+
+            def _user(self):
+                return user
+
+            def send_response(self, code):
+                self._code = code
+
+            def send_header(self, key, value):
+                pass
+
+            def end_headers(self):
+                pass
+
+        class Writer:
+            def __init__(self, handler):
+                self.handler = handler
+
+            def write(self, body_bytes):
+                self.handler._body_bytes += body_bytes
+
+        handler = Fake()
+        handler.wfile = Writer(handler)
+        handler.do_POST()
+        parsed = json.loads(handler._body_bytes.decode()) if handler._body_bytes else None
+        return handler._code, parsed
+
+    def test_status_contains_server_exit_usage_and_assignments(self):
+        self.patch("policy_inputs", lambda *args, **kwargs: (
+            exit_policy.policy_from_gib(True, 500, 750),
+            {"nl": 30, "us": 7},
+            {"nl": 1, "us": 1},
+            {"nl": {"ok": True, "checked_age": 1}, "us": {"ok": True, "checked_age": 1}},
+            None,
+        ))
+        status = wgui.exit_policy_status()
+        self.assertEqual(status["exits"]["nl"]["used"], 30)
+        self.assertEqual(status["exits"]["us"]["quota"], 750 * 1024 ** 3)
+        self.assertEqual(status["exits"]["us"]["clients"], 1)
+
+    def test_status_uses_existing_tunnel_and_peer_snapshot(self):
+        self.patch("load_exit_policy", lambda: (exit_policy.policy_from_gib(True, 1, 1), None))
+        self.patch("load_registry", lambda: (_ for _ in ()).throw(AssertionError("registry reread")))
+        with wgui._lock:
+            wgui._exit_month_usage.clear()
+            wgui._exit_month_usage.update({"nl": {"rx": 20, "tx": 22}, "us": {"rx": 1, "tx": 2}})
+        tunnel_data = {"exits": {
+            "nl": {"ok": True, "checked_age": 60},
+            "us": {"ok": False, "checked_age": 1},
+        }}
+        peers = [
+            {"exit": "nl", "enabled": True},
+            {"exit": "us", "enabled": False},
+        ]
+        status = wgui.exit_policy_status(tunnel_data, peers)
+        self.assertEqual(status["exits"]["nl"]["used"], 42)
+        self.assertEqual(status["exits"]["us"]["clients"], 1)
+        self.assertTrue(status["exits"]["nl"]["healthy"])
+
+    def test_assignment_counts_include_disabled_clients(self):
+        clients = [
+            {"exit": "us", "enabled": True},
+            {"exit": "us", "enabled": False},
+            {"enabled": False},
+        ]
+        self.assertEqual(wgui.assignment_counts(clients), {"nl": 1, "us": 2})
+
+    def test_guarded_manual_switch_rejects_unhealthy_target(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            us_health={"ok": False, "checked_age": 1}))
+        result = wgui.guarded_exit_switch("us", "manual")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "target_unhealthy")
+        self.assertEqual(result["http_status"], 409)
+        self.assertEqual(calls, [])
+
+    def test_guarded_manual_switch_rejects_stale_and_exhausted_targets(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        cases = (
+            (self.inputs(us_health={"ok": True, "checked_age": 61}), "target_stale"),
+            (self.inputs(us_used=1024 ** 3), "target_exhausted"),
+        )
+        for inputs, code in cases:
+            with self.subTest(code=code):
+                self.patch("policy_inputs", lambda *args, _inputs=inputs, **kwargs: _inputs)
+                result = wgui.guarded_exit_switch("us", "manual")
+                self.assertEqual(result["code"], code)
+                self.assertEqual(result["http_status"], 409)
+        self.assertEqual(calls, [])
+
+    def test_guarded_manual_switch_accepts_health_age_exactly_sixty(self):
+        calls = []
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            us_health={"ok": True, "checked_age": 60}))
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or
+                   {"ok": True, "changed": 1, "exit": "us"})
+        result = wgui.guarded_exit_switch("us", "manual")
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["setexitall", "us", "manual"]])
+
+    def test_auto_switch_triggers_at_exact_quota(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or
+                   {"ok": True, "changed": 14, "exit": "us"})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            nl_used=1024 ** 3, nl_clients=14))
+        result = wgui.evaluate_auto_switch()
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["setexitall", "us", "quota"]])
+
+    def test_auto_disabled_and_below_quota_do_not_call_helper(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        for inputs in (
+            self.inputs(auto=False, nl_used=1024 ** 3),
+            self.inputs(nl_used=1024 ** 3 - 1),
+        ):
+            with self.subTest(inputs=inputs):
+                self.patch("policy_inputs", lambda *args, _inputs=inputs, **kwargs: _inputs)
+                self.assertEqual(wgui.evaluate_auto_switch(), {"ok": True, "changed": 0})
+        self.assertEqual(calls, [])
+
+    def test_auto_does_not_ping_pong_when_alternate_is_exhausted(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            nl_used=1024 ** 3, us_used=1024 ** 3, nl_clients=1, us_clients=0))
+        result = wgui.evaluate_auto_switch()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "target_exhausted")
+        self.assertEqual(calls, [])
+        with wgui._lock:
+            self.assertEqual(wgui._policy_runtime["blocked"]["code"], "target_exhausted")
+
+    def test_auto_both_exhausted_has_stable_block_shape(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            nl_used=1024 ** 3, us_used=1024 ** 3, nl_clients=1, us_clients=1))
+        result = wgui.evaluate_auto_switch()
+        self.assertEqual(result["code"], "both_exhausted")
+        self.assertIn("source", result)
+        self.assertIn("target", result)
+        self.assertTrue(result["message"])
+        self.assertEqual(calls, [])
+
+    def test_auto_helper_failure_remains_critical_while_condition_persists(self):
+        calls = []
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3))
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or
+                   {"ok": False, "error": "route apply failed"})
+        for _ in range(2):
+            result = wgui.evaluate_auto_switch()
+            self.assertFalse(result["ok"])
+            with wgui._lock:
+                blocked = dict(wgui._policy_runtime["blocked"])
+            self.assertEqual(blocked["code"], "helper_failed")
+            self.assertEqual(blocked["target"], "us")
+        self.assertEqual(len(calls), 2)
+
+    def test_auto_helper_failure_clears_after_recovered_evaluation(self):
+        current = [self.inputs(nl_used=1024 ** 3)]
+        self.patch("policy_inputs", lambda *args, **kwargs: current[0])
+        self.patch("call_admin", lambda argv, timeout=30: {"ok": False, "error": "failed"})
+        wgui.evaluate_auto_switch()
+        current[0] = self.inputs(nl_used=1024 ** 3 - 1)
+        self.assertEqual(wgui.evaluate_auto_switch(), {"ok": True, "changed": 0})
+        with wgui._lock:
+            self.assertIsNone(wgui._policy_runtime["blocked"])
+
+    def test_concurrent_auto_evaluations_call_helper_at_most_once(self):
+        assignments = {"nl": 2, "us": 0}
+        state_lock = threading.Lock()
+        initial_reads = 0
+        initial_barrier = threading.Barrier(2)
+
+        def inputs():
+            nonlocal initial_reads
+            with state_lock:
+                initial_reads += 1
+                read_number = initial_reads
+                snapshot = dict(assignments)
+            if read_number <= 2:
+                initial_barrier.wait(timeout=2)
+            base = self.inputs(nl_used=1024 ** 3)
+            return base[0], base[1], snapshot, base[3], base[4]
+
+        calls = []
+
+        def helper(argv, timeout=30):
+            calls.append(argv)
+            with state_lock:
+                assignments.update(nl=0, us=2)
+            return {"ok": True, "changed": 2, "exit": "us"}
+
+        self.patch("policy_inputs", inputs)
+        self.patch("call_admin", helper)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(wgui.evaluate_auto_switch()))
+                   for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(calls, [["setexitall", "us", "quota"]])
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result["ok"] for result in results))
+
+    def test_sampler_evaluates_after_usage_refresh_without_holding_cache_lock(self):
+        events = []
+
+        class StopSampling(Exception):
+            pass
+
+        self.patch("_parse_cl_dump", lambda lines: ({}, {"P": (1, 1)}, {}, 1, 1))
+        self.patch("_dump", lambda iface: [iface])
+        self.patch("_peer_from_dump", lambda lines: {"age": 1, "up": True, "rx": 10, "tx": 20})
+        self.patch("record_usage", lambda per: events.append("client-persist"))
+        self.patch("record_exit_usage", lambda totals: events.append("exit-persist"))
+        self.patch("usage_month", lambda: {})
+        self.patch("exit_usage_month", lambda: events.append("usage-refresh") or
+                   {"nl": {"rx": 3, "tx": 4}, "us": {"rx": 5, "tx": 6}})
+        self.patch("_read_cpu", lambda: (1, 2))
+        self.patch("_probe_egress", lambda: {"nl": (True, "1.1.1.1"), "us": (True, "2.2.2.2")})
+        self.patch("refresh_status_cache", lambda: None)
+        self.patch("log_connections", lambda eps: None)
+
+        def evaluate():
+            acquired = wgui._lock.acquire(blocking=False)
+            self.assertTrue(acquired)
+            if acquired:
+                wgui._lock.release()
+            self.assertEqual(wgui._exit_month_usage["nl"], {"rx": 3, "tx": 4})
+            events.append("evaluate")
+
+        self.patch("evaluate_auto_switch", evaluate)
+        self.patch("time", types.SimpleNamespace(
+            time=time.time,
+            sleep=lambda seconds: (_ for _ in ()).throw(StopSampling()),
+        ))
+        with self.assertRaises(StopSampling):
+            wgui._sampler()
+        self.assertLess(events.index("exit-persist"), events.index("usage-refresh"))
+        self.assertLess(events.index("usage-refresh"), events.index("evaluate"))
+
+    def test_new_admin_ops_remain_behind_csrf(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        code, body = self.request({"op": "setexitpolicy", "auto_switch": True,
+                                   "quotas_gib": {"nl": 1, "us": 1}}, csrf=False)
+        self.assertEqual(code, 403)
+        self.assertEqual(body["error"], "bad csrf token")
+        self.assertEqual(calls, [])
+
+    def test_admin_rejects_non_object_body_and_strict_bulk_target(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        for body in ([], {"op": "setexitall"}, {"op": "setexitall", "exit": ""},
+                     {"op": "setexitall", "exit": ["us"]}):
+            with self.subTest(body=body):
+                code, response = self.request(body)
+                self.assertEqual(code, 400)
+                self.assertFalse(response["ok"])
+        self.assertEqual(calls, [])
+
+    def test_admin_policy_requires_boolean_and_integer_quota_shape(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        invalid = (
+            {"op": "setexitpolicy", "auto_switch": 1, "quotas_gib": {"nl": 1, "us": 1}},
+            {"op": "setexitpolicy", "auto_switch": True, "quotas_gib": [1, 1]},
+            {"op": "setexitpolicy", "auto_switch": True, "quotas_gib": {"nl": "1", "us": 1}},
+            {"op": "setexitpolicy", "auto_switch": True, "quotas_gib": {"nl": True, "us": 1}},
+            {"op": "setexitpolicy", "auto_switch": True, "quotas_gib": {"nl": 1}},
+        )
+        for body in invalid:
+            with self.subTest(body=body):
+                code, response = self.request(body)
+                self.assertEqual(code, 400)
+                self.assertFalse(response["ok"])
+        self.assertEqual(calls, [])
+
+    def test_admin_setexitpolicy_passes_only_validated_helper_args(self):
+        calls = []
+        refreshes = []
+        shared = {"ok": True, "saved": True}
+        self.patch("call_admin", lambda argv, timeout=30: calls.append((argv, timeout)) or shared)
+        self.patch("refresh_status_cache", lambda: refreshes.append(True))
+        code, response = self.request({
+            "op": "setexitpolicy", "auto_switch": True,
+            "quotas_gib": {"nl": 250, "us": 750}, "ignored": "value",
+        })
+        self.assertEqual(code, 200)
+        self.assertEqual(response, shared)
+        self.assertEqual(calls, [(["setexitpolicy", "1", "250", "750"], 30)])
+        self.assertEqual(refreshes, [True])
+
+    def test_admin_bulk_uses_409_without_mutating_guard_result(self):
+        shared = {"ok": False, "code": "target_stale", "error": "target_stale", "http_status": 409}
+        self.patch("guarded_exit_switch", lambda target, reason: shared)
+        code, response = self.request({"op": "setexitall", "exit": "us"})
+        self.assertEqual(code, 409)
+        self.assertNotIn("http_status", response)
+        self.assertEqual(shared["http_status"], 409)
 
 
 if __name__ == "__main__":
