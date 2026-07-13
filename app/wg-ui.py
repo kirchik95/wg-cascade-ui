@@ -81,12 +81,66 @@ def _dump(iface):
         raise RuntimeError((r.stderr or "wg show failed").strip())
     return r.stdout.strip().split("\n")
 
-def load_registry():
+def validate_registry(registry):
+    """Validate the on-disk client source used by status, migration, and switches."""
+    if not isinstance(registry, list):
+        raise RuntimeError("client registry must contain a list")
+    seen = set()
+    for index, client in enumerate(registry):
+        if not isinstance(client, dict):
+            raise RuntimeError("client registry record %d must be an object" % index)
+        for field in ("pubkey", "name", "ip"):
+            value = client.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeError(
+                    "client registry record %d has an invalid %s" % (index, field)
+                )
+        if client["pubkey"] in seen:
+            raise RuntimeError("client registry contains duplicate pubkey")
+        seen.add(client["pubkey"])
+        if "exit" in client and client["exit"] not in exit_policy.EXITS:
+            raise RuntimeError("client registry record %d has an invalid exit" % index)
+        if "enabled" in client and type(client["enabled"]) is not bool:
+            raise RuntimeError("client registry record %d has an invalid enabled value" % index)
+    return registry
+
+
+def _read_registry_file():
     try:
         with open(CLIENTS) as f:
-            return json.load(f)
-    except Exception:
-        return None   # not bootstrapped yet
+            registry = json.load(f)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("client registry is unreadable or malformed") from exc
+    return validate_registry(registry)
+
+
+def load_registry():
+    try:
+        return _read_registry_file()
+    except FileNotFoundError as exc:
+        raise RuntimeError("client registry is missing") from exc
+
+
+def ensure_client_registry():
+    """Materialize a missing registry through the privileged, flocked helper."""
+    try:
+        return _read_registry_file()
+    except FileNotFoundError as exc:
+        if os.path.lexists(CLIENTS):
+            raise RuntimeError("client registry exists but is unreadable") from exc
+    result = call_admin(["list"])
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = (result.get("error", "helper failed")
+                  if isinstance(result, dict) else "helper failed")
+        raise RuntimeError("client registry bootstrap failed: %s" % detail)
+    try:
+        return _read_registry_file()
+    except FileNotFoundError as exc:
+        raise RuntimeError("client registry bootstrap did not create the registry") from exc
+    except RuntimeError as exc:
+        raise RuntimeError("client registry bootstrap created an invalid registry: %s" % exc) from exc
 
 def _parse_cl_dump(lines):
     """Parse wg-cl dump lines → (live, per, eps, rx_total, tx_total)."""
@@ -150,7 +204,7 @@ def load_exit_policy():
 
 def assignment_counts(registry=None):
     counts = {key: 0 for key in exit_policy.EXITS}
-    clients = registry if registry is not None else (load_registry() or [])
+    clients = registry if registry is not None else load_registry()
     for client in clients:
         counts[client_exit(client)] += 1
     return counts
@@ -398,15 +452,6 @@ def clients_status():
         live = dict(_live)
         mu = dict(_month_usage)
     now = int(time.time())
-    if reg is None:   # registry not bootstrapped yet -> derive from live peers
-        reg = []
-        for pk, v in live.items():
-            ip = v.get("ip", "")
-            try:
-                nm = "client%d" % (int(ip.split(".")[-1]) - 1)
-            except Exception:
-                nm = pk[:8]
-            reg.append({"name": nm, "ip": ip, "pubkey": pk, "enabled": True})
     sp = client_sparks()
     out = []
     for c in reg:
@@ -844,14 +889,12 @@ def seed_exit_usage(registry, month=None):
         c.close()
 
 
-def _seed_exit_usage(c, registry, month=None, registry_missing=False):
+def _seed_exit_usage(c, registry, month=None):
     month, next_month = _month_bounds(month=month)
     if c.execute("SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
         return False
     rows = c.execute("SELECT pubkey,day,rx,tx FROM usage WHERE day>=? AND day<?",
                      (month, next_month)).fetchall()
-    if registry_missing and rows:
-        raise RuntimeError("client registry unavailable; exit usage migration not seeded")
     assignments = {x.get("pubkey"): client_exit(x) for x in (registry or [])}
     for row in rows:
         key = assignments.get(row["pubkey"], "nl")
@@ -871,23 +914,12 @@ def seed_exit_usage_from_registry(month=None):
                 "SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
             return False
         try:
-            with open(CLIENTS) as f:
-                registry = json.load(f)
-            registry_missing = False
-        except FileNotFoundError:
-            registry = []
-            registry_missing = True
-        except Exception as exc:
-            raise RuntimeError("client registry unreadable or malformed; "
-                               "exit usage migration not seeded") from exc
-        if not registry_missing and not isinstance(registry, list):
-            raise RuntimeError("client registry malformed; exit usage migration not seeded")
-        if not registry_missing and any(
-                not isinstance(record, dict)
-                or ("exit" in record and record["exit"] not in exit_policy.EXITS)
-                for record in registry):
-            raise RuntimeError("client registry malformed; exit usage migration not seeded")
-        return _seed_exit_usage(c, registry, month, registry_missing=registry_missing)
+            registry = _read_registry_file()
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "client registry unavailable; exit usage migration not seeded"
+            ) from exc
+        return _seed_exit_usage(c, registry, month)
     except Exception:
         c.rollback()
         raise
@@ -1052,7 +1084,7 @@ class H(BaseHTTPRequestHandler):
                 pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
                 if pub:   # per-client daily series (config modal chart)
                     return self._json(200, {"daily": usage_daily_for(pub, 30)})
-                reg = load_registry() or []
+                reg = load_registry()
                 names = {c["pubkey"]: c["name"] for c in reg}
                 mu = usage_month()
                 cl = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
@@ -1225,6 +1257,7 @@ def main():
     if not (auth.PASS_PBKDF2 or auth.PASS_SHA):
         raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
+    ensure_client_registry()
     seed_exit_usage_from_registry()
     threading.Thread(target=_sampler, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

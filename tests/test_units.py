@@ -5,6 +5,7 @@ No network, no WireGuard, no root — only validation, token, and set math.
 Run from the repo root:  python3 -m unittest discover -s tests
 """
 import contextlib, importlib.util, io, ipaddress, hashlib, json, os, pathlib, tempfile, time, unittest
+from unittest import mock
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
 TMP = tempfile.mkdtemp(prefix="wgui-test-")
@@ -390,8 +391,12 @@ class TestStatusCache(unittest.TestCase):
                     "hs": int(time.time()) - 10, "rx": 100, "tx": 50,
                 }
                 wgui._month_usage[GOOD_PUB] = {"rx": 1, "tx": 2}
-            # registry from live when clients.json missing
-            peers = wgui.clients_status()
+            registry = [{
+                "name": "client1", "ip": "10.10.0.2", "pubkey": GOOD_PUB,
+                "enabled": True,
+            }]
+            with mock.patch.object(wgui, "load_registry", return_value=registry):
+                peers = wgui.clients_status()
             self.assertEqual(len(peers), 1)
             self.assertEqual(peers[0]["pubkey"], GOOD_PUB)
             self.assertTrue(peers[0]["online"])
@@ -413,7 +418,8 @@ class TestStatusCache(unittest.TestCase):
             wgui._live.clear()
             wgui._exit_peers["nl"] = {"age": 1, "up": True}
             wgui._egress["nl"].update(ok=True, seen="9.9.9.9", at=int(time.time()))
-        wgui.refresh_status_cache()
+        with mock.patch.object(wgui, "load_registry", return_value=[]):
+            wgui.refresh_status_cache()
         with wgui._lock:
             self.assertIsNotNone(wgui._status_snap)
             self.assertEqual(wgui._status_snap["tunnel"]["state"], "up")

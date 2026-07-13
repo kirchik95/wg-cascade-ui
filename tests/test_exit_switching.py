@@ -850,6 +850,8 @@ class TestServerPolicy(unittest.TestCase):
         refreshes = []
         shared = {"ok": True, "saved": True}
         self.patch("call_admin", lambda argv, timeout=30: calls.append((argv, timeout)) or shared)
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(
+            auto=True, nl_clients=0, us_clients=0))
         self.patch("refresh_status_cache", lambda: refreshes.append(True))
         code, response = self.request({
             "op": "setexitpolicy", "auto_switch": True,
