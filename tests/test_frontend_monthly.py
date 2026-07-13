@@ -363,7 +363,7 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
         self.assertIn("@media(max-width:560px)", css)
 
     def test_service_worker_cache_is_bumped(self):
-        self.assertIn("wgui-shell-v23", (ROOT / "app" / "sw.js").read_text())
+        self.assertIn("wgui-shell-v24", (ROOT / "app" / "sw.js").read_text())
 
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
     def test_monthly_helpers_still_render_usage_history(self):
