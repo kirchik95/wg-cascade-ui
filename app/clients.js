@@ -44,8 +44,8 @@ function clientCardHTML(p){
   return head
    +'<div class="av" data-tip="'+esc(onlineTip)+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
    +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
-   +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="'+esc(tr('Last WireGuard handshake'))+'">'+onlineLbl+'</span>'
-   +'<span class="age" data-tip="'+esc(tr('Last handshake'))+'">'+ic('clock',11)+fmtAge(p.age)+'</span>'
+   +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'">'+onlineLbl+'</span>'
+   +'<span class="age">'+ic('clock',11)+fmtAge(p.age)+'</span>'
    +'<span class="ipa mono" data-tip="'+esc(tr('Tunnel address'))+'">'+esc(p.ip)+'</span>'
    +xfer+'</div></div>'
    +'<div class="acts">'+acts+'</div></div>';
@@ -56,8 +56,8 @@ function clientCardHTML(p){
   +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
   +'<div class="ipa mono" data-tip="'+esc(tr('Tunnel address'))+'">'+esc(p.ip)+'</div>'
   +(p.endpoint?'<div class="ep mono" data-tip="'+esc(tr('Client public endpoint'))+'">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div>'
-  +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="'+esc(tr('Last WireGuard handshake'))+'">'+onlineLbl+'</div>'
-  +'<div class="age" data-tip="'+esc(tr('Last handshake'))+'">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
+  +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs">'+onlineLbl+'</div>'
+  +'<div class="age">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
   +'<div class="stat">'+xfer
   +'<div class="mo mono" data-tip="'+esc(tr('Traffic this calendar month'))+'">'+(p.mrx||p.mtx?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'')+'</div></div>'
   +'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+(sv||'')+'</div>'
@@ -242,7 +242,61 @@ function setClientsView(v){
 }
 
 if(typeof navigator!=='undefined'&&'serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){})}
-setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();renderSkeleton();tick();scheduleTick(5000);
+function bindTips(){
+ if(document.__tipsBound||!document.addEventListener)return;document.__tipsBound=1;
+ let tip=document.getElementById('floattip');
+ if(!tip){
+  tip=document.createElement('div');tip.id='floattip';tip.className='floattip';tip.setAttribute('role','tooltip');
+  tip.setAttribute('aria-hidden','true');document.body.appendChild(tip);
+ }
+ let active=null;
+ function place(el){
+  const r=el.getBoundingClientRect(),pad=8;
+  let x=r.left+r.width/2;
+  tip.classList.add('show');tip.classList.remove('below');tip.removeAttribute('hidden');tip.setAttribute('aria-hidden','false');
+  tip.style.left='0';tip.style.top='0';tip.style.transform='translate(-50%,calc(-100% - 10px))';
+  const tw=tip.offsetWidth||0,th=tip.offsetHeight||0;
+  x=Math.max(pad+tw/2,Math.min(window.innerWidth-pad-tw/2,x));
+  tip.style.left=x+'px';
+  if(r.top-th-12<pad){
+   tip.classList.add('below');tip.style.top=r.bottom+'px';tip.style.transform='';
+  }else{
+   tip.style.top=r.top+'px';
+  }
+ }
+ function show(el){
+  if(!el||el===active)return;
+  if(el.closest&&el.closest('.pillstat'))return;
+  const text=el.getAttribute('data-tip');if(!text)return;
+  active=el;tip.textContent=text;place(el);
+ }
+ function hide(){
+  active=null;tip.classList.remove('show','below');tip.setAttribute('aria-hidden','true');tip.textContent='';
+ }
+ document.addEventListener('pointerover',e=>{
+  const el=e.target&&e.target.closest&&e.target.closest('[data-tip]');
+  if(el)show(el);else if(!tip.contains(e.target))hide();
+ });
+ document.addEventListener('pointerout',e=>{
+  const el=e.target&&e.target.closest&&e.target.closest('[data-tip]');
+  if(!el)return;
+  const to=e.relatedTarget&&e.relatedTarget.closest&&e.relatedTarget.closest('[data-tip]');
+  if(to===el)return;hide();
+ });
+ document.addEventListener('focusin',e=>{
+  const el=e.target&&e.target.closest&&e.target.closest('[data-tip]');
+  if(el)show(el);
+ });
+ document.addEventListener('focusout',e=>{
+  const el=e.target&&e.target.closest&&e.target.closest('[data-tip]');
+  if(!el)return;
+  const to=e.relatedTarget&&e.relatedTarget.closest&&e.relatedTarget.closest('[data-tip]');
+  if(to===el)return;hide();
+ });
+ window.addEventListener('scroll',()=>{if(active)place(active);},{passive:true,capture:true});
+ window.addEventListener('resize',hide);
+}
+setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();bindTips();renderSkeleton();tick();scheduleTick(5000);
 if(typeof window!=='undefined'&&window.addEventListener){
  window.addEventListener('online',()=>{setOffline(false);tick();});
  window.addEventListener('offline',()=>setOffline(true));
