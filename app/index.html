@@ -5,8 +5,8 @@
 <div class="meta">
 <span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
 <span class="monthpills" id="monthuse">
-<span class="pill monthpill" id="monthuse-nl" data-tip="NL calendar-month traffic · 500 GiB quota">…</span>
-<span class="pill monthpill" id="monthuse-us" data-tip="US calendar-month traffic · 500 GiB quota">…</span>
+<button class="pill monthpill" id="monthuse-nl" type="button" data-act="exit-policy" data-tip="NL exit routing settings" aria-label="NL exit routing settings">…</button>
+<button class="pill monthpill" id="monthuse-us" type="button" data-act="exit-policy" data-tip="US exit routing settings" aria-label="US exit routing settings">…</button>
 </span>
 <div class="meta-tools">
 <button class="pill btn" id="lang" data-act="lang" data-tip="Language / Язык" aria-label="Language / Язык">RU</button>
@@ -25,6 +25,7 @@
 </header>
 <div class="banner" id="offline" role="status" aria-live="polite"></div>
 <div class="alert" id="alert" style="display:none" role="alert"></div>
+<div class="alert bad policyalert" id="policyalert" style="display:none" role="alert"></div>
 <div class="bento">
 <div class="cascade card" id="cascade"></div>
 <div class="tline" id="tline"></div>

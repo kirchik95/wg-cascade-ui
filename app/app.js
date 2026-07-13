@@ -6,6 +6,8 @@ let _exitFilter="all"; /* all | nl | us — client list filter */
 let _clientsView=(function(){try{const v=localStorage.getItem('wgui-clients-view');return v==='list'?'list':'cards'}catch(e){return'cards'}})();
 let _prevFocus=null;
 let _sparkSeries=[];
+let _exitPolicy=null,_lastSwitchTs=0,_switchBaseline=false;
+let _policySaving=false,_bulkSwitching=false;
 const IP={d:'<path d="M2 3h20v14H2z"/><path d="M8 21h8M12 17v4"/>',
  srv:'<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
  net:'<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20"/>',
@@ -98,16 +100,89 @@ function monthSummaryHTML(t){
  const total=t.rx+t.tx;
  return '<span class="mlbl">'+tr('Month')+'</span> <span class="dn">↓ <b>'+fmtB(t.rx)+'</b></span> <span class="up">↑ <b>'+fmtB(t.tx)+'</b></span> <span class="msum">· '+fmtB(total)+'</span>';
 }
-function monthExitHTML(label,t){
- const total=t.rx+t.tx;
+function monthExitHTML(label,e){
+ const used=+e.used||0,quota=+e.quota||0;
  return '<span class="mlbl">'+esc(label)+'</span>'
-  +' <span class="msum"><b>'+fmtB(total)+'</b> <span class="mq">/ 500 GiB</span></span>';
+  +' <span class="msum"><b>'+(quota?fmtB(used):tr('Unavailable'))+'</b>'
+  +(quota?' <span class="mq">/ '+fmtB(quota)+'</span>':'')+'</span>';
 }
-function renderMonthPill(peers){
- EXITS.forEach(ex=>{
-  const el=document.getElementById('monthuse-'+ex);
-  if(el){el.innerHTML=monthExitHTML(ex.toUpperCase(),trafficTotals(peersByExit(peers,ex),'mrx','mtx'));applyI18n(el)}
+function normalizeExitPolicy(policy){
+ if(!policy||typeof policy!=='object'||typeof policy.auto_switch!=='boolean'||!policy.exits||typeof policy.exits!=='object')return null;
+ const exits={};
+ for(const key of EXITS){
+  const e=policy.exits[key];
+  if(!e||typeof e!=='object')return null;
+  const used=+e.used,quota=+e.quota,clients=+e.clients,checked=+e.checked_age;
+  if(!Number.isFinite(used)||used<0||!Number.isFinite(quota)||quota<=0
+    ||!Number.isFinite(clients)||clients<0||!Number.isInteger(clients)||!Number.isFinite(checked))return null;
+  exits[key]={used:used,quota:quota,clients:clients,healthy:e.healthy===true,
+   checked_age:checked,exhausted:e.exhausted===true};
+ }
+ return{auto_switch:policy.auto_switch,exits:exits,blocked:policy.blocked||null,
+  warning:policy.warning||null,last_switch:policy.last_switch||null};
+}
+const POLICY_EN={
+ invalid_target:'The requested exit is invalid (invalid_target)',
+ target_unhealthy:'The target exit is unavailable (target_unhealthy)',
+ target_stale:'The target exit health check is stale (target_stale)',
+ target_exhausted:'The target exit quota is exhausted (target_exhausted)',
+ both_exhausted:'Both exit quotas are exhausted (both_exhausted)',
+ helper_failed:'The routing helper failed (helper_failed)',
+ missing_policy:'Exit policy has not been saved (missing_policy)',
+ invalid_policy:'Exit policy data is invalid (invalid_policy)',
+ no_clients_to_switch:'All clients already use this exit (no_clients_to_switch)'
+};
+function policyReason(code){
+ code=String(code==null?'failed':code);
+ return LANG==='ru'&&RU[code]?RU[code]:(POLICY_EN[code]||code);
+}
+function renderPolicyUnavailable(){
+ _exitPolicy=null;
+ EXITS.forEach(key=>{
+  const el=document.getElementById('monthuse-'+key);if(!el)return;
+  el.innerHTML=monthExitHTML(key.toUpperCase(),{used:0,quota:0});
+  el.classList.remove('warn','critical');
+  el.setAttribute&&el.setAttribute('aria-label',tr(key.toUpperCase()+' exit routing settings')+', '+tr('Unavailable'));
  });
+ const alert=document.getElementById('policyalert');if(!alert)return;
+ alert.classList.remove('warn');alert.classList.add('bad','show');alert.style.display='flex';
+ alert.innerHTML=ic('warn')+'<span><b>'+esc(tr('Exit policy unavailable'))+'</b>'
+  +'<span class="policyalert-detail"> · '+esc(tr('Exit policy data is missing or invalid.'))+'</span></span>';
+}
+function renderExitPolicy(raw){
+ const policy=normalizeExitPolicy(raw);
+ if(!policy){renderPolicyUnavailable();return false;}
+ _exitPolicy=policy;
+ EXITS.forEach(key=>{
+  const el=document.getElementById('monthuse-'+key),e=policy.exits[key];if(!el)return;
+  const ratio=e.quota?e.used/e.quota:0;
+  el.innerHTML=monthExitHTML(key.toUpperCase(),e);
+  el.classList.toggle('warn',ratio>=.9&&ratio<1);
+  el.classList.toggle('critical',ratio>=1);
+  el.setAttribute&&el.setAttribute('aria-label',tr(key.toUpperCase()+' exit routing settings')+', '+fmtB(e.used)+' / '+fmtB(e.quota));
+ });
+ const alert=document.getElementById('policyalert');
+ if(alert){
+  const blocked=policy.blocked,warning=policy.warning;
+  const issue=blocked||warning;
+  if(issue){
+   const code=typeof issue==='object'&&issue?issue.code:issue;
+   alert.classList.toggle('bad',!!blocked);alert.classList.toggle('warn',!blocked);alert.classList.add('show');
+   alert.style.display='flex';
+   alert.innerHTML=ic('warn')+'<span><b>'+esc(tr(blocked?'Automatic exit switch blocked':'Exit policy warning'))+'</b>'
+    +'<span class="policyalert-detail"> · '+esc(policyReason(code))+'</span></span>';
+  }else{
+   alert.style.display='none';alert.classList.remove('show','warn');alert.classList.add('bad');
+  }
+ }
+ const event=policy.last_switch,ts=event&&Number(event.ts),target=event&&event.target;
+ const validEvent=event&&Number.isFinite(ts)&&ts>0&&EXITS.includes(target);
+ if(!_switchBaseline){_lastSwitchTs=validEvent?ts:0;_switchBaseline=true;}
+ else if(validEvent&&ts>_lastSwitchTs){
+  _lastSwitchTs=ts;
+  if(event.reason==='quota')toast(tr('All clients switched to')+' '+target.toUpperCase()+': '+tr('quota reached'));
+ }
+ return true;
 }
 const fmtAge=s=>{const r=LANG==='ru';if(s<0)return r?"никогда":"never";if(s<60)return s+(r?"с назад":"s ago");if(s<3600)return(s/60|0)+(r?"м назад":"m ago");if(s<86400)return(s/3600|0)+(r?"ч ":"h ")+((s%3600)/60|0)+(r?"м назад":"m ago");return(s/86400|0)+(r?"д назад":"d ago")};
 const fmtTime=ts=>{const d=new Date(ts*1000),p=n=>(''+n).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())};
@@ -186,7 +261,23 @@ const RU={
  "Session expired — sign in again":"Сессия истекла — войдите снова",
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
  "Tap a day for details":"Нажми день для деталей",
- "Throughput chart, last 5 minutes":"График трафика за 5 минут"
+ "Throughput chart, last 5 minutes":"График трафика за 5 минут",
+ "NL exit routing settings":"Настройки маршрутизации выхода NL","US exit routing settings":"Настройки маршрутизации выхода US",
+ "Exit routing":"Маршрутизация выходов","Monthly quota (GiB)":"Месячная квота (GiB)",
+ "Auto switch":"Автопереключение","Switch when quota is reached":"Переключать при достижении квоты",
+ "Switch all to":"Переключить всех на","Switch all":"Переключить всех","clients":"клиентов",
+ "assigned clients (including disabled) will change exit":"назначенных клиентов (включая отключённых) сменят выход",
+ "Active connections will briefly reconnect":"Активные соединения кратковременно переподключатся",
+ "Exit policy unavailable":"Политика выходов недоступна","Exit policy data is missing or invalid.":"Данные политики выходов отсутствуют или повреждены.",
+ "Exit policy saved":"Настройки выходов сохранены","Quota must be a whole number from 1 to 1000000":"Квота должна быть целым числом от 1 до 1000000",
+ "Automatic exit switch blocked":"Автопереключение выхода заблокировано","Exit policy warning":"Предупреждение настроек выходов",
+ "target_unhealthy":"целевой выход недоступен","target_stale":"проверка целевого выхода устарела",
+ "target_exhausted":"квота целевого выхода исчерпана","both_exhausted":"квоты обоих выходов исчерпаны",
+ "helper_failed":"ошибка применения маршрутизации","missing_policy":"настройки ещё не сохранены","invalid_policy":"файл настроек повреждён",
+ "invalid_target":"недопустимый целевой выход","no_clients_to_switch":"все клиенты уже используют этот выход",
+ "healthy":"работает","unavailable":"недоступен","stale":"данные устарели","quota exhausted":"квота исчерпана",
+ "health checked":"проверка","clients assigned":"клиентов назначено","Quota usage":"Использование квоты",
+ "All clients switched to":"Все клиенты переключены на","quota reached":"квота достигнута","Unavailable":"Недоступно"
 };
 function tr(s){return LANG==='ru'&&RU[s]?RU[s]:s}
 function applyI18n(root){
@@ -352,7 +443,7 @@ async function tick(){
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return}
   const d=await r.json();
   setOffline(false);
-  renderAlert(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderMonthPill(d.peers);
+  renderAlert(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderExitPolicy(d.exit_policy);
   thrPills(d.thr.cur);
   _sparkSeries=d.thr.series||[];
   document.getElementById('spark').innerHTML=spark(_sparkSeries);
@@ -376,12 +467,14 @@ function focusables(root){
 function openModal(h){
  closeMenus();
  const m=document.getElementById('modal');if(!m)return;
- _prevFocus=document.activeElement;
+ const bg=mbg(),alreadyOpen=bg&&bg.classList&&bg.classList.contains('show');
+ if(!alreadyOpen)_prevFocus=document.activeElement;
+ m.classList&&m.classList.remove('modal-wide');
  m.innerHTML=h;
  /* ensure a title id for aria-labelledby */
  const t=m.querySelector&&m.querySelector('.mtitle');if(t&&!t.id)t.id='mtitle';
  applyI18n(m);
- const bg=mbg();if(bg&&bg.classList)bg.classList.add('show');
+ if(bg&&bg.classList)bg.classList.add('show');
  if(m.setAttribute){m.setAttribute('role','dialog');m.setAttribute('aria-modal','true');}
  setTimeout(()=>{
   const f=(m.querySelector&&m.querySelector('input,select,textarea,button.primary,button'))||m;
@@ -394,6 +487,108 @@ function closeModal(){
  _prevFocus=null;
 }
 function toast(m){const t=document.getElementById('toast');t.textContent=tr(m);t.style.display='block';clearTimeout(window.__tt);window.__tt=setTimeout(()=>t.style.display='none',3200)}
+function bulkTargetBlock(policy,target){
+ if(!policy||!policy.exits||!EXITS.includes(target)||!policy.exits[target])return'invalid_target';
+ const e=policy.exits[target];
+ if(e.exhausted||(+e.quota>0&&+e.used>=+e.quota))return'target_exhausted';
+ if(!Number.isFinite(+e.checked_age)||+e.checked_age<0||+e.checked_age>60)return'target_stale';
+ if(e.healthy!==true)return'target_unhealthy';
+ return'';
+}
+function affectedExitClients(policy,target){
+ if(!policy||!policy.exits||!EXITS.includes(target)||!policy.exits[target])return 0;
+ const total=EXITS.reduce((n,key)=>n+(+policy.exits[key].clients||0),0);
+ return Math.max(0,total-(+policy.exits[target].clients||0));
+}
+function wholeGiB(value){
+ const raw=String(value==null?'':value).trim();
+ if(!/^[0-9]+$/.test(raw))return null;
+ const number=Number(raw);
+ return Number.isSafeInteger(number)&&number>=1&&number<=1000000?number:null;
+}
+function policyRequestBody(enabled,nl,us){
+ const nlGiB=wholeGiB(nl),usGiB=wholeGiB(us);
+ if(nlGiB===null||usGiB===null)return null;
+ return{op:'setexitpolicy',auto_switch:!!enabled,quotas_gib:{nl:nlGiB,us:usGiB}};
+}
+function exitPolicyState(e){
+ if(e.exhausted)return{key:'quota exhausted',cls:'bad'};
+ if(+e.checked_age<0||+e.checked_age>60)return{key:'stale',cls:'bad'};
+ if(!e.healthy)return{key:'unavailable',cls:'bad'};
+ return{key:'healthy',cls:'ok'};
+}
+function exitPolicyRowHTML(key,e){
+ if(!EXITS.includes(key)||!e)return'';
+ const pct=Math.max(0,Math.min(100,e.quota?e.used*100/e.quota:0));
+ const affected=affectedExitClients(_exitPolicy,key),blocked=bulkTargetBlock(_exitPolicy,key);
+ const reason=blocked||(affected?'':'no_clients_to_switch'),state=exitPolicyState(e);
+ const ratioClass=e.exhausted||pct>=100?' critical':pct>=90?' warn':'';
+ return '<section class="xprow'+ratioClass+'"><div class="xph"><b>'+key.toUpperCase()+'</b>'
+  +'<span class="xpstate '+state.cls+'">'+esc(tr(state.key))+'</span></div>'
+  +'<div class="xpmeta">'+fmtB(e.used)+' / '+fmtB(e.quota)+' · '+e.clients+' '+tr('clients assigned')
+  +' · '+tr('health checked')+' '+fmtAge(e.checked_age)+'</div>'
+  +'<div class="xpbar" role="progressbar" aria-label="'+key.toUpperCase()+' '+tr('Quota usage')+'" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+Math.round(pct)+'" aria-valuetext="'+esc(fmtB(e.used)+' / '+fmtB(e.quota))+'"><i class="xpfill" style="width:'+pct.toFixed(1)+'%"></i></div>'
+  +'<label class="fl">'+tr('Monthly quota (GiB)')+'<input id="xpq-'+key+'" type="number" inputmode="numeric" min="1" max="1000000" step="1" value="'+Math.round(e.quota/1073741824)+'"></label>'
+  +'<button class="ghost xpbulk" type="button" data-act="exit-all-confirm" data-exit="'+key+'" '+(reason?'disabled':'')+'>'+tr('Switch all to')+' '+key.toUpperCase()+'</button>'
+  +(reason?'<div class="xpreason" data-reason="'+esc(reason)+'">'+esc(policyReason(reason))+'</div>':'')+'</section>';
+}
+function openExitRouting(){
+ if(!_exitPolicy){toast('Exit policy unavailable');return;}
+ openModal('<div class="mtitle" id="mtitle">'+ic('branch',18)+' '+tr('Exit routing')+'</div>'
+  +'<div class="xpolicy">'+EXITS.map(key=>exitPolicyRowHTML(key,_exitPolicy.exits[key])).join('')+'</div>'
+  +'<label class="xptoggle"><input id="xpauto" type="checkbox" role="switch" '+(_exitPolicy.auto_switch?'checked':'')+'><span><b>'+tr('Auto switch')+'</b><small>'+tr('Switch when quota is reached')+'</small></span></label>'
+  +'<div class="merr" id="xperr" role="alert"></div>'
+  +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Close')+'</button><button class="primary" id="xpsave" type="button" data-act="exit-policy-save">'+tr('Save')+'</button></div>');
+ const modal=document.getElementById('modal');if(modal&&modal.classList)modal.classList.add('modal-wide');
+}
+async function saveExitPolicy(){
+ if(_policySaving)return;
+ const nl=document.getElementById('xpq-nl'),us=document.getElementById('xpq-us');
+ const auto=document.getElementById('xpauto'),err=document.getElementById('xperr'),btn=document.getElementById('xpsave');
+ if(!nl||!us||!auto||!err||!btn)return;
+ const body=policyRequestBody(auto.checked,nl.value,us.value);
+ if(!body){err.textContent=tr('Quota must be a whole number from 1 to 1000000');return;}
+ _policySaving=true;err.textContent='';const idle=btn.innerHTML;
+ btn.disabled=true;btn.textContent=tr('Saving…');btn.setAttribute&&btn.setAttribute('aria-busy','true');
+ try{
+  const r=await admin(body);
+  if(!r||!r.ok){err.textContent=policyReason((r&&(r.code||r.error))||'failed');return;}
+  closeModal();toast('Exit policy saved');await tick();
+ }catch(e){err.textContent=tr('failed');}
+ finally{
+  _policySaving=false;btn.disabled=false;btn.innerHTML=idle;btn.setAttribute&&btn.setAttribute('aria-busy','false');
+ }
+}
+function exitSwitchConfirmHTML(target,affected){
+ target=EXITS.includes(target)?target:'nl';
+ return '<div class="xpconfirm"><div class="mtitle" id="mtitle">'+ic('warn',18)+' '+tr('Switch all to')+' '+target.toUpperCase()+'?</div>'
+  +'<p class="mtext"><b>'+affected+'</b> '+tr('assigned clients (including disabled) will change exit')+'. '+tr('Active connections will briefly reconnect')+'.</p>'
+  +'<div class="merr" id="xperr" role="alert"></div>'
+  +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button><button class="primary" id="xpswitch" type="button" data-act="exit-all" data-exit="'+target+'">'+tr('Switch all')+'</button></div></div>';
+}
+function confirmExitAll(target){
+ if(!_exitPolicy||!EXITS.includes(target)){toast('Exit policy unavailable');return;}
+ const blocked=bulkTargetBlock(_exitPolicy,target),affected=affectedExitClients(_exitPolicy,target);
+ if(blocked||!affected){toast(policyReason(blocked||'no_clients_to_switch'));return;}
+ openModal(exitSwitchConfirmHTML(target,affected));
+}
+async function doExitAll(target){
+ if(_bulkSwitching)return;
+ const err=document.getElementById('xperr'),btn=document.getElementById('xpswitch');
+ if(!err||!btn||!_exitPolicy||!EXITS.includes(target))return;
+ const blocked=bulkTargetBlock(_exitPolicy,target),affected=affectedExitClients(_exitPolicy,target);
+ if(blocked||!affected){err.textContent=policyReason(blocked||'no_clients_to_switch');return;}
+ _bulkSwitching=true;err.textContent='';const idle=btn.innerHTML;
+ btn.disabled=true;btn.textContent=tr('Switching…');btn.setAttribute&&btn.setAttribute('aria-busy','true');
+ try{
+  const r=await admin({op:'setexitall',exit:target});
+  if(!r||!r.ok){err.textContent=policyReason((r&&(r.code||r.error))||'failed');return;}
+  closeModal();toast(tr('All clients switched to')+' '+target.toUpperCase());await tick();
+ }catch(e){err.textContent=tr('failed');}
+ finally{
+  _bulkSwitching=false;btn.disabled=false;btn.innerHTML=idle;btn.setAttribute&&btn.setAttribute('aria-busy','false');
+ }
+}
 function openAdd(){openModal(
  '<div class="mtitle" id="mtitle">'+ic('plus',18)+' Add client</div>'
  +'<label class="fl">Name<input id="cn" placeholder="e.g. iphone, laptop" autocomplete="off" maxlength="32"></label>'
@@ -621,6 +816,10 @@ function bindActions(){
   if(!t)return;
   const a=t.getAttribute('data-act');
   if(a==='close'){closeModal();return;}
+  if(a==='exit-policy'){openExitRouting();return;}
+  if(a==='exit-policy-save'){saveExitPolicy();return;}
+  if(a==='exit-all-confirm'){confirmExitAll(t.getAttribute('data-exit'));return;}
+  if(a==='exit-all'){doExitAll(t.getAttribute('data-exit'));return;}
   if(a==='add'||a==='do-add'){if(a==='add')openAdd();else doAdd();return;}
   if(a==='copy'){copyConf();return;}
   if(a==='dl'){dlConf();return;}
