@@ -339,10 +339,29 @@ class TestBulkAdmin(unittest.TestCase):
 class TestServerPolicy(unittest.TestCase):
     def setUp(self):
         runtime = getattr(wgui, "_policy_runtime", None)
-        if runtime is not None:
-            with wgui._lock:
+        with wgui._lock:
+            self.saved_exit_totals = dict(wgui._exit_totals)
+            self.saved_egress = {key: dict(value) for key, value in wgui._egress.items()}
+            wgui._exit_totals.update({"nl": (0, 0), "us": (0, 0)})
+            if runtime is not None:
                 runtime["blocked"] = None
                 runtime["last_switch"] = None
+        self.addCleanup(self.restore_exit_totals)
+
+    def restore_exit_totals(self):
+        with wgui._lock:
+            wgui._exit_totals.clear()
+            wgui._exit_totals.update(self.saved_exit_totals)
+            for key, value in self.saved_egress.items():
+                wgui._egress[key].clear()
+                wgui._egress[key].update(value)
+
+    def set_counter_availability(self, nl=True, us=True):
+        with wgui._lock:
+            wgui._exit_totals.update({
+                "nl": (0, 0) if nl else None,
+                "us": (0, 0) if us else None,
+            })
 
     def patch(self, name, value):
         old = getattr(wgui, name)
@@ -524,6 +543,87 @@ class TestServerPolicy(unittest.TestCase):
         self.assertTrue(result["message"])
         self.assertEqual(calls, [])
 
+    def test_auto_reports_health_block_when_either_counter_is_missing(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        cases = (
+            (False, True, {"ok": False, "checked_age": 1}, "target_unhealthy"),
+            (True, False, {"ok": True, "checked_age": 61}, "target_stale"),
+        )
+        for nl_ready, us_ready, target_health, expected in cases:
+            with self.subTest(missing="nl" if not nl_ready else "us", expected=expected):
+                self.set_counter_availability(nl_ready, us_ready)
+                inputs = self.inputs(nl_used=1024 ** 3, us_health=target_health)
+                self.patch("policy_inputs", lambda *args, _inputs=inputs, **kwargs: _inputs)
+                result = wgui.evaluate_auto_switch()
+                self.assertEqual(result["code"], expected)
+                with wgui._lock:
+                    self.assertEqual(wgui._policy_runtime["blocked"]["code"], expected)
+        self.assertEqual(calls, [])
+
+    def test_auto_blocks_incomplete_counter_data_before_helper(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3))
+        for missing in ("nl", "us"):
+            with self.subTest(missing=missing):
+                self.set_counter_availability(nl=missing != "nl", us=missing != "us")
+                result = wgui.evaluate_auto_switch()
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "counter_unavailable")
+                self.assertEqual(result["source"], "nl")
+                self.assertEqual(result["target"], "us")
+                self.assertEqual(result["missing_exits"], [missing])
+        self.assertEqual(calls, [])
+
+    def test_auto_switches_when_missing_counters_recover(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or
+                   {"ok": True, "changed": 1, "exit": "us"})
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3))
+        self.set_counter_availability(nl=True, us=False)
+        self.assertEqual(wgui.evaluate_auto_switch()["code"], "counter_unavailable")
+        self.set_counter_availability(nl=True, us=True)
+        self.assertTrue(wgui.evaluate_auto_switch()["ok"])
+        self.assertEqual(calls, [["setexitall", "us", "quota"]])
+        with wgui._lock:
+            self.assertIsNone(wgui._policy_runtime["blocked"])
+
+    def test_incomplete_no_action_does_not_create_block(self):
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3 - 1))
+        self.set_counter_availability(nl=True, us=False)
+        self.assertEqual(wgui.evaluate_auto_switch(), {"ok": True, "changed": 0})
+        with wgui._lock:
+            self.assertIsNone(wgui._policy_runtime["blocked"])
+
+    def test_incomplete_no_action_preserves_helper_failure_for_assigned_source(self):
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3 - 1))
+        self.set_counter_availability(nl=True, us=False)
+        with wgui._lock:
+            wgui._policy_runtime["blocked"] = {
+                "code": "helper_failed", "source": "nl", "target": "us",
+                "message": "The exit switch helper failed.",
+            }
+        self.assertEqual(wgui.evaluate_auto_switch(), {"ok": True, "changed": 0})
+        with wgui._lock:
+            self.assertEqual(wgui._policy_runtime["blocked"]["code"], "helper_failed")
+
+    def test_incomplete_action_preserves_helper_failure_for_same_route(self):
+        calls = []
+        self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3))
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.set_counter_availability(nl=True, us=False)
+        with wgui._lock:
+            wgui._policy_runtime["blocked"] = {
+                "code": "helper_failed", "source": "nl", "target": "us",
+                "message": "The exit switch helper failed.", "error": "route apply failed",
+            }
+        result = wgui.evaluate_auto_switch()
+        self.assertEqual(result["code"], "helper_failed")
+        with wgui._lock:
+            self.assertEqual(wgui._policy_runtime["blocked"]["code"], "helper_failed")
+        self.assertEqual(calls, [])
+
     def test_auto_helper_failure_remains_critical_while_condition_persists(self):
         calls = []
         self.patch("policy_inputs", lambda *args, **kwargs: self.inputs(nl_used=1024 ** 3))
@@ -623,6 +723,44 @@ class TestServerPolicy(unittest.TestCase):
             wgui._sampler()
         self.assertLess(events.index("exit-persist"), events.index("usage-refresh"))
         self.assertLess(events.index("usage-refresh"), events.index("evaluate"))
+
+    def test_sampler_persists_health_block_with_missing_exit_peer(self):
+        calls = []
+
+        class StopSampling(Exception):
+            pass
+
+        self.patch("_parse_cl_dump", lambda lines: ({}, {"P": (1, 1)}, {}, 1, 1))
+        self.patch("_dump", lambda iface: [iface])
+        self.patch("_peer_from_dump", lambda lines: None if lines[0] == wgui.US_IFACE else
+                   {"age": 1, "up": True, "rx": 10, "tx": 20})
+        self.patch("record_usage", lambda per: None)
+        self.patch("record_exit_usage", lambda totals: None)
+        self.patch("usage_month", lambda: {})
+        self.patch("exit_usage_month", lambda: {
+            "nl": {"rx": 1024 ** 3, "tx": 0}, "us": {"rx": 0, "tx": 0},
+        })
+        self.patch("load_exit_policy", lambda: (exit_policy.policy_from_gib(True, 1, 1), None))
+        self.patch("load_registry", lambda: [{"exit": "nl", "enabled": False}])
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True})
+        self.patch("_read_cpu", lambda: (1, 2))
+        self.patch("_probe_egress", lambda: {"nl": (True, "1.1.1.1"), "us": (False, None)})
+        self.patch("refresh_status_cache", lambda: None)
+        self.patch("log_connections", lambda eps: None)
+        self.patch("time", types.SimpleNamespace(
+            time=time.time,
+            sleep=lambda seconds: (_ for _ in ()).throw(StopSampling()),
+        ))
+        with wgui._lock:
+            wgui._egress["nl"].update(ok=True, seen="1.1.1.1", at=int(time.time()))
+            wgui._egress["us"].update(ok=False, seen=None, at=int(time.time()))
+        with self.assertRaises(StopSampling):
+            wgui._sampler()
+        with wgui._lock:
+            blocked = dict(wgui._policy_runtime["blocked"] or {})
+            self.assertIsNone(wgui._exit_totals["us"])
+        self.assertEqual(blocked["code"], "target_unhealthy")
+        self.assertEqual(calls, [])
 
     def test_new_admin_ops_remain_behind_csrf(self):
         calls = []

@@ -218,6 +218,7 @@ _BLOCK_MESSAGES = {
     "target_stale": "The target exit health check is stale.",
     "target_exhausted": "The target exit monthly quota is exhausted.",
     "both_exhausted": "Both exit monthly quotas are exhausted.",
+    "counter_unavailable": "Current exit counter data is incomplete.",
     "helper_failed": "The exit switch helper failed.",
 }
 
@@ -247,9 +248,57 @@ def _blocked_result(blocked):
     return {"ok": False, "error": value["code"], "http_status": 409, **value}
 
 
+def counter_availability():
+    with _lock:
+        return {key: _exit_totals.get(key) is not None for key in exit_policy.EXITS}
+
+
+def _counter_block(source, target, availability=None):
+    available = availability if availability is not None else counter_availability()
+    missing = [key for key in exit_policy.EXITS if not available.get(key)]
+    if not missing:
+        return None
+    return {
+        "code": "counter_unavailable",
+        "source": source,
+        "target": target,
+        "missing_exits": missing,
+    }
+
+
+def _finish_no_action(policy, assignments, availability):
+    with _lock:
+        blocked = _policy_runtime.get("blocked") or {}
+        preserve_helper_failure = (
+            blocked.get("code") == "helper_failed"
+            and policy["auto_switch"]
+            and not all(availability.values())
+            and assignments.get(blocked.get("source"), 0) > 0
+        )
+        if not preserve_helper_failure:
+            _policy_runtime["blocked"] = None
+
+
+def _set_incomplete_policy_block(incomplete, assignments):
+    value = _with_block_message(incomplete)
+    with _lock:
+        blocked = _policy_runtime.get("blocked") or {}
+        preserve_helper_failure = (
+            blocked.get("code") == "helper_failed"
+            and blocked.get("source") == value["source"]
+            and blocked.get("target") == value["target"]
+            and assignments.get(value["source"], 0) > 0
+        )
+        if preserve_helper_failure:
+            return dict(blocked)
+        _policy_runtime["blocked"] = value
+    return value
+
+
 def guarded_exit_switch(target, reason):
     with _policy_lock:
         policy, usage, assignments, health, warning = policy_inputs()
+        availability = counter_availability()
         source = "us" if target == "nl" else "nl"
         if reason == "quota":
             decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
@@ -258,7 +307,7 @@ def guarded_exit_switch(target, reason):
                 return _blocked_result(blocked)
             action = decision["action"]
             if not action:
-                _clear_policy_block()
+                _finish_no_action(policy, assignments, availability)
                 return {"ok": True, "exit": target, "changed": 0}
             target = action["target"]
             source = action["source"]
@@ -270,6 +319,11 @@ def guarded_exit_switch(target, reason):
         if assignments.get(target, 0) == sum(assignments.values()):
             _clear_policy_block()
             return {"ok": True, "exit": target, "changed": 0}
+        incomplete = _counter_block(source, target, availability)
+        if incomplete:
+            if reason == "quota":
+                incomplete = _set_incomplete_policy_block(incomplete, assignments)
+            return _blocked_result(incomplete)
         result = call_admin(["setexitall", target, reason])
         if result.get("ok"):
             event = {
@@ -297,14 +351,20 @@ def guarded_exit_switch(target, reason):
 
 def evaluate_auto_switch():
     policy, usage, assignments, health, warning = policy_inputs()
+    availability = counter_availability()
     decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
     if decision["blocked"]:
         blocked = _set_policy_block(decision["blocked"])
         return {"ok": False, **blocked}
     if not decision["action"]:
-        _clear_policy_block()
+        _finish_no_action(policy, assignments, availability)
         return {"ok": True, "changed": 0}
-    return guarded_exit_switch(decision["action"]["target"], "quota")
+    action = decision["action"]
+    incomplete = _counter_block(action["source"], action["target"], availability)
+    if incomplete:
+        blocked = _set_incomplete_policy_block(incomplete, assignments)
+        return {"ok": False, **blocked}
+    return guarded_exit_switch(action["target"], "quota")
 
 def clients_status():
     """Assemble peer rows from sampler caches — no wg dump on the request path."""
@@ -472,11 +532,10 @@ def _sampler():
             except Exception as exc:
                 _sampler_persistence_note(False, "usage persistence: %s" % exc)
             else:
-                if len(exit_totals) == len(exit_policy.EXITS):
-                    try:
-                        evaluate_auto_switch()
-                    except Exception as exc:
-                        log_event("exit_auto_switch", ok=False, error=str(exc)[:200])
+                try:
+                    evaluate_auto_switch()
+                except Exception as exc:
+                    log_event("exit_auto_switch", ok=False, error=str(exc)[:200])
         if i and i % 720 == 0:         # auto-disable expired clients ~hourly
             try: call_admin(["expire"])
             except Exception: pass
