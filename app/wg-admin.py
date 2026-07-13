@@ -11,19 +11,23 @@ Usage: wg-admin.py <op> [args]
   rename <pubkey> <newname>    -> {}
   setenabled <pubkey> <0|1>    -> {}
   setexit <pubkey> <nl|us>     -> {name,exit}
+  setexitall <nl|us> <manual|quota> -> {exit,changed,source_counts}
+  setexitpolicy <0|1> <nl-gib> <us-gib> -> {auto_switch,quotas_gib}
   delete <pubkey>              -> {}
   getconf <pubkey>             -> {name,ip,conf,qr,exit}
   regenerate                   -> {}   (rewrite conf from clients.json, no change)
 All output is a single JSON line: {"ok":true,...} or {"ok":false,"error":...}.
 """
-import sys, os, re, json, time, base64, fcntl, shutil, tempfile, tarfile, io, subprocess
+import sys, os, re, json, time, base64, fcntl, grp, shutil, tempfile, tarfile, io, subprocess
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 from exit_model import client_exit, normalize_exit as _normalize_exit
+import exit_policy
 
 CLIENTS_JSON = "/etc/wg-ui/clients.json"
+EXIT_POLICY  = "/etc/wg-ui/exit-policy.json"
 NAMES_JSON   = "/etc/wg-ui/names.json"
 SPLIT_EXTRA  = "/etc/wg-ui/split-extra.txt"        # user extras (CIDR/IP/domain), one per line
 SPLIT_META   = "/etc/wg-ui/split-meta.json"
@@ -245,17 +249,98 @@ def normalize_exit(val):
     except ValueError as e:
         die(str(e))
 
+def run_exit_sync_or_raise():
+    r = run([EXIT_SH, "sync"], timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError("exit-route sync failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
+
+def flush_exit_conntrack(ip):
+    run([EXIT_SH, "flush-ct", ip], timeout=10)
+
 def sync_exit_routes(flush_ip=None):
     """Re-apply per-client US marks from clients.json; optionally flush conntrack for one IP.
 
     Always safe to call after client mutations — exit-route.sh sync is idempotent
     and derives state from clients.json (no separate was_us / exit==us branches).
     """
-    r = run([EXIT_SH, "sync"], timeout=30)
-    if r.returncode != 0:
-        die("exit-route sync failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
+    try:
+        run_exit_sync_or_raise()
+    except RuntimeError as exc:
+        die(str(exc))
     if flush_ip:
-        run([EXIT_SH, "flush-ct", flush_ip], timeout=10)
+        flush_exit_conntrack(flush_ip)
+
+def set_policy_owner(path):
+    try:
+        gid = grp.getgrnam("wgui").gr_gid
+    except KeyError:
+        if os.geteuid() == 0:
+            raise RuntimeError("wgui group not found")
+        return
+    os.chown(path, 0, gid)
+
+def setexitpolicy_data(enabled, nl_gib, us_gib):
+    if enabled not in ("0", "1"):
+        raise ValueError("auto switch must be 0 or 1")
+    policy = exit_policy.policy_from_gib(enabled == "1", nl_gib, us_gib)
+    write_atomic(EXIT_POLICY, json.dumps(policy, indent=1) + "\n", 0o640)
+    set_policy_owner(EXIT_POLICY)
+    return {
+        "auto_switch": policy["auto_switch"],
+        "quotas_gib": {
+            key: policy["quota_bytes"][key] // exit_policy.GIB
+            for key in exit_policy.EXITS
+        },
+    }
+
+def setexitall_data(target, reason):
+    target = _normalize_exit(target)
+    if reason not in ("manual", "quota"):
+        raise ValueError("invalid switch reason")
+    with open(CLIENTS_JSON) as f:
+        original_text = f.read()
+    clients = json.loads(original_text)
+    changed = []
+    source_counts = {key: 0 for key in exit_policy.EXITS}
+    for client in clients:
+        old = client_exit(client)
+        source_counts[old] += 1
+        if old == target:
+            continue
+        changed.append(client)
+        if target == "nl":
+            client.pop("exit", None)
+        else:
+            client["exit"] = "us"
+    if not changed:
+        return {"exit": target, "changed": 0, "source_counts": source_counts}
+    try:
+        save_clients(clients)
+        run_exit_sync_or_raise()
+    except Exception as apply_error:
+        try:
+            write_atomic(CLIENTS_JSON, original_text, 0o644)
+            run_exit_sync_or_raise()
+        except Exception as rollback_error:
+            raise RuntimeError(
+                "apply failed: %s; rollback failed: %s" % (apply_error, rollback_error)
+            )
+        raise RuntimeError("apply failed and rolled back: %s" % apply_error)
+    for client in changed:
+        if not client.get("enabled", True):
+            continue
+        try:
+            flush_exit_conntrack(client["ip"])
+        except Exception:
+            # Registry and verified routes are already committed. Conntrack
+            # cleanup is best-effort and must not report that switch as failed.
+            pass
+    direction = "%s -> %s" % (
+        "mixed" if source_counts[target] else ("us" if target == "nl" else "nl"),
+        target,
+    )
+    audit("setexitall", "%s %s %d client(s)" % (reason, direction, len(changed)))
+    return {"exit": target, "changed": len(changed), "source_counts": source_counts}
 
 # ---------------------------------------------------------------------- ops
 def op_add(name, expires="0", exit_="nl"):
@@ -358,6 +443,12 @@ def op_setexit(pub, exit_):
     sync_exit_routes(flush_ip=c["ip"])
     audit("setexit", "%s %s -> %s" % (c["name"], old, exit_))
     ok({"name": c["name"], "exit": exit_})
+
+def op_setexitall(target, reason):
+    ok(setexitall_data(target, reason))
+
+def op_setexitpolicy(enabled, nl_gib, us_gib):
+    ok(setexitpolicy_data(enabled, nl_gib, us_gib))
 
 def op_getconf(pub):
     if not PUB_RE.match(pub):
@@ -487,6 +578,8 @@ def main():
                                                     a[2] if len(a) >= 3 else "nl")
     elif op == "setexpiry"  and len(a) >= 2: op_setexpiry(a[0], a[1])
     elif op == "setexit"    and len(a) >= 2: op_setexit(a[0], a[1])
+    elif op == "setexitall" and len(a) == 2: op_setexitall(a[0], a[1])
+    elif op == "setexitpolicy" and len(a) == 3: op_setexitpolicy(a[0], a[1], a[2])
     elif op == "expire":                  op_expire()
     elif op == "export":                  op_export()
     elif op == "rename"     and len(a) >= 2: op_rename(a[0], a[1])
@@ -497,7 +590,7 @@ def main():
     elif op == "splitsave"  and len(a) >= 1: op_splitsave(a[0], a[1:])
     elif op == "splitserver" and len(a) >= 1: op_splitserver(a[0])
     elif op == "regenerate":              regenerate(load_clients()); ok()
-    else:                                 die("bad operation or arguments")
+    else:                                  die("bad operation or arguments")
 
 if __name__ == "__main__":
     try:
