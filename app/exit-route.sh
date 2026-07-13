@@ -5,7 +5,7 @@
 # Everyone else keeps the default path through wg-do (NL).
 #
 # Idempotent. State is derived from clients.json on every sync — no separate state file.
-set -u
+set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 US_IFACE="${WGUI_US_IFACE:-wg-us}"
 CL_IFACE="${WGUI_IFACE:-wg-cl}"
@@ -94,22 +94,51 @@ iface_up() {
     ip link show "$US_IFACE" >/dev/null 2>&1
 }
 
+verify_sync() {
+    local expected="$1" actual ip
+    actual=$(iptables -t mangle -S PREROUTING 2>/dev/null | grep -c -- "--comment $COMMENT" || true)
+    [ "$actual" -eq "$expected" ] || {
+        echo "exit-route: expected $expected mark rule(s), found $actual" >&2
+        return 1
+    }
+    [ "$expected" -eq 0 ] && return 0
+    ip rule show | grep -q "fwmark $MARK" || {
+        echo "exit-route: policy rule missing" >&2
+        return 1
+    }
+    ip route show table "$TABLE" | grep -q "default.*dev $US_IFACE" || {
+        echo "exit-route: US default route missing" >&2
+        return 1
+    }
+    while IFS= read -r ip; do
+        [ -z "$ip" ] || iptables -t mangle -C PREROUTING -s "$ip/32" \
+            -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
+    done < <(us_ips)
+}
+
 sync_rules() {
+    local wanted ip count=0
+    wanted=$(us_ips)
     if ! iface_up; then
+        if [ -n "$wanted" ]; then
+            echo "exit-route: $US_IFACE is down while US clients are requested" >&2
+            return 1
+        fi
         flush_marks
-        echo "exit-route: $US_IFACE down — marks cleared, nothing applied"
+        verify_sync 0
+        echo "exit-route: $US_IFACE down — no US clients requested"
         return 0
     fi
     ensure_table
     ensure_forward
     flush_marks
-    local n=0 ip
     while IFS= read -r ip; do
-        [ -n "$ip" ] || continue
+        [ -z "$ip" ] && continue
         add_mark "$ip"
-        n=$((n + 1))
-    done < <(us_ips)
-    echo "exit-route: synced $n US client(s) → $US_IFACE (mark $MARK table $TABLE)"
+        count=$((count + 1))
+    done <<< "$wanted"
+    verify_sync "$count"
+    echo "exit-route: synced $count US client(s) → $US_IFACE (mark $MARK table $TABLE)"
 }
 
 case "${1:-}" in
