@@ -295,62 +295,67 @@ def _set_incomplete_policy_block(incomplete, assignments):
     return value
 
 
+def _guarded_exit_switch_locked(target, reason, inputs=None):
+    policy, usage, assignments, health, warning = inputs or policy_inputs()
+    availability = counter_availability()
+    source = "us" if target == "nl" else "nl"
+    if reason == "quota":
+        decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
+        if decision["blocked"]:
+            blocked = _set_policy_block(decision["blocked"])
+            return _blocked_result(blocked)
+        action = decision["action"]
+        if not action:
+            _finish_no_action(policy, assignments, availability)
+            return {"ok": True, "exit": target, "changed": 0}
+        target = action["target"]
+        source = action["source"]
+    blocked = exit_policy.target_block(target, policy, usage, health)
+    if blocked:
+        if reason == "quota":
+            blocked = _set_policy_block(dict(blocked, source=source))
+        return _blocked_result(blocked)
+    if assignments.get(target, 0) == sum(assignments.values()):
+        _clear_policy_block()
+        return {"ok": True, "exit": target, "changed": 0}
+    incomplete = _counter_block(source, target, availability)
+    if incomplete:
+        if reason == "quota":
+            incomplete = _set_incomplete_policy_block(incomplete, assignments)
+        return _blocked_result(incomplete)
+    result = call_admin(["setexitall", target, reason])
+    if result.get("ok"):
+        event = {
+            "ts": int(time.time()),
+            "source": source,
+            "target": target,
+            "reason": reason,
+            "changed": result.get("changed", 0),
+        }
+        with _lock:
+            _policy_runtime["blocked"] = None
+            _policy_runtime["last_switch"] = event
+    elif reason == "quota":
+        _set_policy_block({
+            "code": "helper_failed",
+            "source": source,
+            "target": target,
+            "error": result.get("error", "helper failed"),
+        })
+    log_event("exit_switch", ok=bool(result.get("ok")), reason=reason,
+              target=target, changed=result.get("changed", 0),
+              error=result.get("error"))
+    return result
+
+
 def guarded_exit_switch(target, reason):
     with _policy_lock:
-        policy, usage, assignments, health, warning = policy_inputs()
-        availability = counter_availability()
-        source = "us" if target == "nl" else "nl"
-        if reason == "quota":
-            decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
-            if decision["blocked"]:
-                blocked = _set_policy_block(decision["blocked"])
-                return _blocked_result(blocked)
-            action = decision["action"]
-            if not action:
-                _finish_no_action(policy, assignments, availability)
-                return {"ok": True, "exit": target, "changed": 0}
-            target = action["target"]
-            source = action["source"]
-        blocked = exit_policy.target_block(target, policy, usage, health)
-        if blocked:
-            if reason == "quota":
-                blocked = _set_policy_block(dict(blocked, source=source))
-            return _blocked_result(blocked)
-        if assignments.get(target, 0) == sum(assignments.values()):
-            _clear_policy_block()
-            return {"ok": True, "exit": target, "changed": 0}
-        incomplete = _counter_block(source, target, availability)
-        if incomplete:
-            if reason == "quota":
-                incomplete = _set_incomplete_policy_block(incomplete, assignments)
-            return _blocked_result(incomplete)
-        result = call_admin(["setexitall", target, reason])
-        if result.get("ok"):
-            event = {
-                "ts": int(time.time()),
-                "source": source,
-                "target": target,
-                "reason": reason,
-                "changed": result.get("changed", 0),
-            }
-            with _lock:
-                _policy_runtime["blocked"] = None
-                _policy_runtime["last_switch"] = event
-        elif reason == "quota":
-            _set_policy_block({
-                "code": "helper_failed",
-                "source": source,
-                "target": target,
-                "error": result.get("error", "helper failed"),
-            })
-        log_event("exit_switch", ok=bool(result.get("ok")), reason=reason,
-                  target=target, changed=result.get("changed", 0),
-                  error=result.get("error"))
-        return result
+        return _guarded_exit_switch_locked(target, reason)
 
 
-def evaluate_auto_switch():
-    policy, usage, assignments, health, warning = policy_inputs()
+def _evaluate_auto_switch_locked(inputs=None):
+    inputs = inputs or policy_inputs()
+    policy, usage, assignments, health, warning = inputs
     availability = counter_availability()
     decision = exit_policy.evaluate_auto(policy, usage, assignments, health)
     if decision["blocked"]:
@@ -364,7 +369,27 @@ def evaluate_auto_switch():
     if incomplete:
         blocked = _set_incomplete_policy_block(incomplete, assignments)
         return {"ok": False, **blocked}
-    return guarded_exit_switch(action["target"], "quota")
+    return _guarded_exit_switch_locked(action["target"], "quota", inputs)
+
+
+def save_exit_policy(argv):
+    """Persist and reconcile one policy version while switches are excluded."""
+    with _policy_lock:
+        result = call_admin(argv)
+        if not result.get("ok"):
+            return result
+        inputs = policy_inputs()
+        if inputs[0]["auto_switch"]:
+            _evaluate_auto_switch_locked(inputs)
+        else:
+            _clear_policy_block()
+        refresh_status_cache()
+        return result
+
+
+def evaluate_auto_switch():
+    with _policy_lock:
+        return _evaluate_auto_switch_locked()
 
 def clients_status():
     """Assemble peer rows from sampler caches — no wg dump on the request path."""
@@ -808,34 +833,66 @@ def exit_usage_month(now=None):
 
 
 def seed_exit_usage(registry, month=None):
-    month, next_month = _month_bounds(month=month)
     c = _conn()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        return _seed_exit_usage(c, registry, month)
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def _seed_exit_usage(c, registry, month=None, registry_missing=False):
+    month, next_month = _month_bounds(month=month)
     if c.execute("SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
-        c.close(); return False
-    assignments = {x.get("pubkey"): client_exit(x) for x in registry}
+        return False
     rows = c.execute("SELECT pubkey,day,rx,tx FROM usage WHERE day>=? AND day<?",
                      (month, next_month)).fetchall()
+    if registry_missing and rows:
+        raise RuntimeError("client registry unavailable; exit usage migration not seeded")
+    assignments = {x.get("pubkey"): client_exit(x) for x in (registry or [])}
     for row in rows:
         key = assignments.get(row["pubkey"], "nl")
         c.execute("INSERT INTO exit_usage(exit,day,rx,tx) VALUES(?,?,?,?) "
                   "ON CONFLICT(exit,day) DO UPDATE SET rx=rx+?,tx=tx+?",
                   (key, row["day"], row["rx"], row["tx"], row["rx"], row["tx"]))
     c.execute("INSERT INTO schema_meta(key,value) VALUES('exit_usage_v1_seeded','1')")
-    c.commit(); c.close(); return True
+    c.commit()
+    return True
 
 
 def seed_exit_usage_from_registry(month=None):
     c = _conn()
-    seeded = c.execute(
-        "SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'"
-    ).fetchone()
-    c.close()
-    if seeded:
-        return False
-    registry = load_registry()
-    if registry is None:
-        raise RuntimeError("client registry unavailable; exit usage migration not seeded")
-    return seed_exit_usage(registry, month)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        if c.execute(
+                "SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
+            return False
+        try:
+            with open(CLIENTS) as f:
+                registry = json.load(f)
+            registry_missing = False
+        except FileNotFoundError:
+            registry = []
+            registry_missing = True
+        except Exception as exc:
+            raise RuntimeError("client registry unreadable or malformed; "
+                               "exit usage migration not seeded") from exc
+        if not registry_missing and not isinstance(registry, list):
+            raise RuntimeError("client registry malformed; exit usage migration not seeded")
+        if not registry_missing and any(
+                not isinstance(record, dict)
+                or ("exit" in record and record["exit"] not in exit_policy.EXITS)
+                for record in registry):
+            raise RuntimeError("client registry malformed; exit usage migration not seeded")
+        return _seed_exit_usage(c, registry, month, registry_missing=registry_missing)
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 def usage_month():
@@ -1147,9 +1204,10 @@ class H(BaseHTTPRequestHandler):
                 return self._json(400, {"ok": False, "error": "unknown op"})
             # split ops run build-split (RU-zone download, up to 90 s) + ipset reload —
             # the default 30 s would kill the helper mid-operation
-            res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
-            if op == "setexitpolicy" and res.get("ok"):
-                refresh_status_cache()
+            if op == "setexitpolicy":
+                res = save_exit_policy(argv)
+            else:
+                res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)

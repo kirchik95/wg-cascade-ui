@@ -31,13 +31,21 @@ class TestExitRoute(unittest.TestCase):
         silent_applies=(),
         quote_comments=False,
         table_alias=None,
+        registry_mode="json",
     ):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
             bindir = root / "bin"
             bindir.mkdir()
             registry = root / "clients.json"
-            registry.write_text(json.dumps(clients))
+            if registry_mode == "json":
+                registry.write_text(json.dumps(clients))
+            elif registry_mode == "raw":
+                registry.write_text(clients)
+            elif registry_mode == "directory":
+                registry.mkdir()
+            elif registry_mode != "missing":
+                raise AssertionError("unknown registry mode")
             marks = root / "marks"
             mark_rows = []
             for mark in initial_marks:
@@ -265,6 +273,34 @@ class TestExitRoute(unittest.TestCase):
         result, _ = self.run_sync([], iface_up=False, failures=("mark_inspect",))
         self.assertNotEqual(result.returncode, 0)
 
+    def test_invalid_registry_fails_before_mark_mutation(self):
+        cases = (
+            ("missing", [], "missing"),
+            ("raw", "{", "malformed"),
+            ("json", {"ip": "10.10.0.2"}, "non-list"),
+            ("json", ["not-a-record"], "malformed-record"),
+            ("json", [{"ip": "10.10.0.2", "exit": "ca"}], "invalid-exit"),
+            ("json", [{"exit": "us", "enabled": True}], "missing-us-ip"),
+            ("json", [{"ip": "192.0.2.2", "exit": "us", "enabled": True}], "invalid-us-ip"),
+            ("directory", [], "directory"),
+        )
+        original = ("10.10.0.99", COMMENT, MARK)
+        for mode, clients, label in cases:
+            with self.subTest(case=label):
+                result, state = self.run_sync(
+                    clients,
+                    iface_up=True,
+                    initial_marks=(original,),
+                    registry_mode=mode,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("client registry", result.stderr)
+                self.assertEqual(state["marks"], [original])
+                self.assertEqual(state["policy"], [])
+                self.assertEqual(state["route"], "")
+                self.assertEqual(state["forward"], [])
+                self.assertEqual(state["nat"], [])
+
     def test_route_command_failure_propagates(self):
         result, _ = self.run_sync(
             [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
@@ -317,6 +353,23 @@ class TestExitRoute(unittest.TestCase):
         self.assertEqual(state["forward"], ["out", "return"])
         self.assertEqual(state["nat"], ["wg-us"])
         self.assertIn("synced 1 US client", result.stdout)
+
+    def test_legacy_us_client_without_enabled_is_active(self):
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us"}],
+            iface_up=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
+
+    def test_disabled_us_client_does_not_require_ip_or_mark(self):
+        result, state = self.run_sync(
+            [{"exit": "us", "enabled": False}],
+            iface_up=False,
+            initial_marks=("10.10.0.99",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["marks"], [])
 
     def test_quoted_exact_comment_is_owned(self):
         result, _ = self.run_sync(

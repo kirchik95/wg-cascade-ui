@@ -1,11 +1,13 @@
 import copy
 import importlib.util
+import json
 import os
 import pathlib
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP))
@@ -85,7 +87,10 @@ class TestExitAccounting(unittest.TestCase):
         month = wgui.exit_usage_month(0)
         self.assertEqual(month["nl"], {"rx": 1, "tx": 2})
 
-    def test_unavailable_registry_does_not_consume_seed_marker(self):
+    def test_missing_registry_with_current_month_history_does_not_consume_seed_marker(self):
+        c = wgui._conn()
+        c.execute("INSERT INTO usage(pubkey,day,rx,tx) VALUES('A','2026-07-13',10,20)")
+        c.commit(); c.close()
         old_clients = wgui.CLIENTS
         wgui.CLIENTS = os.path.join(self.tmp.name, "missing-clients.json")
         try:
@@ -99,6 +104,96 @@ class TestExitAccounting(unittest.TestCase):
             ).fetchone()
             c.close()
             self.assertIsNone(marker)
+        finally:
+            wgui.CLIENTS = old_clients
+
+    def test_fresh_install_missing_registry_completes_startup_bootstrap(self):
+        class StartupReachedSampler(Exception):
+            pass
+
+        old_clients = wgui.CLIENTS
+        old_secret = wgui.auth.SECRET
+        old_pass_sha = wgui.auth.PASS_SHA
+        wgui.CLIENTS = os.path.join(self.tmp.name, "missing-clients.json")
+        wgui.auth.SECRET = b"fresh-install-startup-secret"
+        wgui.auth.PASS_SHA = "configured"
+        try:
+            with mock.patch.object(wgui.threading, "Thread") as thread_class:
+                thread_class.return_value.start.side_effect = StartupReachedSampler
+                with self.assertRaises(StartupReachedSampler):
+                    wgui.main()
+            c = wgui._conn()
+            marker = c.execute(
+                "SELECT value FROM schema_meta WHERE key='exit_usage_v1_seeded'"
+            ).fetchone()
+            c.close()
+            self.assertEqual(marker["value"], "1")
+        finally:
+            wgui.CLIENTS = old_clients
+            wgui.auth.SECRET = old_secret
+            wgui.auth.PASS_SHA = old_pass_sha
+
+    def test_missing_registry_retains_live_peer_fallback_after_bootstrap(self):
+        old_clients = wgui.CLIENTS
+        wgui.CLIENTS = os.path.join(self.tmp.name, "missing-clients.json")
+        with wgui._lock:
+            old_live = dict(wgui._live)
+            wgui._live.clear()
+            wgui._live["PUB"] = {
+                "ep": "198.51.100.2:51820", "ip": "10.10.0.2",
+                "hs": int(time.time()), "rx": 10, "tx": 20,
+            }
+        try:
+            self.assertTrue(wgui.seed_exit_usage_from_registry("2026-07-01"))
+            peers = wgui.clients_status()
+            self.assertEqual(len(peers), 1)
+            self.assertEqual(peers[0]["name"], "client1")
+            self.assertEqual(peers[0]["pubkey"], "PUB")
+        finally:
+            wgui.CLIENTS = old_clients
+            with wgui._lock:
+                wgui._live.clear()
+                wgui._live.update(old_live)
+
+    def test_malformed_registry_with_empty_history_does_not_consume_seed_marker(self):
+        old_clients = wgui.CLIENTS
+        clients = os.path.join(self.tmp.name, "clients.json")
+        with open(clients, "w") as f:
+            f.write("{")
+        wgui.CLIENTS = clients
+        try:
+            with self.assertRaisesRegex(RuntimeError, "registry"):
+                wgui.seed_exit_usage_from_registry("2026-07-01")
+            c = wgui._conn()
+            marker = c.execute(
+                "SELECT value FROM schema_meta WHERE key='exit_usage_v1_seeded'"
+            ).fetchone()
+            c.close()
+            self.assertIsNone(marker)
+        finally:
+            wgui.CLIENTS = old_clients
+
+    def test_structurally_malformed_registry_fails_closed_with_empty_history(self):
+        old_clients = wgui.CLIENTS
+        clients = os.path.join(self.tmp.name, "clients.json")
+        try:
+            for registry in (None, {}, ["not-a-record"], [{"pubkey": "A", "exit": "ca"}]):
+                with self.subTest(registry=registry):
+                    with open(clients, "w") as f:
+                        f.write(json.dumps(registry))
+                    wgui.CLIENTS = clients
+                    with self.assertRaisesRegex(RuntimeError, "registry"):
+                        wgui.seed_exit_usage_from_registry("2026-07-01")
+                    c = wgui._conn()
+                    marker = c.execute(
+                        "SELECT value FROM schema_meta WHERE key='exit_usage_v1_seeded'"
+                    ).fetchone()
+                    c.close()
+                    self.assertIsNone(marker)
+                c = wgui._conn()
+                c.execute("DELETE FROM schema_meta WHERE key='exit_usage_v1_seeded'")
+                c.execute("DELETE FROM exit_usage")
+                c.commit(); c.close()
         finally:
             wgui.CLIENTS = old_clients
 

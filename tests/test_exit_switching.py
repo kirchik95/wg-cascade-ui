@@ -1,4 +1,5 @@
 import builtins
+import base64
 import contextlib
 import importlib.util
 import io
@@ -8,6 +9,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import tarfile
 import threading
 import time
 import types
@@ -335,6 +337,52 @@ class TestBulkAdmin(unittest.TestCase):
             wgadmin.sync_exit_routes("10.10.0.2")
         self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "route failed"})
 
+    def test_recovery_export_includes_optional_exit_policy_with_safe_name(self):
+        root = pathlib.Path(self.tmp.name)
+        server = root / "wg-cl.conf"
+        clients = root / "clients.json"
+        split_extra = root / "split-extra.txt"
+        client_dir = root / "client-configs"
+        policy_dir = root / "policy-state"
+        policy = policy_dir / "committed-policy.json"
+        server.write_text("server-private-key\n")
+        clients.write_text("[]\n")
+        split_extra.write_text("example.com\n")
+        client_dir.mkdir()
+        (client_dir / "phone.conf").write_text("client-private-key\n")
+        policy_dir.mkdir()
+        policy.write_text('{"auto_switch": true}\n')
+        self.patch("WG_CONF", str(server))
+        self.patch("CLIENTS_JSON", str(clients))
+        self.patch("SPLIT_EXTRA", str(split_extra))
+        self.patch("CLIENT_DIR", str(client_dir))
+        self.patch("EXIT_POLICY", str(policy))
+        audits = []
+        self.patch("audit", lambda op, detail: audits.append((op, detail)))
+
+        def exported_files():
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+                wgadmin.op_export()
+            payload = json.loads(output.getvalue())
+            with tarfile.open(fileobj=io.BytesIO(base64.b64decode(payload["archive"])), mode="r:gz") as archive:
+                return {
+                    member.name: archive.extractfile(member).read()
+                    for member in archive.getmembers() if member.isfile()
+                }
+
+        files = exported_files()
+        self.assertEqual(files["committed-policy.json"], b'{"auto_switch": true}\n')
+        self.assertNotIn(str(policy), files)
+
+        policy.unlink()
+        files = exported_files()
+        self.assertNotIn("committed-policy.json", files)
+        self.assertEqual(audits, [
+            ("export", "backup downloaded"),
+            ("export", "backup downloaded"),
+        ])
+
 
 class TestServerPolicy(unittest.TestCase):
     def setUp(self):
@@ -651,17 +699,11 @@ class TestServerPolicy(unittest.TestCase):
     def test_concurrent_auto_evaluations_call_helper_at_most_once(self):
         assignments = {"nl": 2, "us": 0}
         state_lock = threading.Lock()
-        initial_reads = 0
-        initial_barrier = threading.Barrier(2)
+        start_barrier = threading.Barrier(2)
 
         def inputs():
-            nonlocal initial_reads
             with state_lock:
-                initial_reads += 1
-                read_number = initial_reads
                 snapshot = dict(assignments)
-            if read_number <= 2:
-                initial_barrier.wait(timeout=2)
             base = self.inputs(nl_used=1024 ** 3)
             return base[0], base[1], snapshot, base[3], base[4]
 
@@ -676,8 +718,12 @@ class TestServerPolicy(unittest.TestCase):
         self.patch("policy_inputs", inputs)
         self.patch("call_admin", helper)
         results = []
-        threads = [threading.Thread(target=lambda: results.append(wgui.evaluate_auto_switch()))
-                   for _ in range(2)]
+
+        def evaluate():
+            start_barrier.wait(timeout=2)
+            results.append(wgui.evaluate_auto_switch())
+
+        threads = [threading.Thread(target=evaluate) for _ in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -813,6 +859,202 @@ class TestServerPolicy(unittest.TestCase):
         self.assertEqual(response, shared)
         self.assertEqual(calls, [(["setexitpolicy", "1", "250", "750"], 30)])
         self.assertEqual(refreshes, [True])
+
+    def test_policy_save_serializes_with_switch_and_switch_uses_committed_policy(self):
+        old_policy = exit_policy.policy_from_gib(False, 2, 2)
+        new_policy = exit_policy.policy_from_gib(False, 2, 1)
+        committed = [old_policy]
+        save_entered = threading.Event()
+        release_save = threading.Event()
+        switch_started = threading.Event()
+        switch_done = threading.Event()
+        calls = []
+
+        def inputs(*args, **kwargs):
+            return (
+                committed[0],
+                {"nl": 0, "us": 1024 ** 3},
+                {"nl": 1, "us": 0},
+                {"nl": {"ok": True, "checked_age": 1},
+                 "us": {"ok": True, "checked_age": 1}},
+                None,
+            )
+
+        def helper(argv, timeout=30):
+            cache_lock_free = wgui._lock.acquire(blocking=False)
+            self.assertTrue(cache_lock_free)
+            if cache_lock_free:
+                wgui._lock.release()
+            calls.append(list(argv))
+            if argv[0] == "setexitpolicy":
+                save_entered.set()
+                self.assertTrue(release_save.wait(timeout=2))
+                committed[0] = new_policy
+                return {"ok": True, "saved": True}
+            return {"ok": True, "changed": 1, "exit": "us"}
+
+        self.patch("policy_inputs", inputs)
+        self.patch("call_admin", helper)
+        self.patch("refresh_status_cache", lambda: None)
+        save_result = []
+        switch_result = []
+        save_thread = threading.Thread(target=lambda: save_result.append(self.request({
+            "op": "setexitpolicy", "auto_switch": False,
+            "quotas_gib": {"nl": 2, "us": 1},
+        })))
+
+        def switch():
+            switch_started.set()
+            switch_result.append(wgui.guarded_exit_switch("us", "manual"))
+            switch_done.set()
+
+        switch_thread = threading.Thread(target=switch)
+        save_thread.start()
+        self.assertTrue(save_entered.wait(timeout=2))
+        switch_thread.start()
+        self.assertTrue(switch_started.wait(timeout=2))
+        switch_escaped = switch_done.wait(timeout=0.2)
+        release_save.set()
+        save_thread.join(timeout=2)
+        switch_thread.join(timeout=2)
+        self.assertFalse(save_thread.is_alive())
+        self.assertFalse(switch_thread.is_alive())
+        self.assertFalse(switch_escaped, "switch escaped while policy save was in flight")
+        self.assertEqual(save_result[0], (200, {"ok": True, "saved": True}))
+        self.assertEqual(switch_result[0]["code"], "target_exhausted")
+        self.assertEqual(calls, [["setexitpolicy", "0", "2", "1"]])
+
+    def test_policy_save_serializes_with_auto_runtime_reconciliation(self):
+        committed = [exit_policy.policy_from_gib(True, 1, 1)]
+        save_entered = threading.Event()
+        release_save = threading.Event()
+        auto_started = threading.Event()
+        auto_done = threading.Event()
+
+        def inputs(*args, **kwargs):
+            return (
+                committed[0],
+                {"nl": 1024 ** 3, "us": 1024 ** 3},
+                {"nl": 1, "us": 1},
+                {"nl": {"ok": True, "checked_age": 1},
+                 "us": {"ok": True, "checked_age": 1}},
+                None,
+            )
+
+        def helper(argv, timeout=30):
+            save_entered.set()
+            self.assertTrue(release_save.wait(timeout=2))
+            committed[0] = exit_policy.policy_from_gib(False, 2, 2)
+            return {"ok": True, "saved": True}
+
+        self.patch("policy_inputs", inputs)
+        self.patch("call_admin", helper)
+        self.patch("refresh_status_cache", lambda: None)
+        save_thread = threading.Thread(target=lambda: self.request({
+            "op": "setexitpolicy", "auto_switch": False,
+            "quotas_gib": {"nl": 2, "us": 2},
+        }))
+
+        def evaluate():
+            auto_started.set()
+            wgui.evaluate_auto_switch()
+            auto_done.set()
+
+        auto_thread = threading.Thread(target=evaluate)
+        save_thread.start()
+        self.assertTrue(save_entered.wait(timeout=2))
+        auto_thread.start()
+        self.assertTrue(auto_started.wait(timeout=2))
+        auto_escaped = auto_done.wait(timeout=0.2)
+        release_save.set()
+        save_thread.join(timeout=2)
+        auto_thread.join(timeout=2)
+        self.assertFalse(save_thread.is_alive())
+        self.assertFalse(auto_thread.is_alive())
+        self.assertFalse(auto_escaped, "auto evaluation escaped while policy save was in flight")
+        with wgui._lock:
+            self.assertIsNone(wgui._policy_runtime["blocked"])
+
+    def test_saved_disabled_or_recovered_policy_clears_stale_block_and_refreshes_status(self):
+        committed = [exit_policy.policy_from_gib(True, 1, 1)]
+
+        def inputs(*args, **kwargs):
+            return (
+                committed[0],
+                {"nl": 1024 ** 3, "us": 0},
+                {"nl": 1, "us": 0},
+                {"nl": {"ok": True, "checked_age": 1},
+                 "us": {"ok": True, "checked_age": 1}},
+                None,
+            )
+
+        for auto_switch, expected_auto in ((False, False), (True, True)):
+            with self.subTest(auto_switch=auto_switch):
+                committed[0] = exit_policy.policy_from_gib(True, 1, 1)
+                with wgui._lock:
+                    wgui._policy_runtime["blocked"] = wgui._with_block_message({
+                        "code": "target_exhausted", "source": "nl", "target": "us",
+                    })
+                refreshed = []
+
+                def helper(argv, timeout=30):
+                    committed[0] = exit_policy.policy_from_gib(auto_switch, 2, 2)
+                    return {"ok": True, "saved": True}
+
+                self.patch("policy_inputs", inputs)
+                self.patch("call_admin", helper)
+                self.patch("refresh_status_cache", lambda: refreshed.append(wgui.exit_policy_status()))
+                code, response = self.request({
+                    "op": "setexitpolicy", "auto_switch": auto_switch,
+                    "quotas_gib": {"nl": 2, "us": 2},
+                })
+                self.assertEqual((code, response), (200, {"ok": True, "saved": True}))
+                with wgui._lock:
+                    self.assertIsNone(wgui._policy_runtime["blocked"])
+                self.assertEqual(refreshed[-1]["auto_switch"], expected_auto)
+                self.assertIsNone(refreshed[-1]["blocked"])
+
+    def test_saved_auto_policy_reports_immediate_switch_failure_without_failing_save(self):
+        committed = [exit_policy.policy_from_gib(False, 2, 2)]
+        calls = []
+        refreshed = []
+
+        def inputs(*args, **kwargs):
+            return (
+                committed[0],
+                {"nl": 1024 ** 3, "us": 0},
+                {"nl": 1, "us": 0},
+                {"nl": {"ok": True, "checked_age": 1},
+                 "us": {"ok": True, "checked_age": 1}},
+                None,
+            )
+
+        def helper(argv, timeout=30):
+            cache_lock_free = wgui._lock.acquire(blocking=False)
+            self.assertTrue(cache_lock_free)
+            if cache_lock_free:
+                wgui._lock.release()
+            calls.append(list(argv))
+            if argv[0] == "setexitpolicy":
+                committed[0] = exit_policy.policy_from_gib(True, 1, 1)
+                return {"ok": True, "saved": True}
+            return {"ok": False, "error": "route apply failed"}
+
+        self.patch("policy_inputs", inputs)
+        self.patch("call_admin", helper)
+        self.patch("refresh_status_cache", lambda: refreshed.append(wgui.exit_policy_status()))
+        code, response = self.request({
+            "op": "setexitpolicy", "auto_switch": True,
+            "quotas_gib": {"nl": 1, "us": 1},
+        })
+        self.assertEqual((code, response), (200, {"ok": True, "saved": True}))
+        self.assertEqual(calls, [
+            ["setexitpolicy", "1", "1", "1"],
+            ["setexitall", "us", "quota"],
+        ])
+        with wgui._lock:
+            self.assertEqual(wgui._policy_runtime["blocked"]["code"], "helper_failed")
+        self.assertEqual(refreshed[-1]["blocked"]["code"], "helper_failed")
 
     def test_admin_bulk_uses_409_without_mutating_guard_result(self):
         shared = {"ok": False, "code": "target_stale", "error": "target_stale", "http_status": 409}

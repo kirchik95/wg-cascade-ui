@@ -517,7 +517,7 @@ def op_export():
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for p in (WG_CONF, "/etc/wireguard/wg-do.conf", "/etc/wireguard/wg-us.conf",
-                  CLIENTS_JSON, SPLIT_EXTRA):
+                  CLIENTS_JSON, SPLIT_EXTRA, EXIT_POLICY):
             if os.path.exists(p):
                 tar.add(p, arcname=os.path.basename(p))
         if os.path.isdir(CLIENT_DIR):

@@ -17,26 +17,40 @@ COMMENT="wgui-exit-us"
 SUBNET="10.10.0.0/24"
 
 us_ips() {
-    python3 - "$CLIENTS_JSON" "$APP_DIR" <<'PY'
+    python3 - "$CLIENTS_JSON" <<'PY'
 import json, sys, re
-path, app = sys.argv[1], sys.argv[2]
-sys.path.insert(0, app)
-from exit_model import client_exit
+path = sys.argv[1]
+
+def fail(detail):
+    print("exit-route: client registry " + detail, file=sys.stderr)
+    sys.exit(1)
+
 try:
-    clients = json.load(open(path))
-except Exception:
-    sys.exit(0)
+    with open(path) as registry:
+        clients = json.load(registry)
+except FileNotFoundError:
+    fail("is missing")
+except json.JSONDecodeError:
+    fail("contains malformed JSON")
+except OSError:
+    fail("is unreadable")
+if not isinstance(clients, list):
+    fail("must contain a list")
 ip_re = re.compile(r"^10\.10\.0\.([2-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])$")
-for c in clients:
+for index, c in enumerate(clients):
     if not isinstance(c, dict):
-        continue
-    if client_exit(c) != "us":
+        fail("record %d must be an object" % index)
+    exit_name = c.get("exit", "nl")
+    if exit_name not in ("nl", "us"):
+        fail("record %d has an invalid exit" % index)
+    if exit_name != "us":
         continue
     if not c.get("enabled", True):
         continue
-    ip = str(c.get("ip", ""))
-    if ip_re.match(ip):
-        print(ip)
+    ip = c.get("ip")
+    if not isinstance(ip, str) or not ip_re.fullmatch(ip):
+        fail("record %d has an invalid US client IP" % index)
+    print(ip)
 PY
 }
 
@@ -159,7 +173,7 @@ us_default_route_present() {
 }
 
 verify_sync() {
-    local expected="$1" mark_rules actual ip
+    local expected="$1" wanted="$2" mark_rules actual ip
     if ! mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null); then
         echo "exit-route: unable to inspect mark rules" >&2
         return 1
@@ -181,19 +195,21 @@ verify_sync() {
     while IFS= read -r ip; do
         [ -z "$ip" ] || iptables -t mangle -C PREROUTING -s "$ip/32" \
             -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
-    done < <(us_ips)
+    done <<< "$wanted"
 }
 
 sync_rules() {
     local wanted ip count=0
-    wanted=$(us_ips)
+    if ! wanted=$(us_ips); then
+        return 1
+    fi
     if ! iface_up; then
         if [ -n "$wanted" ]; then
             echo "exit-route: $US_IFACE is down while US clients are requested" >&2
             return 1
         fi
         flush_marks
-        verify_sync 0
+        verify_sync 0 "$wanted"
         echo "exit-route: $US_IFACE down — no US clients requested"
         return 0
     fi
@@ -205,7 +221,7 @@ sync_rules() {
         add_mark "$ip"
         count=$((count + 1))
     done <<< "$wanted"
-    verify_sync "$count"
+    verify_sync "$count" "$wanted"
     echo "exit-route: synced $count US client(s) → $US_IFACE (mark $MARK table $TABLE)"
 }
 
@@ -226,7 +242,8 @@ case "${1:-}" in
         echo "exit-route: rules removed"
         ;;
     status)
-        count=$(us_ips | grep -c . || true)
+        if ! wanted=$(us_ips); then exit 1; fi
+        count=$(grep -c . <<< "$wanted" || true)
         mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
         rules=$(count_owned_marks <<< "$mark_rules")
         printf '{"iface":"%s","up":%s,"clients_us":%s,"mark_rules":%s}\n' \
