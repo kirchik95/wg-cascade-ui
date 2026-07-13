@@ -134,7 +134,10 @@ _exit_totals = {"nl": None, "us": None}
 _month_usage = {}                     # pubkey -> {rx,tx} calendar-month totals
 _exit_month_usage = {"nl": {"rx": 0, "tx": 0}, "us": {"rx": 0, "tx": 0}}
 _status_snap = None                   # last assembled /api/status payload
-_sampler_meta = {"ok_at": 0, "err": None, "err_at": 0}
+_sampler_meta = {
+    "collection": {"ok_at": 0, "err": None, "err_at": 0},
+    "persistence": {"ok_at": 0, "err": None, "err_at": 0},
+}
 _lock = threading.Lock()
 
 def clients_status():
@@ -228,21 +231,34 @@ def _probe_egress():
 
 def _sampler_note(ok=True, err=None):
     with _lock:
+        state = _sampler_meta["collection"]
         if ok:
-            _sampler_meta["ok_at"] = int(time.time())
-            _sampler_meta["err"] = None
+            state["ok_at"] = int(time.time())
+            state["err"] = None
         else:
-            _sampler_meta["err"] = str(err)[:200] if err else "error"
-            _sampler_meta["err_at"] = int(time.time())
+            state["err"] = str(err)[:200] if err else "error"
+            state["err_at"] = int(time.time())
+
+def _sampler_persistence_note(ok=True, err=None):
+    with _lock:
+        state = _sampler_meta["persistence"]
+        if ok:
+            state["ok_at"] = int(time.time())
+            state["err"] = None
+        else:
+            state["err"] = str(err)[:200] if err else "error"
+            state["err_at"] = int(time.time())
 
 def sampler_info():
     with _lock:
-        m = dict(_sampler_meta)
+        collection = dict(_sampler_meta["collection"])
+        persistence = dict(_sampler_meta["persistence"])
+    error = persistence if persistence.get("err") else collection
     return {
-        "ok_at": m.get("ok_at", 0),
-        "err": m.get("err"),
-        "err_at": m.get("err_at", 0),
-        "age": (int(time.time()) - m["ok_at"]) if m.get("ok_at") else -1,
+        "ok_at": collection.get("ok_at", 0),
+        "err": error.get("err"),
+        "err_at": error.get("err_at", 0),
+        "age": (int(time.time()) - collection["ok_at"]) if collection.get("ok_at") else -1,
     }
 
 def _sampler():
@@ -285,8 +301,9 @@ def _sampler():
                 with _lock:
                     _month_usage.clear(); _month_usage.update(client_month)
                     _exit_month_usage.clear(); _exit_month_usage.update(exit_month)
+                _sampler_persistence_note(True)
             except Exception as exc:
-                _sampler_note(False, "usage persistence: %s" % exc)
+                _sampler_persistence_note(False, "usage persistence: %s" % exc)
         if i and i % 720 == 0:         # auto-disable expired clients ~hourly
             try: call_admin(["expire"])
             except Exception: pass
@@ -527,12 +544,27 @@ def record_exit_usage(cur, day=None):
     c.commit(); c.close()
 
 
+def _month_bounds(now=None, month=None):
+    if month is None:
+        stamp = time.time() if now is None else now
+        current = time.localtime(stamp)
+        year, number = current.tm_year, current.tm_mon
+    else:
+        year, number = map(int, month[:7].split("-"))
+    start = "%04d-%02d-01" % (year, number)
+    if number == 12:
+        year, number = year + 1, 1
+    else:
+        number += 1
+    return start, "%04d-%02d-01" % (year, number)
+
+
 def exit_usage_month(now=None):
-    month = time.strftime("%Y-%m-01", time.localtime(now or time.time()))
+    month, next_month = _month_bounds(now=now)
     out = {key: {"rx": 0, "tx": 0} for key in exit_policy.EXITS}
     c = _conn()
     rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
-                     "WHERE day>=? GROUP BY exit", (month,)).fetchall()
+                     "WHERE day>=? AND day<? GROUP BY exit", (month, next_month)).fetchall()
     c.close()
     for row in rows:
         if row["exit"] in out:
@@ -541,12 +573,13 @@ def exit_usage_month(now=None):
 
 
 def seed_exit_usage(registry, month=None):
-    month = month or time.strftime("%Y-%m-01")
+    month, next_month = _month_bounds(month=month)
     c = _conn()
     if c.execute("SELECT 1 FROM schema_meta WHERE key='exit_usage_v1_seeded'").fetchone():
         c.close(); return False
     assignments = {x.get("pubkey"): client_exit(x) for x in registry}
-    rows = c.execute("SELECT pubkey,day,rx,tx FROM usage WHERE day>=?", (month,)).fetchall()
+    rows = c.execute("SELECT pubkey,day,rx,tx FROM usage WHERE day>=? AND day<?",
+                     (month, next_month)).fetchall()
     for row in rows:
         key = assignments.get(row["pubkey"], "nl")
         c.execute("INSERT INTO exit_usage(exit,day,rx,tx) VALUES(?,?,?,?) "
@@ -554,6 +587,13 @@ def seed_exit_usage(registry, month=None):
                   (key, row["day"], row["rx"], row["tx"], row["rx"], row["tx"]))
     c.execute("INSERT INTO schema_meta(key,value) VALUES('exit_usage_v1_seeded','1')")
     c.commit(); c.close(); return True
+
+
+def seed_exit_usage_from_registry(month=None):
+    registry = load_registry()
+    if registry is None:
+        raise RuntimeError("client registry unavailable; exit usage migration not seeded")
+    return seed_exit_usage(registry, month)
 
 
 def usage_month():
@@ -848,7 +888,7 @@ def main():
     if not (auth.PASS_PBKDF2 or auth.PASS_SHA):
         raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
-    seed_exit_usage(load_registry() or [])
+    seed_exit_usage_from_registry()
     threading.Thread(target=_sampler, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
