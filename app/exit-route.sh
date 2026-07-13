@@ -41,10 +41,16 @@ PY
 }
 
 ensure_table() {
+    local rc
     ip route replace default dev "$US_IFACE" table "$TABLE" 2>/dev/null \
         || ip route add default dev "$US_IFACE" table "$TABLE"
-    ip rule show | grep -q "fwmark $MARK " \
-        || ip rule add fwmark "$MARK" lookup "$TABLE" priority "$PRI"
+    if policy_rule_present; then
+        return 0
+    else
+        rc=$?
+        [ "$rc" -eq 1 ] || return "$rc"
+    fi
+    ip rule add fwmark "$MARK" lookup "$TABLE" priority "$PRI"
 }
 
 ensure_forward() {
@@ -61,7 +67,16 @@ flush_marks() {
     # Remove only our tagged per-IP MARK rules (highest line number first).
     local nums n
     nums=$(iptables -t mangle -L PREROUTING -n -v --line-numbers 2>/dev/null \
-        | awk -v c="$COMMENT" 'index($0, c) {print $1}' | sort -rn)
+        | awk -v c="$COMMENT" '
+            {
+                for (i = 2; i < NF; i++) {
+                    if ($(i - 1) == "/*" && $i == c && $(i + 1) == "*/") {
+                        print $1
+                        next
+                    }
+                }
+            }
+        ' | sort -rn)
     for n in $nums; do
         iptables -t mangle -D PREROUTING "$n" 2>/dev/null || true
     done
@@ -94,19 +109,79 @@ iface_up() {
     ip link show "$US_IFACE" >/dev/null 2>&1
 }
 
+count_owned_marks() {
+    awk -v c="$COMMENT" '
+        {
+            for (i = 1; i < NF; i++) {
+                value = $(i + 1)
+                sub(/^"/, "", value)
+                sub(/"$/, "", value)
+                if ($i == "--comment" && value == c) {
+                    count++
+                    next
+                }
+            }
+        }
+        END { print count + 0 }
+    '
+}
+
+policy_rule_present() {
+    local rules
+    rules=$(ip rule show) || return 2
+    awk -v mark="$MARK" -v table="$TABLE" -v priority="$PRI" '
+        {
+            line_priority = $1
+            sub(/:$/, "", line_priority)
+            priority_ok = (line_priority == priority)
+            mark_ok = 0
+            table_ok = 0
+            for (i = 1; i < NF; i++) {
+                if ($i == "pref" && $(i + 1) == priority)
+                    priority_ok = 1
+                if ($i == "fwmark" && ($(i + 1) == mark || $(i + 1) == mark "/0xffffffff"))
+                    mark_ok = 1
+                if (($i == "lookup" || $i == "table") && $(i + 1) == table)
+                    table_ok = 1
+            }
+            if (priority_ok && mark_ok && table_ok)
+                found = 1
+        }
+        END { exit !found }
+    ' <<< "$rules"
+}
+
+us_default_route_present() {
+    local routes
+    routes=$(ip route show table "$TABLE") || return 2
+    awk -v iface="$US_IFACE" '
+        $1 == "default" {
+            for (i = 2; i < NF; i++) {
+                if ($i == "dev" && $(i + 1) == iface)
+                    found = 1
+            }
+        }
+        END { exit !found }
+    ' <<< "$routes"
+}
+
 verify_sync() {
-    local expected="$1" actual ip
-    actual=$(iptables -t mangle -S PREROUTING 2>/dev/null | grep -c -- "--comment $COMMENT" || true)
+    local expected="$1" mark_rules actual ip
+    if ! mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null); then
+        echo "exit-route: unable to inspect mark rules" >&2
+        return 1
+    fi
+    actual=$(count_owned_marks <<< "$mark_rules")
     [ "$actual" -eq "$expected" ] || {
         echo "exit-route: expected $expected mark rule(s), found $actual" >&2
         return 1
     }
     [ "$expected" -eq 0 ] && return 0
-    ip rule show | grep -q "fwmark $MARK" || {
+    policy_rule_present || {
         echo "exit-route: policy rule missing" >&2
         return 1
     }
-    ip route show table "$TABLE" | grep -q "default.*dev $US_IFACE" || {
+    us_default_route_present || {
         echo "exit-route: US default route missing" >&2
         return 1
     }
@@ -159,7 +234,8 @@ case "${1:-}" in
         ;;
     status)
         count=$(us_ips | grep -c . || true)
-        rules=$(iptables -t mangle -S PREROUTING 2>/dev/null | grep -c -- "--comment $COMMENT" || true)
+        mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+        rules=$(count_owned_marks <<< "$mark_rules")
         printf '{"iface":"%s","up":%s,"clients_us":%s,"mark_rules":%s}\n' \
             "$US_IFACE" \
             "$(iface_up && echo true || echo false)" \
