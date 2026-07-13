@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP))
@@ -74,8 +75,11 @@ class TestBulkAdmin(unittest.TestCase):
         self.assertEqual(calls, ["sync", "sync"])
 
     def test_policy_file_is_validated_and_atomic(self):
-        self.patch("set_policy_owner", lambda path: None)
-        result = wgadmin.setexitpolicy_data("1", "250", "750")
+        with mock.patch.object(wgadmin.grp, "getgrnam", side_effect=KeyError), \
+                mock.patch.object(wgadmin.os, "geteuid", return_value=501), \
+                mock.patch.object(wgadmin.os, "getegid", return_value=20), \
+                mock.patch.object(wgadmin.os, "fchown"):
+            result = wgadmin.setexitpolicy_data("1", "250", "750")
         policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
         saved = json.loads(policy_path.read_text())
         self.assertTrue(saved["auto_switch"])
@@ -115,6 +119,25 @@ class TestBulkAdmin(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "route apply exploded"):
             wgadmin.setexitall_data("us", "manual")
         self.assertEqual(pathlib.Path(wgadmin.CLIENTS_JSON).read_bytes(), original_text.encode())
+
+    def test_rollback_preserves_crlf_registry_bytes(self):
+        original = (
+            b'[\r\n'
+            b' {"name": "a", "ip": "10.10.0.2", "enabled": true}\r\n'
+            b']\r\n'
+        )
+        pathlib.Path(wgadmin.CLIENTS_JSON).write_bytes(original)
+        sync_calls = []
+
+        def sync():
+            sync_calls.append("sync")
+            if len(sync_calls) == 1:
+                raise RuntimeError("route apply exploded")
+
+        self.patch("run_exit_sync_or_raise", sync)
+        with self.assertRaisesRegex(RuntimeError, "rolled back"):
+            wgadmin.setexitall_data("us", "manual")
+        self.assertEqual(pathlib.Path(wgadmin.CLIENTS_JSON).read_bytes(), original)
 
     def test_rollback_failure_reports_apply_and_rollback_causes(self):
         self.write_clients([{"name": "a", "ip": "10.10.0.2", "enabled": True}])
@@ -169,23 +192,74 @@ class TestBulkAdmin(unittest.TestCase):
     def test_policy_validation_does_not_replace_existing_file(self):
         policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
         policy_path.write_text("keep-me\n")
-        self.patch("set_policy_owner", lambda path: None)
         for values in (("2", "250", "750"), ("1", "0", "750"), ("1", "250", "1000001"), ("1", "2.5", "750")):
             with self.subTest(values=values):
                 with self.assertRaises(ValueError):
                     wgadmin.setexitpolicy_data(*values)
                 self.assertEqual(policy_path.read_text(), "keep-me\n")
 
-    def test_policy_owner_is_root_wgui(self):
-        calls = []
-        old_getgrnam = wgadmin.grp.getgrnam
-        old_chown = wgadmin.os.chown
-        wgadmin.grp.getgrnam = lambda name: types.SimpleNamespace(gr_gid=4321)
-        wgadmin.os.chown = lambda path, uid, gid: calls.append((path, uid, gid))
-        self.addCleanup(setattr, wgadmin.grp, "getgrnam", old_getgrnam)
-        self.addCleanup(setattr, wgadmin.os, "chown", old_chown)
-        wgadmin.set_policy_owner("/tmp/policy")
-        self.assertEqual(calls, [("/tmp/policy", 0, 4321)])
+    def test_missing_policy_group_preserves_existing_file(self):
+        policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
+        original = b'{"old": true}\n'
+        policy_path.write_bytes(original)
+        with mock.patch.object(wgadmin.grp, "getgrnam", side_effect=KeyError), \
+                mock.patch.object(wgadmin.os, "geteuid", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "wgui group not found"):
+                wgadmin.setexitpolicy_data("1", "250", "750")
+        self.assertEqual(policy_path.read_bytes(), original)
+        self.assertEqual({path.name for path in policy_path.parent.iterdir()}, {policy_path.name})
+
+    def test_policy_fchown_failure_preserves_existing_file_and_cleans_temp(self):
+        policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
+        original = b'{"old": true}\n'
+        policy_path.write_bytes(original)
+        fail = PermissionError("fchown denied")
+        with mock.patch.object(wgadmin.grp, "getgrnam", return_value=types.SimpleNamespace(gr_gid=4321)), \
+                mock.patch.object(wgadmin.os, "geteuid", return_value=0), \
+                mock.patch.object(wgadmin.os, "chown", side_effect=fail), \
+                mock.patch.object(wgadmin.os, "fchown", side_effect=fail):
+            with self.assertRaisesRegex(PermissionError, "fchown denied"):
+                wgadmin.setexitpolicy_data("1", "250", "750")
+        self.assertEqual(policy_path.read_bytes(), original)
+        self.assertEqual({path.name for path in policy_path.parent.iterdir()}, {policy_path.name})
+
+    def test_policy_metadata_is_set_on_temp_before_replace(self):
+        events = []
+        real_mkstemp = wgadmin.tempfile.mkstemp
+        real_replace = wgadmin.os.replace
+
+        def getgrnam(name):
+            events.append("group")
+            return types.SimpleNamespace(gr_gid=4321)
+
+        def mkstemp(*args, **kwargs):
+            events.append("mkstemp")
+            return real_mkstemp(*args, **kwargs)
+
+        def replace(source, destination):
+            events.append("replace")
+            return real_replace(source, destination)
+
+        with mock.patch.object(wgadmin.grp, "getgrnam", side_effect=getgrnam), \
+                mock.patch.object(wgadmin.os, "geteuid", return_value=0), \
+                mock.patch.object(wgadmin.tempfile, "mkstemp", side_effect=mkstemp), \
+                mock.patch.object(wgadmin.os, "fsync", side_effect=lambda fd: events.append("fsync")), \
+                mock.patch.object(wgadmin.os, "fchmod", side_effect=lambda fd, mode: events.append("fchmod")), \
+                mock.patch.object(wgadmin.os, "fchown", side_effect=lambda fd, uid, gid: events.append("fchown")), \
+                mock.patch.object(wgadmin.os, "replace", side_effect=replace), \
+                mock.patch.object(wgadmin.os, "chown", side_effect=lambda path, uid, gid: events.append("chown")):
+            wgadmin.setexitpolicy_data("1", "250", "750")
+        self.assertEqual(events, ["group", "mkstemp", "fsync", "fchmod", "fchown", "replace"])
+
+    def test_missing_policy_group_uses_current_owner_for_non_root_tests(self):
+        owners = []
+        with mock.patch.object(wgadmin.grp, "getgrnam", side_effect=KeyError), \
+                mock.patch.object(wgadmin.os, "geteuid", return_value=501), \
+                mock.patch.object(wgadmin.os, "getegid", return_value=20), \
+                mock.patch.object(wgadmin.os, "fchown", side_effect=lambda fd, uid, gid: owners.append((uid, gid))):
+            result = wgadmin.setexitpolicy_data("0", "250", "750")
+        self.assertFalse(result["auto_switch"])
+        self.assertEqual(owners, [(501, 20)])
 
     def test_new_cli_operations_require_exact_arity(self):
         calls = []

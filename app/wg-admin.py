@@ -100,14 +100,28 @@ def ok(data=None):
 def run(cmd, inp=None, timeout=15):
     return subprocess.run(cmd, input=inp, capture_output=True, text=True, timeout=timeout)
 
-def write_atomic(path, data, mode):
+def write_atomic(path, data, mode, owner=None):
     d = os.path.dirname(path)
     fd, tmp = tempfile.mkstemp(dir=d)
     try:
-        os.write(fd, data.encode()); os.close(fd)
-        os.chmod(tmp, mode)
+        payload = data if isinstance(data, bytes) else data.encode()
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("atomic write made no progress")
+            remaining = remaining[written:]
+        os.fsync(fd)
+        os.fchmod(fd, mode)
+        if owner is not None:
+            os.fchown(fd, owner[0], owner[1])
+        os.close(fd)
+        fd = None
         os.replace(tmp, path)
     except Exception:
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: pass
         try: os.unlink(tmp)
         except OSError: pass
         raise
@@ -270,21 +284,24 @@ def sync_exit_routes(flush_ip=None):
     if flush_ip:
         flush_exit_conntrack(flush_ip)
 
-def set_policy_owner(path):
+def policy_owner_ids():
+    euid = os.geteuid()
     try:
         gid = grp.getgrnam("wgui").gr_gid
     except KeyError:
-        if os.geteuid() == 0:
+        if euid == 0:
             raise RuntimeError("wgui group not found")
-        return
-    os.chown(path, 0, gid)
+        return euid, os.getegid()
+    if euid != 0:
+        return euid, os.getegid()
+    return 0, gid
 
 def setexitpolicy_data(enabled, nl_gib, us_gib):
     if enabled not in ("0", "1"):
         raise ValueError("auto switch must be 0 or 1")
     policy = exit_policy.policy_from_gib(enabled == "1", nl_gib, us_gib)
-    write_atomic(EXIT_POLICY, json.dumps(policy, indent=1) + "\n", 0o640)
-    set_policy_owner(EXIT_POLICY)
+    owner = policy_owner_ids()
+    write_atomic(EXIT_POLICY, json.dumps(policy, indent=1) + "\n", 0o640, owner=owner)
     return {
         "auto_switch": policy["auto_switch"],
         "quotas_gib": {
@@ -297,9 +314,9 @@ def setexitall_data(target, reason):
     target = _normalize_exit(target)
     if reason not in ("manual", "quota"):
         raise ValueError("invalid switch reason")
-    with open(CLIENTS_JSON) as f:
-        original_text = f.read()
-    clients = json.loads(original_text)
+    with open(CLIENTS_JSON, "rb") as f:
+        original_bytes = f.read()
+    clients = json.loads(original_bytes)
     changed = []
     source_counts = {key: 0 for key in exit_policy.EXITS}
     for client in clients:
@@ -319,7 +336,7 @@ def setexitall_data(target, reason):
         run_exit_sync_or_raise()
     except Exception as apply_error:
         try:
-            write_atomic(CLIENTS_JSON, original_text, 0o644)
+            write_atomic(CLIENTS_JSON, original_bytes, 0o644)
             run_exit_sync_or_raise()
         except Exception as rollback_error:
             raise RuntimeError(
