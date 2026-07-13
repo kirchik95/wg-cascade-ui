@@ -1,13 +1,29 @@
 function cardStructSig(p){
- return [p.pubkey,p.name,p.enabled?1:0,p.online?1:0,p.expires||0,clientExit(p),p.endpoint||'',p.ip||'',!!(p.spark&&p.spark.length>1),_clientsView].join('|');
+ /* Omit online/spark/endpoint — those update in place so card height stays stable (no CLS). */
+ return [p.pubkey,p.name,p.enabled?1:0,p.expires||0,clientExit(p),p.ip||'',_clientsView].join('|');
 }
-function clientActsHTML(p,exit){
- const en=p.enabled?'Disable':'Enable';
+function clientActsHTML(p,exit,mode){
+ const labeled=mode==='labeled';
+ const en=tr(p.enabled?'Disable':'Enable');
  const pk=esc(p.pubkey), nm=esc(p.name);
- return '<button class="ib" data-tip="Show config / QR" aria-label="Show config / QR" type="button" data-act="cfg" data-pk="'+pk+'">'+ic('qr')+'</button>'
-  +'<button class="ib" data-tip="Edit" aria-label="Edit" type="button" data-act="edit" data-pk="'+pk+'" data-name="'+nm+'" data-exp="'+(p.expires||0)+'" data-exit="'+esc(exit)+'">'+ic('edit')+'</button>'
-  +'<button class="ib '+(p.enabled?'':'good')+'" data-tip="'+en+'" aria-label="'+en+'" type="button" data-act="toggle" data-pk="'+pk+'" data-en="'+(p.enabled?'1':'0')+'">'+ic('pow')+'</button>'
-  +'<button class="ib danger" data-tip="Delete" aria-label="Delete" type="button" data-act="del" data-pk="'+pk+'" data-name="'+nm+'">'+ic('trash')+'</button>';
+ function mk(act,tip,label,icon,opts){
+  opts=opts||{};
+  const danger=opts.danger?' danger':'';
+  const good=opts.good&&!p.enabled?' good':'';
+  let data=' type="button" data-act="'+act+'"';
+  if(act==='cfg')data+=' data-pk="'+pk+'"';
+  else if(act==='edit')data+=' data-pk="'+pk+'" data-name="'+nm+'" data-exp="'+(p.expires||0)+'" data-exit="'+esc(exit)+'"';
+  else if(act==='toggle')data+=' data-pk="'+pk+'" data-en="'+(p.enabled?'1':'0')+'"';
+  else if(act==='del')data+=' data-pk="'+pk+'" data-name="'+nm+'"';
+  const tipTr=tr(tip), labelTr=tr(label);
+  const tipAttr=' data-tip="'+esc(tipTr)+'" aria-label="'+esc(labeled?labelTr:tipTr)+'"';
+  if(labeled)return '<button class="act'+danger+'"'+data+tipAttr+'>'+ic(icon)+'<span>'+labelTr+'</span></button>';
+  return '<button class="ib'+danger+good+'"'+data+tipAttr+'>'+ic(icon)+'</button>';
+ }
+ return mk('cfg','Show config / QR','Config','qr')
+  +mk('edit','Edit','Rename','edit')
+  +mk('toggle',en,en,'pow',{good:1})
+  +mk('del','Delete','Delete','trash',{danger:1});
 }
 function clientCardHTML(p){
  const exit=clientExit(p);
@@ -15,17 +31,17 @@ function clientCardHTML(p){
  const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
  _pv['age-'+p.pubkey]=p.age;
  const prx=_pv['rx-'+p.pubkey],ptx=_pv['tx-'+p.pubkey];
- const acts=clientActsHTML(p,exit);
- const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="Click to switch exit" aria-label="Switch exit: '+exit.toUpperCase()+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
-  +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="Temporary client (auto-disables)">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
-  +(p.enabled?'':'<span class="chip">disabled</span>');
+ const acts=clientActsHTML(p,exit,_clientsView==='list'?'icon':'labeled');
+ const chips='<button type="button" class="chip chip-exit chip-'+exit+'" data-tip="'+esc(tr('Click to switch exit'))+'" aria-label="'+esc(tr('Switch exit')+': '+exit.toUpperCase())+'" data-act="exit" data-pk="'+esc(p.pubkey)+'" data-exit="'+esc(exit)+'">'+exit.toUpperCase()+'</button>'
+  +(p.expires?'<span class="chip '+((p.expires-(Date.now()/1000|0))<=0?'chip-exp':'chip-tmp')+'" data-tip="'+esc(tr('Temporary client (auto-disables)'))+'">'+ic('clock',10)+fmtLeft(p.expires-(Date.now()/1000|0))+'</span>':'')
+  +(p.enabled?'':'<span class="chip">'+tr('disabled')+'</span>');
  const xfer='<div class="xfer mono" data-tip="Total since connect"><span class="dn">↓ <b class="vx" data-k="rx-'+esc(p.pubkey)+'" data-to="'+p.rx+'">'+fmtB(prx==null?p.rx:prx)+'</b></span><span class="up">↑ <b class="vx" data-k="tx-'+esc(p.pubkey)+'" data-to="'+p.tx+'">'+fmtB(ptx==null?p.tx:ptx)+'</b></span></div>';
  const cls='crow '+(_clientsView==='list'?'crow-list ':'')+(p.online?'on':'')+' '+(p.enabled?'':'off-cl')+(fresh?' flash':'');
  const head='<div class="'+cls+'" data-pk="'+esc(p.pubkey)+'" data-ssig="'+esc(cardStructSig(p))+'">';
  if(_clientsView==='list'){
   return head
-   +'<div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+ic(devIcon(p.name),18)+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
-   +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
+   +'<div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
+   +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
    +'<div class="lmeta"><span class="hs'+(p.online?'':' o')+'" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</span>'
    +'<span class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</span>'
    +'<span class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</span>'
@@ -34,20 +50,21 @@ function clientCardHTML(p){
  }
  const sv=csparkSVG(p.spark);
  return head
-  +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+ic(devIcon(p.name),20)+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
-  +'<div class="idc"><div class="nm">'+esc(p.name)+chips+'</div>'
+  +'<div class="ctop"><div class="av" data-tip="'+(p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'))+'">'+esc(initials(p.name))+'<span class="avdot '+(p.online?'on':'')+'"></span></div>'
+  +'<div class="idc"><div class="nm"><span class="nmt">'+esc(p.name)+'</span>'+chips+'</div>'
   +'<div class="ipa mono" data-tip="Tunnel address">'+esc(p.ip)+'</div>'
-  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div></div>'
-  +'<div class="stat '+(p.online?'':'o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
-  +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div>'+xfer
-  +((p.mrx||p.mtx)?'<div class="mo mono" data-tip="Traffic this calendar month">'+ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx)+'</div>':'')+'</div>'
-  +'<div class="acts">'+acts+'</div>'
-  +(sv?'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+sv+'</div>':'')+'</div>';
+  +(p.endpoint?'<div class="ep mono" data-tip="Client public endpoint">'+ic('net',11)+esc(p.endpoint)+'</div>':'')+'</div>'
+  +'<div class="pillstat'+(p.online?'':' o')+'"><div class="hs" data-tip="Last WireGuard handshake">'+(p.online?'online':'offline')+'</div>'
+  +'<div class="age" data-tip="Last handshake">'+ic('clock',11)+fmtAge(p.age)+'</div></div></div>'
+  +'<div class="stat">'+xfer
+  +'<div class="mo mono" data-tip="Traffic this calendar month">'+(p.mrx||p.mtx?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'')+'</div></div>'
+  +'<div class="cspark" data-tip="'+esc(csparkTip(p.spark))+'">'+(sv||'')+'</div>'
+  +'<div class="acts">'+acts+'</div></div>';
 }
 function emptyStateHTML(kind){
  if(kind==='none'){
   return '<div class="empty">'+ic('plus',28)+'<b>'+tr('No clients yet')+'</b><p>'+tr('Create a client to generate a WireGuard config and QR code.')+'</p>'
-   +'<button class="primary" type="button" data-act="add">'+tr('+ Add client')+'</button></div>';
+   +'<button class="primary" type="button" data-act="add">'+tr('+ Client')+'</button></div>';
  }
  return '<div class="empty">'+ic('search',28)+'<b>'+tr('No matches')+'</b><p>'+tr('Try a different name or IP.')+'</p></div>';
 }
@@ -56,33 +73,48 @@ function updateCardLive(el,p){
  const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
  _pv['age-'+p.pubkey]=p.age;
  if(fresh){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
+ el.classList.toggle('on',!!p.online);
+ const av=el.querySelector('.av');
+ if(av){
+  av.setAttribute('data-tip',p.online?'Online — recent handshake':(p.enabled?'Offline':'Disabled'));
+  const avdot=av.querySelector('.avdot');if(avdot)avdot.classList.toggle('on',!!p.online);
+ }
  const age=el.querySelector('.age');if(age)age.innerHTML=ic('clock',11)+fmtAge(p.age);
  const hs=el.querySelector('.hs');
  if(hs){
   hs.textContent=p.online?'online':'offline';
   hs.classList.toggle('o',!p.online);
  }
- const stat=el.querySelector('.stat');
- if(stat)stat.classList.toggle('o',!p.online);
+ const pillstat=el.querySelector('.pillstat');
+ if(pillstat)pillstat.classList.toggle('o',!p.online);
  el.querySelectorAll('.vx').forEach(b=>{
   const k=b.dataset.k;const to=k.indexOf('rx-')===0?p.rx:p.tx;b.dataset.to=to;tw(b,k,+to,fmtB);
  });
  if(el.classList.contains('crow-list'))return;
- const mo=el.querySelector('.mo');
- if(p.mrx||p.mtx){
-  const html=ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx);
-  if(mo)mo.innerHTML=html;else{
-   if(stat){const d=document.createElement('div');d.className='mo mono';d.setAttribute('data-tip','Traffic this calendar month');d.innerHTML=html;stat.appendChild(d);applyI18n(d);}
+ const ep=el.querySelector('.ep');
+ if(p.endpoint){
+  const html=ic('net',11)+esc(p.endpoint);
+  if(ep){ep.innerHTML=html;ep.hidden=false;}
+  else{
+   const idc=el.querySelector('.idc');
+   if(idc)idc.insertAdjacentHTML('beforeend','<div class="ep mono" data-tip="Client public endpoint">'+html+'</div>');
   }
+ }else if(ep){ep.innerHTML='';ep.hidden=true;}
+ const mo=el.querySelector('.mo');
+ if(mo)mo.innerHTML=(p.mrx||p.mtx)?ic('cal',11)+'↓'+fmtB(p.mrx)+' ↑'+fmtB(p.mtx):'';
+ let sparkEl=el.querySelector('.cspark');
+ if(!sparkEl){
+  const actsEl=el.querySelector('.acts');
+  const html='<div class="cspark"></div>';
+  if(actsEl)actsEl.insertAdjacentHTML('beforebegin',html);
+  else el.insertAdjacentHTML('beforeend',html);
+  sparkEl=el.querySelector('.cspark');
  }
- const sparkEl=el.querySelector('.cspark');
- const sv=csparkSVG(p.spark);
- if(sv){
-  const tip=csparkTip(p.spark);
-  if(sparkEl){sparkEl.innerHTML=sv;sparkEl.setAttribute('data-tip',tip);}
-  else el.insertAdjacentHTML('beforeend','<div class="cspark" data-tip="'+esc(tip)+'">'+sv+'</div>');
+ if(sparkEl){
+  const sv=csparkSVG(p.spark);
+  sparkEl.innerHTML=sv||'';
+  sparkEl.setAttribute('data-tip',csparkTip(p.spark));
  }
- else if(sparkEl)sparkEl.remove();
 }
 function renderClients(peers){
  _peers=peers||[];

@@ -344,6 +344,8 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
 
     def test_header_has_accessible_exit_policy_controls(self):
         html = (ROOT / "app" / "index.html").read_text()
+        self.assertIn('<header class="topnav">', html)
+        self.assertIn('<section class="status-strip">', html)
         self.assertIn('id="monthuse"', html)
         self.assertIn('button class="pill monthpill" id="monthuse-nl"', html)
         self.assertIn('button class="pill monthpill" id="monthuse-us"', html)
@@ -463,9 +465,9 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
             r"""
             const base=activePolicy();base.last_switch={ts:100,reason:'quota',target:'us'};
             policyHelpers.renderExitPolicy(base);
-            if(element('toast').textContent)throw new Error('initial last_switch must be silent');
+            if(element('toast').textContent||visibleText(element('toast').innerHTML))throw new Error('initial last_switch must be silent');
             policyHelpers.renderExitPolicy({...base,last_switch:{ts:101,reason:'quota',target:'nl'}});
-            if(!element('toast').textContent.includes('NL'))throw new Error('new quota switch should toast');
+            if(!(element('toast').textContent+visibleText(element('toast').innerHTML)).includes('NL'))throw new Error('new quota switch should toast');
             policyHelpers.renderExitPolicy(undefined);policyHelpers.renderExitPolicy({});policyHelpers.renderExitPolicy({exits:{nl:null}});
             const malicious={...base,blocked:{code:'<img src=x onerror=alert(1)>'},last_switch:null};
             policyHelpers.renderExitPolicy(malicious);
