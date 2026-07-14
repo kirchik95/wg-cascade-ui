@@ -538,8 +538,9 @@ max-width:min(90vw,420px);align-items:center;gap:8px;line-height:1.35}
 .topnav-r{gap:8px}
 .brand-name{font-size:14px}
 .page-title{font-size:18px}
-.status-strip{margin-bottom:14px;flex-direction:column;align-items:stretch}
-.status-pills{justify-content:flex-start;width:100%;gap:8px}
+.status-strip{margin-bottom:14px;flex-direction:column;align-items:stretch;gap:10px}
+.status-copy{flex:none}
+.status-pills{justify-content:flex-start;width:100%;gap:8px;flex:none}
 .status-pills .healthchip{flex:1 1 100%;justify-content:flex-start;font-size:14px;padding:10px 14px;order:-1}
 .status-pills #thr,.status-pills .monthpills{opacity:.92;font-size:12px}
 .bento>.hosttile{order:3}
@@ -550,12 +551,13 @@ max-width:min(90vw,420px);align-items:center;gap:8px;line-height:1.35}
 .sech-more{display:block}
 .csearch{max-width:none;min-width:0;width:auto;flex:1 1 120px;min-height:var(--ctrl-min);height:var(--ctrl-min)}
 .topnav .primary .add-lbl{display:none}
-.cascade{padding:12px}
-.casc-topo{flex-direction:column;gap:8px}
-.casc-node.live,.casc-node:not(.live){flex:1 1 auto;width:auto}
-.casc-conn{width:100%;flex:0 0 auto;height:12px;justify-content:center}
+.cascade{padding:10px 12px;gap:10px}
+.casc-topo{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:6px}
+.casc-node.live,.casc-node:not(.live){flex:0 0 auto;width:100%;align-self:stretch}
+.casc-conn{display:flex;width:100%;flex:0 0 auto;height:10px;justify-content:center;align-items:center}
 .casc-conn i{width:2px;height:100%}
-.casc-exit{flex-wrap:wrap}
+.casc-exits{flex:0 0 auto;width:100%;gap:6px}
+.casc-exit{flex-wrap:wrap;align-items:flex-start}
 .casc-exit-r{text-align:left;margin-left:30px;width:100%}
 .viewfilt{margin-left:auto}
 .crow{grid-template-columns:auto 1fr;grid-template-areas:"d i" "s s" "a a";row-gap:9px;align-items:start;padding:12px}
