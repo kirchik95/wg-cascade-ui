@@ -2,11 +2,11 @@
 
 Bring the panel up on a fresh Debian/Ubuntu **entry node** (the box that runs the
 cascade's `wg-cl` interface — VDSina in the reference deploy). Everything below is
-run as `root`. Reference values in comments match the live deploy; substitute your
-own IP.
+run as `root`. Addresses below are documentation placeholders (RFC 5737) —
+substitute your own.
 
 ```sh
-IP=203.0.113.10        # this node's public IP (used for the TLS cert)
+IP=203.0.113.10         # this node's public IP (used for the TLS cert)
 ```
 
 ---

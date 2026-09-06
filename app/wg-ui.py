@@ -40,7 +40,7 @@ CLIENTS     = os.environ.get("WGUI_CLIENTS", "/etc/wg-ui/clients.json")
 IFACE       = os.environ.get("WGUI_IFACE", "wg-cl")
 DO_IFACE    = os.environ.get("WGUI_DO_IFACE", "wg-do")
 US_IFACE    = os.environ.get("WGUI_US_IFACE", "wg-us")
-EXIT_IP     = os.environ.get("WGUI_EXIT_IP", "198.51.100.10")      # expected NL egress
+EXIT_IP     = os.environ.get("WGUI_EXIT_IP", "")                    # expected NL egress (empty = skip probe match)
 US_EXIT_IP  = os.environ.get("WGUI_US_EXIT_IP", "")                 # expected US egress (empty = skip probe match)
 SRC_IP      = os.environ.get("WGUI_SRC_IP", "10.10.0.1")            # source for NL egress probe
 ONLINE_S    = int(os.environ.get("WGUI_ONLINE_SECS", "180"))

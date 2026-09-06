@@ -3,10 +3,11 @@
 #
 # Ships only app/ -> /opt/wg-ui/. Secrets (cert/key/env) and data (clients.json,
 # split lists, history.db) live in /etc/wg-ui and /var/lib/wg-ui on the server
-# and are NEVER touched by this script. Override host/key via env if needed.
+# and are NEVER touched by this script. Set WGUI_HOST (and WGUI_SSH_KEY if the
+# key is not the default) before running.
 set -euo pipefail
 
-HOST="${WGUI_HOST:-root@203.0.113.10}"
+HOST="${WGUI_HOST:?set WGUI_HOST=user@entry-node-ip}"
 KEY="${WGUI_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SSH=(ssh -o IdentitiesOnly=yes -i "$KEY" -o ConnectTimeout=15)

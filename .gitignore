@@ -29,3 +29,12 @@ __pycache__/
 
 # ── git worktrees ────────────────────────────────────────────────────────
 .worktrees/
+
+# ── agent / editor scratch (never part of the project) ───────────────────
+.claude/
+.cursor/
+.impeccable/
+.conductor/
+.code-review-graph/
+.tmp/
+.tmp-*.png

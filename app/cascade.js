@@ -73,7 +73,7 @@ function renderCascade(t,rud){
  const health=cascHealth(t,nl,us);
  const hs=entryHandshake(t,nl,us);
  const nlQ=exitQuota('nl'),usQ=exitQuota('us');
- const entryTip=tr('Entry node · Russia · 203.0.113.10');
+ const entryTip=tr('Entry node · Russia · VDSina');
  const key=[t.state,nlCls,usCls,entCls,nlIP,usIP,hs,nlQ,usQ,rud?1:0,health.label,LANG].join('|');
  if(key===_cascKey)return;
  _cascKey=key;

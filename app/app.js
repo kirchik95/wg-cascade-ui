@@ -260,7 +260,7 @@ const RU={
  "Load average 1·5·15 min":"Средняя загрузка 1·5·15 мин","Entry-node uptime":"Аптайм входной ноды",
  "Aggregate live throughput across all clients":"Суммарный трафик всех клиентов",
  "Your devices connect to the entry node":"Твои устройства подключаются к входной ноде",
- "Entry node · Russia · 203.0.113.10":"Входная нода · Россия · 203.0.113.10",
+ "Entry node · Russia · VDSina":"Входная нода · Россия · VDSina",
  "Traffic exits the internet with the DO IP":"Трафик выходит в интернет с IP DO",
  "Last WireGuard handshake on the VDSina→DO link":"Последний handshake на линке VDSina→DO",
  "Last live exit-IP verification":"Последняя проверка exit-IP",

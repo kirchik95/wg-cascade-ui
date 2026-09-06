@@ -352,7 +352,7 @@ class TestExitHelpers(unittest.TestCase):
             self.assertNotIn("wg_up", t)
             self.assertTrue(t["exits"]["nl"]["ok"])
             self.assertFalse(t["exits"]["us"]["ok"])
-            self.assertEqual(t["exits"]["nl"]["exit_ip"], wgui.EXIT_IP)
+            self.assertEqual(t["exits"]["nl"]["exit_ip"], wgui.EXIT_IP or None)
             with wgui._lock:
                 wgui._egress["nl"].update(ok=False, seen=None)
                 wgui._exit_peers["nl"] = {"age": -1, "up": False}
