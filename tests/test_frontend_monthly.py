@@ -380,7 +380,7 @@ class TestFrontendShell(unittest.TestCase):
         self.assertIn('class="skip" href="#main"', html)
         self.assertNotRegex(html, r"\son[a-z]+=")           # CSP: no inline handlers
         self.assertNotIn("<script>", html)                 # CSP: no inline scripts
-        scripts = re.findall(r'<script src="([^"]+)"', html)
+        scripts = [u.replace("?v=__V__", "") for u in re.findall(r'<script src="([^"]+)"', html)]
         self.assertEqual(scripts[0], "/boot.js")
         self.assertEqual(scripts[1:], ["/icons.js", "/core.js", "/dashboard.js", "/modals.js", "/pages.js"])
 
@@ -401,7 +401,8 @@ class TestFrontendShell(unittest.TestCase):
         self.assertIn("wgui-shell-v29", sw)
         self.assertIn("cacheablePath", sw)
         for asset in ("/core.js", "/dashboard.js", "/icons.js", "/app.css"):
-            self.assertIn("'%s'" % asset, sw)
+            self.assertIn("'%s?v='+V" % asset, sw)       # versioned URL, see asset_version() in wg-ui.py
+        self.assertIn("SHELL.indexOf(p+u.search)", sw)
         for gone in ("/app.js", "/clients.js", "/cascade.js", "/inter.woff2"):
             self.assertNotIn("'%s'" % gone, sw)
 
@@ -495,10 +496,71 @@ class TestFrontendDashboard(unittest.TestCase):
           const down=snapshot();down.exit_policy.last_switch=s.exit_policy.last_switch;
           down.tunnel.exits.us={ok:false,health:'down',health_since:down.now-60,checked_age:20,fails:4,affected_clients:0};
           await feed(down);
-          if(bannerText().includes('Move 5 back')||!bannerText().includes('US still down'))throw new Error('no revert onto a down exit: '+bannerText());
+          if(bannerText().includes('Move 5 back')||!bannerText().includes('US does not answer')||!bannerText().includes('NL is available'))throw new Error('no revert onto a down exit: '+bannerText());
           const reverted=snapshot();reverted.exit_policy.last_switch=Object.assign({},s.exit_policy.last_switch,{event_id:43,revert_of:42});
           await feed(reverted);
           if(bannerText())throw new Error('a revert is not a failover: '+bannerText());
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_single_exit_failure_keeps_the_healthy_exit_available(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const failed of ['nl','us']){
+            const healthy=failed==='nl'?'us':'nl',s=snapshot();
+            s.peers.forEach(p=>{p.exit=failed});
+            s.exit_policy.exits[failed].clients=3;s.exit_policy.exits[healthy].clients=0;
+            s.tunnel.state='down';s.tunnel.affected_clients=2;
+            s.tunnel.exits[failed]={ok:false,health:'down',health_since:s.now-300,checked_age:2,fails:3,affected_clients:2};
+            await feed(s);
+            const gauges=visibleText(element('view').querySelector('.gauges').innerHTML),banner=bannerText();
+            for(const text of [gauges,banner]){
+              if(/both exits|Outage/.test(text))throw new Error('a single exit failure became a total outage: '+text);
+              if(!text.includes(failed.toUpperCase())||!text.includes(healthy.toUpperCase()+' is available'))throw new Error('healthy alternative is missing: '+text);
+            }
+          }
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_two_failed_exit_checks_are_an_outage_even_with_live_tunnels(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot();s.tunnel.state='degraded';
+          for(const key of ['nl','us'])s.tunnel.exits[key]={ok:false,health:'down',wg_up:true,health_since:s.now-300,checked_age:2,fails:3,affected_clients:key==='nl'?2:0};
+          await feed(s);
+          if(WG.dashboard.mode(WG.state)!=='crash'||!bannerText().includes('Both exits are down'))throw new Error('both failed probes must mean outage: '+bannerText());
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_pending_and_unknown_exit_checks_never_claim_success(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const health of ['warn','unknown']){
+            const s=snapshot();s.tunnel.state='up';s.exit_policy.exits.us.clients=0;
+            s.tunnel.exits.us={ok:false,health:health==='warn'?'up':'unknown',checked_age:health==='warn'?1:-1,fails:health==='warn'?1:0,affected_clients:0};
+            await feed(s);
+            const gauges=element('view').querySelector('.gauges').innerHTML,scheme=visibleText(element('view').querySelector('.scheme').innerHTML);
+            if(gauges.includes('g-state is-ok'))throw new Error('unverified checks claim Working');
+            if(/US[^·]*·[^·]*· ok/.test(scheme))throw new Error('unverified scheme branch claims ok: '+scheme);
+            if(!bannerText().includes(health==='warn'?'check 1/3':'status unknown'))throw new Error('check state absent from plaque: '+bannerText());
+          }
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_unknown_snapshot_disables_every_client_action(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const state of [{loaded:false},{stale:true},{offline:true}]){
+            const s=Object.assign(snapshot(),{loaded:true},state),p=s.peers[0];p.expires=s.now+3600;
+            WG.state=s;
+            const row=new FakeElement();row.innerHTML=WG.dashboard.rowHTML(s,WG.dashboard.mode(s),p);
+            if(row.querySelectorAll('[data-live]').some(b=>!b.disabled))throw new Error('unknown row contains an active server action');
+            if(WG.dashboard.clientMenu(p).some(it=>it.act&&!it.disabled))throw new Error('unknown client menu contains an active action');
+          }
           console.log('__OK__');
         })().catch(e=>{console.error(e);process.exitCode=1;});
         """)

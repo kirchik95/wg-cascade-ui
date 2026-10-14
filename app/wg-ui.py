@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, re, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
+import os, re, ssl, json, time, hmac, hashlib, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
 import http.client
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1737,6 +1737,30 @@ def asset(name):
         return f.read()
 
 
+# Shell CSS/JS are referenced as /x.css?v=__V__ from the HTML and sw.js. The version is a content
+# hash, so a deploy changes every URL and new HTML never meets a copy still fresh in the HTTP cache.
+SHELL_ASSETS = ("app.css", "modals.css", "pages.css", "icons.js", "core.js", "dashboard.js",
+                "modals.js", "pages.js", "boot.js", "login.js")
+_asset_v = None
+
+
+def asset_version():
+    global _asset_v
+    if _asset_v is None:
+        h = hashlib.sha256()
+        for name in SHELL_ASSETS:
+            try:
+                h.update(asset(name))
+            except OSError:
+                pass
+        _asset_v = h.hexdigest()[:12]
+    return _asset_v
+
+
+def shell_asset(name):
+    return asset(name).replace(b"__V__", asset_version().encode())
+
+
 # Self-hosted fonts (app/fonts, OFL): an explicit list, so no path ever reaches the disk.
 FONTS = frozenset("/fonts/%s-%s.woff2" % (family, subset)
                   for family in ("jetbrains-mono", "inter-tight") for subset in ("latin", "cyrillic"))
@@ -1876,7 +1900,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, b"")
         if path == "/sw.js":
             try:
-                return self._send(200, asset("sw.js"), "application/javascript", {"Cache-Control": "no-cache"})
+                return self._send(200, shell_asset("sw.js"), "application/javascript", {"Cache-Control": "no-cache"})
             except Exception:
                 return self._send(404, b"")
         if path in ("/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"):
@@ -1893,7 +1917,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(404, b"")
         if path == "/login":
-            return self._send(200, asset("login.html").replace(b"__CSRF__", b""), "text/html; charset=utf-8")
+            return self._send(200, shell_asset("login.html").replace(b"__CSRF__", b""), "text/html; charset=utf-8")
         if path == "/logout":
             dead = "wgui_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
             return self._send(303, b"", None, {"Location": "/login", "Set-Cookie": dead})
@@ -1954,7 +1978,7 @@ class H(BaseHTTPRequestHandler):
         if not user:
             return self._send(303, b"", None, {"Location": "/login"})
         if path == "/":
-            self._send(200, asset("index.html").replace(b"__CSRF__", csrf_for(user).encode()), "text/html; charset=utf-8")
+            self._send(200, shell_asset("index.html").replace(b"__CSRF__", csrf_for(user).encode()), "text/html; charset=utf-8")
         else:
             self._send(404, b"not found")
 

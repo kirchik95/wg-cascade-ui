@@ -1,10 +1,13 @@
-const C='wgui-shell-v29';
+/* V is a content hash of the shell assets, filled in by wg-ui.py: a deploy changes the URLs,
+   so new HTML never pairs with a CSS/JS copy still fresh in the browser's HTTP cache. */
+const V='__V__';
+const C='wgui-shell-v29-'+V;
 const NET_WAIT_MS=4000;
 const SHELL=[
  '/','/index.html','/login','/login.html',
- '/app.css','/modals.css','/pages.css',
- '/icons.js','/core.js','/dashboard.js','/modals.js','/pages.js',
- '/boot.js','/login.js',
+ '/app.css?v='+V,'/modals.css?v='+V,'/pages.css?v='+V,
+ '/icons.js?v='+V,'/core.js?v='+V,'/dashboard.js?v='+V,'/modals.js?v='+V,'/pages.js?v='+V,
+ '/boot.js?v='+V,'/login.js?v='+V,
  '/fonts/jetbrains-mono-latin.woff2','/fonts/jetbrains-mono-cyrillic.woff2',
  '/fonts/inter-tight-latin.woff2','/fonts/inter-tight-cyrillic.woff2',
  '/icon.svg','/apple-touch-icon.png','/manifest.webmanifest'
@@ -16,14 +19,13 @@ function cacheablePath(url){
  try{
   const u=new URL(url);
   if(u.origin!==self.location.origin)return false;
-  if(u.search)return false;
   const p=u.pathname;
   if(p.indexOf('/api/')===0||p==='/logout'||p==='/logout-all'||p==='/healthz')return false;
-  return SHELL.indexOf(p)>=0;
+  return SHELL.indexOf(p+u.search)>=0;
  }catch(e){return false}
 }
 self.addEventListener('install',e=>{
- e.waitUntil(caches.open(C).then(cache=>cache.addAll(SHELL.filter(p=>p.indexOf('.html')<0&&p!=='/'&&p!=='/login')).catch(()=>{})).then(()=>self.skipWaiting()));
+ e.waitUntil(caches.open(C).then(cache=>cache.addAll(SHELL.filter(p=>p.indexOf('.html')<0&&p!=='/'&&p!=='/login').map(p=>new Request(p,{cache:'reload'}))).catch(()=>{})).then(()=>self.skipWaiting()));
 });
 self.addEventListener('activate',e=>{e.waitUntil(
  caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==C).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
