@@ -1007,13 +1007,38 @@ def status():
         snap = refresh_status_cache()
     return _age_snapshot(json.loads(json.dumps(snap)), int(time.time()))
 
-def call_admin(argv, timeout=30):
+# Seconds the web service waits for wg-admin.py: the helper's own budget
+# (wg-admin.py OP_BUDGETS, lock wait and rollback included) plus ~10 s, so the
+# helper decides how an operation ends and reports it, instead of being killed.
+ADMIN_TIMEOUTS = {
+    "setexitall": 90,
+    "rename": 150, "setenabled": 150, "delete": 150, "setexit": 150,
+    "expire": 150, "regenerate": 150,
+    "add": 195,
+    "splitsave": 180, "splitserver": 180,
+    "export": 60,
+}
+ADMIN_TIMEOUT_DEFAULT = 70
+
+def call_admin(argv, timeout=None):
+    if timeout is None:
+        timeout = ADMIN_TIMEOUTS.get(argv[0] if argv else "", ADMIN_TIMEOUT_DEFAULT)
     try:
         r = subprocess.run(ADMIN + argv, capture_output=True, text=True, timeout=timeout)
-        line = (r.stdout.strip().splitlines() or [""])[-1]
-        return json.loads(line) if line else {"ok": False, "error": "no output from helper"}
+    except subprocess.TimeoutExpired:
+        # The helper may still have committed: say so instead of a plain failure.
+        return {"ok": False, "error": "timeout", "committed": "unknown",
+                "detail": "helper did not answer within %ds" % timeout}
     except Exception as e:
         return {"ok": False, "error": "helper call failed: %s" % e}
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    if line:
+        try:
+            return json.loads(line)
+        except ValueError:
+            pass
+    tail = (r.stderr or "").strip()[-200:]
+    return {"ok": False, "error": "helper failed (rc=%s)%s" % (r.returncode, ": " + tail if tail else "")}
 
 # -------------------------------------------------------- persistent history (SQLite)
 USAGE_RETENTION_DAYS = int(os.environ.get("WGUI_USAGE_RETENTION_DAYS", "400"))  # ~13 months
@@ -1653,12 +1678,12 @@ class H(BaseHTTPRequestHandler):
                 argv = ["splitserver", "1" if b.get("split") else "0"]
             else:
                 return self._json(400, {"ok": False, "error": "unknown op"})
-            # split ops run build-split (RU-zone download, up to 90 s) + ipset reload —
-            # the default 30 s would kill the helper mid-operation
+            # Per-op timeouts (ADMIN_TIMEOUTS) cover split rebuilds (RU-zone download)
+            # and bulk switches; the helper enforces its own, shorter budget.
             if op == "setexitpolicy":
                 res = save_exit_policy(argv)
             else:
-                res = call_admin(argv, 180 if op in ("splitsave", "splitserver") else 30)
+                res = call_admin(argv)
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)

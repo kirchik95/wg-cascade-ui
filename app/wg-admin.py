@@ -19,8 +19,13 @@ Usage: wg-admin.py <op> [args]
   blockipv6                    -> {updated}  (add ::/0 to full-tunnel client configs)
   export                       -> {archive,name}  (full recovery bundle, base64 tar.gz)
 All output is a single JSON line: {"ok":true,...} or {"ok":false,"error":...}.
+Mutating ops also report "committed": true / false / "unknown" (rollback failed),
+plus "cleanup_warning" when best-effort post-commit cleanup (conntrack) fell short.
+Every op runs under a monotonic time budget (OP_BUDGETS) that includes the wait
+for the admin lock; a busy lock answers {"ok":false,"error":"busy","busy":true}.
 """
 import sys, os, re, json, time, base64, fcntl, grp, shutil, tempfile, tarfile, io, subprocess, sqlite3, platform
+import contextlib
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
@@ -78,9 +83,85 @@ ENTRY_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.\-]{0,253}(/\d{1,2})?$')   # CIDR
 ENDPOINT_RE = re.compile(r'^[A-Za-z0-9.:_-]{3,253}:\d{1,5}$')
 IFACE_RE = re.compile(r'^[A-Za-z0-9_-]{1,15}$')
 
-def die(msg):
-    sys.stdout.write(json.dumps({"ok": False, "error": str(msg)}) + "\n")
+# ------------------------------------------------------------- time budgets
+# Whole-operation envelopes (seconds, monotonic), lock wait included. The web
+# service waits ~10 s longer (wg-ui.py ADMIN_TIMEOUTS) and the browser longer
+# still, so the helper — not a killed sudo — decides how an operation ends.
+OP_BUDGETS = {
+    "setexitall": 80,
+    "rename": 140, "setenabled": 140, "delete": 140, "setexit": 140,
+    "expire": 140, "regenerate": 140,
+    "add": 185,
+    "splitsave": 150, "splitserver": 150,
+}
+DEFAULT_BUDGET = 60
+LOCK_WAIT = 4.0          # seconds to wait for another helper before answering "busy"
+ROLLBACK_RESERVE = 30.0  # kept free while applying so a rollback can always run
+CLEANUP_BUDGET = 10.0    # post-commit conntrack cleanup, whole batch
+MUTATING_OPS = frozenset({"add", "rename", "setenabled", "delete", "setexit", "setexitall",
+                          "expire", "regenerate", "setexpiry", "setexitpolicy",
+                          "splitsave", "splitserver", "blockipv6"})
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+_op = None          # current operation name (main sets it)
+_deadline = None    # monotonic deadline of the current operation; None = unbounded
+_reserve = 0.0      # seconds the current stage must leave untouched
+
+def start_budget(op):
+    global _op, _deadline
+    _op = op
+    _deadline = time.monotonic() + OP_BUDGETS.get(op, DEFAULT_BUDGET)
+
+def reset_budget():
+    """Forget the current operation (tests call ops directly, one process)."""
+    global _op, _deadline, _reserve
+    _op, _deadline, _reserve = None, None, 0.0
+
+def time_left():
+    return float("inf") if _deadline is None else _deadline - time.monotonic()
+
+@contextlib.contextmanager
+def reserved(seconds):
+    """Run a stage while keeping `seconds` of the budget for what comes after it."""
+    global _reserve
+    old = _reserve
+    _reserve = old + seconds
+    try:
+        yield
+    finally:
+        _reserve = old
+
+def stage_timeout(timeout):
+    """A subprocess gets min(its own timeout, what the stage may still spend)."""
+    left = time_left() - _reserve
+    if left < 1:
+        raise BudgetExceeded("operation time budget exhausted")
+    return min(timeout, left)
+
+def die(msg, **extra):
+    out = {"ok": False, "error": str(msg)}
+    out.update(extra)
+    if _op in MUTATING_OPS:
+        out.setdefault("committed", False)
+    sys.stdout.write(json.dumps(out) + "\n")
     sys.exit(1)
+
+def acquire_lock(path, wait=None):
+    """Exclusive admin lock, bounded: poll LOCK_NB instead of blocking forever."""
+    wait = LOCK_WAIT if wait is None else wait
+    lock = open(path, "w")
+    give_up = time.monotonic() + max(0.0, min(wait, time_left()))
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock
+        except BlockingIOError:
+            if time.monotonic() >= give_up:
+                lock.close()
+                die("busy", busy=True)
+            time.sleep(0.1)
 
 def require_deploy_env(need_wan=False):
     """Fail fast when client-config / split deploy values are missing — never bake host IPs."""
@@ -98,11 +179,14 @@ def ok(data=None):
     out = {"ok": True}
     if data:
         out.update(data)
+    if _op in MUTATING_OPS:
+        out.setdefault("committed", True)
     sys.stdout.write(json.dumps(out) + "\n")
     sys.exit(0)
 
 def run(cmd, inp=None, timeout=15):
-    return subprocess.run(cmd, input=inp, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(cmd, input=inp, capture_output=True, text=True,
+                          timeout=stage_timeout(timeout))
 
 def write_atomic(path, data, mode, owner=None):
     d = os.path.dirname(path)
@@ -224,32 +308,40 @@ def _restore_files(snap):
         else:
             write_atomic(path, data, mode)
 
-def apply_clients(clients, regen=True, on_fail=None):
+def apply_clients(clients, regen=True, on_fail=None, routes=True):
     """Commit a registry change to disk, kernel peers and exit routes as one unit.
 
-    Any failure restores clients.json / wg-cl.conf / names.json byte-for-byte,
-    re-applies the restored state, runs on_fail (undo side files), and dies with
-    an error that says whether the rollback itself worked.
+    The apply stage runs with ROLLBACK_RESERVE of the budget held back, so when
+    it fails — or runs out of time — the rollback still has time to finish here
+    in the helper. Any failure restores clients.json / wg-cl.conf / names.json
+    byte-for-byte, re-applies the restored state, runs on_fail (undo side files),
+    and dies with committed=false, or committed="unknown" if the rollback failed.
+    routes=False skips the exit-route sync for changes that cannot affect it
+    (e.g. a rename).
     """
     snap = _snapshot_files()
     try:
-        save_clients(clients)
-        if regen:
-            regenerate(clients)
-        run_exit_sync_or_raise()
+        with reserved(ROLLBACK_RESERVE):
+            save_clients(clients)
+            if regen:
+                regenerate(clients)
+            if routes:
+                run_exit_sync_or_raise()
     except Exception as apply_error:
         try:
             _restore_files(snap)
             if regen:
                 sync_kernel()
-            run_exit_sync_or_raise()
+            if routes:
+                run_exit_sync_or_raise()
         except Exception as rollback_error:
-            die("apply failed: %s; rollback failed: %s" % (apply_error, rollback_error))
+            die("apply failed: %s; rollback failed: %s" % (apply_error, rollback_error),
+                committed="unknown")
         finally:
             if on_fail:
                 try: on_fail()
                 except Exception: pass
-        die("apply failed and rolled back: %s" % apply_error)
+        die("apply failed and rolled back: %s" % apply_error, committed=False)
 
 # ----------------------------------------------------------------------- helpers
 def next_free_ip(clients):
@@ -387,21 +479,32 @@ def run_exit_sync_or_raise():
     if r.returncode != 0:
         raise RuntimeError("exit-route sync failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
 
-def flush_exit_conntrack(ip):
-    run([EXIT_SH, "flush-ct", ip], timeout=10)
+def flush_exit_conntrack(ips):
+    """Best-effort conntrack cleanup for already-committed changes, one batch with
+    one deadline (CLEANUP_BUDGET, capped by the operation budget).
 
-def sync_exit_routes(flush_ip=None):
-    """Re-apply per-client US marks from clients.json; optionally flush conntrack for one IP.
-
-    Always safe to call after client mutations — exit-route.sh sync is idempotent
-    and derives state from clients.json (no separate was_us / exit==us branches).
+    Returns None on success or a short warning; never raises, because the change
+    it follows is committed and must not be reported as failed.
     """
+    ips = [ips] if isinstance(ips, str) else [ip for ip in ips if ip]
+    if not ips:
+        return None
+    try:
+        budget = stage_timeout(CLEANUP_BUDGET)
+        inner = max(1, int(budget) - 1)
+        r = run([EXIT_SH, "flush-ct", "--deadline", str(inner)] + ips, timeout=budget)
+    except Exception as e:
+        return "conntrack cleanup skipped: %s" % e
+    if r.returncode != 0:
+        return "conntrack cleanup incomplete: " + ((r.stderr or r.stdout) or "").strip()[-200:]
+    return None
+
+def sync_exit_routes():
+    """Re-apply per-client US marks from clients.json (idempotent, derived state)."""
     try:
         run_exit_sync_or_raise()
-    except RuntimeError as exc:
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
         die(str(exc))
-    if flush_ip:
-        flush_exit_conntrack(flush_ip)
 
 def policy_owner_ids():
     euid = os.geteuid()
@@ -454,32 +557,36 @@ def setexitall_data(target, reason):
     if not changed:
         return {"exit": target, "changed": 0, "source_counts": source_counts}
     try:
-        save_clients(clients)
-        run_exit_sync_or_raise()
+        with reserved(ROLLBACK_RESERVE):
+            save_clients(clients)
+            run_exit_sync_or_raise()
     except Exception as apply_error:
         try:
             write_atomic(CLIENTS_JSON, original_bytes, 0o644)
             run_exit_sync_or_raise()
         except Exception as rollback_error:
-            raise RuntimeError(
+            raise RollbackFailed(
                 "apply failed: %s; rollback failed: %s" % (apply_error, rollback_error)
             )
         raise RuntimeError("apply failed and rolled back: %s" % apply_error)
-    for client in changed:
-        if not client.get("enabled", True):
-            continue
-        try:
-            flush_exit_conntrack(client["ip"])
-        except Exception:
-            # Registry and verified routes are already committed. Conntrack
-            # cleanup is best-effort and must not report that switch as failed.
-            pass
+    # Registry and verified routes are committed. Conntrack cleanup is one
+    # best-effort batch; a shortfall is reported, never turned into a failure.
+    try:
+        warning = flush_exit_conntrack([c.get("ip") for c in changed if c.get("enabled", True)])
+    except Exception as e:
+        warning = "conntrack cleanup skipped: %s" % e
     direction = "%s -> %s" % (
         "mixed" if source_counts[target] else ("us" if target == "nl" else "nl"),
         target,
     )
     audit("setexitall", "%s %s %d client(s)" % (reason, direction, len(changed)))
-    return {"exit": target, "changed": len(changed), "source_counts": source_counts}
+    result = {"exit": target, "changed": len(changed), "source_counts": source_counts}
+    if warning:
+        result["cleanup_warning"] = warning
+    return result
+
+class RollbackFailed(RuntimeError):
+    pass
 
 # ---------------------------------------------------------------------- ops
 def op_add(name, expires="0", exit_="nl"):
@@ -537,7 +644,8 @@ def op_rename(pub, newname):
     def unmove():
         for src, dst in reversed(moved):
             os.replace(dst, src)
-    apply_clients(clients, on_fail=unmove)
+    # A name change cannot affect exit routing (keyed by IP): skip the route sync.
+    apply_clients(clients, on_fail=unmove, routes=False)
     audit("rename", "%s -> %s" % (old, newname))
     ok()
 
@@ -550,10 +658,9 @@ def op_setenabled(pub, val):
     c = find(clients, pub)
     c["enabled"] = (val == "1")
     apply_clients(clients)
-    if val == "0":
-        flush_exit_conntrack(c["ip"])
+    warning = flush_exit_conntrack(c["ip"]) if val == "0" else None
     audit("enable" if val == "1" else "disable", c["name"])
-    ok()
+    ok({"cleanup_warning": warning} if warning else None)
 
 def op_delete(pub):
     if not PUB_RE.match(pub):
@@ -568,9 +675,9 @@ def op_delete(pub):
     for p in (cpath, ppath):        # only after the peer is really gone
         try: os.unlink(p)
         except OSError: pass
-    flush_exit_conntrack(ip)
+    warning = flush_exit_conntrack(ip)
     audit("delete", nm)
-    ok()
+    ok({"cleanup_warning": warning} if warning else None)
 
 def op_setexit(pub, exit_):
     if not PUB_RE.match(pub):
@@ -587,12 +694,21 @@ def op_setexit(pub, exit_):
     else:
         c["exit"] = exit_
     apply_clients(clients, regen=False)
-    flush_exit_conntrack(c["ip"])
+    warning = flush_exit_conntrack(c["ip"])
     audit("setexit", "%s %s -> %s" % (c["name"], old, exit_))
-    ok({"name": c["name"], "exit": exit_})
+    out = {"name": c["name"], "exit": exit_}
+    if warning:
+        out["cleanup_warning"] = warning
+    ok(out)
 
 def op_setexitall(target, reason):
-    ok(setexitall_data(target, reason))
+    try:
+        result = setexitall_data(target, reason)
+    except RollbackFailed as e:
+        die(str(e), committed="unknown")
+    except (RuntimeError, ValueError) as e:
+        die(str(e), committed=False)
+    ok(result)
 
 def op_setexitpolicy(enabled, nl_gib, us_gib, failover):
     ok(setexitpolicy_data(enabled, nl_gib, us_gib, failover))
@@ -802,8 +918,8 @@ def main():
         require_deploy_env()
     elif op in ("splitserver", "splitsave"):
         require_deploy_env(need_wan=True)
-    lock = open(LOCKFILE, "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    start_budget(op)
+    lock = acquire_lock(LOCKFILE)
     if   op == "list":                    ok({"clients": load_clients()})
     elif op == "add"        and len(a) >= 1: op_add(a[0], a[1] if len(a) >= 2 else "0",
                                                     a[2] if len(a) >= 3 else "nl")
@@ -829,5 +945,9 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         raise
+    except BudgetExceeded as e:
+        die(str(e), timeout=True)
+    except subprocess.TimeoutExpired as e:
+        die("step timed out: %s" % " ".join(map(str, e.cmd[:2])), timeout=True)
     except Exception as e:
         die("internal error: %s" % e)

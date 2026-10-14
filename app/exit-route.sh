@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Per-client exit routing for the cascade.
 # Clients with exit=us in /etc/wg-ui/clients.json get fwmark 0x65 → table 65 → wg-us.
-# RU-direct (split-server.sh, mark 0x64, pri 1000) stays higher priority: the US
-# MARK only touches packets that are still unmarked, so whichever of the two
-# scripts appended its PREROUTING rule first, a RU destination keeps 0x64.
+# The per-client MARK rules live in our own mangle chain WGUI-EXIT, rebuilt in one
+# `iptables-restore --noflush` per sync (no per-rule fork/scan as clients grow).
+# PREROUTING holds a single jump into it, taken only by still-unmarked packets
+# from the client iface: RU-direct (split-server.sh, mark 0x64, pri 1000) keeps
+# priority whichever of the two scripts appended its PREROUTING rule first.
 # Everyone else keeps the default path through wg-do (NL).
 #
 # Idempotent. State is derived from clients.json on every sync — no separate state file.
@@ -15,7 +17,9 @@ CLIENTS_JSON="${WGUI_CLIENTS:-/etc/wg-ui/clients.json}"
 MARK="0x65"
 TABLE=65
 PRI=1100
-COMMENT="wgui-exit-us"
+COMMENT="wgui-exit-us"          # per-client MARK rules (now only inside $CHAIN)
+CHAIN="WGUI-EXIT"
+JUMP_COMMENT="wgui-exit-jump"   # the single PREROUTING → $CHAIN rule
 SUBNET="10.10.0.0/24"
 # RPDB contract shared with split-server.sh and the wg-do tunnel config:
 #   1000  fwmark 0x64 → main        RU-direct (split-server.sh)
@@ -87,8 +91,9 @@ ensure_forward() {
         || iptables -t nat -A POSTROUTING -o "$US_IFACE" -j MASQUERADE
 }
 
-flush_marks() {
-    # Remove only our tagged per-IP MARK rules (highest line number first).
+flush_legacy_marks() {
+    # Remove per-IP MARK rules that older releases put straight into PREROUTING
+    # (highest line number first). The jump rule has its own comment and stays.
     local nums n
     nums=$(iptables -t mangle -L PREROUTING -n -v --line-numbers 2>/dev/null \
         | awk -v c="$COMMENT" '
@@ -106,27 +111,76 @@ flush_marks() {
     done
 }
 
-mark_rule() {
-    # usage: mark_rule -C|-A <ip>. Only unmarked packets from the client iface:
-    # never overwrite RU-direct 0x64, whichever rule was appended first.
-    iptables -t mangle "$1" PREROUTING -i "$CL_IFACE" -s "$2/32" -m mark --mark 0 \
-        -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
+jump_rule() {
+    # usage: jump_rule -C|-A|-D. Only unmarked packets from the client iface enter
+    # $CHAIN: a RU destination already marked 0x64 never gets overwritten.
+    iptables -t mangle "$1" PREROUTING -i "$CL_IFACE" -m mark --mark 0 \
+        -m comment --comment "$JUMP_COMMENT" -j "$CHAIN"
 }
 
-add_mark() {
-    mark_rule -C "$1" 2>/dev/null || mark_rule -A "$1"
+ensure_jump() {
+    jump_rule -C 2>/dev/null || jump_rule -A
 }
 
-flush_conntrack() {
-    local ip="$1"
-    conntrack -D -s "$ip" >/dev/null 2>&1 || true
-    conntrack -D -d "$ip" >/dev/null 2>&1 || true
+rebuild_chain() {
+    # usage: rebuild_chain <newline-separated IPs>. Replaces $CHAIN's contents in
+    # one atomic iptables-restore; --noflush leaves every other chain untouched.
+    local wanted="$1" ip payload
+    payload="*mangle"$'\n'":$CHAIN - [0:0]"$'\n'"-F $CHAIN"
+    while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        payload+=$'\n'"-A $CHAIN -s $ip/32 -m comment --comment $COMMENT -j MARK --set-xmark $MARK/0xffffffff"
+    done <<< "$wanted"
+    payload+=$'\n'"COMMIT"
+    printf '%s\n' "$payload" | iptables-restore --noflush
+}
+
+valid_ipv4() {
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+flush_conntrack_many() {
+    # usage: flush_conntrack_many <deadline-seconds> <ip>...
+    # One process for the whole batch with a shared deadline; addresses left when
+    # it runs out are reported (exit 2) instead of silently blowing the budget.
+    local deadline="$1" start ip left skipped=() done_n=0
+    shift
+    start=$(date +%s)
+    for ip in "$@"; do
+        valid_ipv4 "$ip" || { echo "exit-route: invalid address $ip" >&2; return 1; }
+    done
+    for ip in "$@"; do
+        left=$(( deadline - ($(date +%s) - start) ))
+        if [ "$left" -le 0 ]; then
+            skipped+=("$ip")
+            continue
+        fi
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$left" conntrack -D -s "$ip" >/dev/null 2>&1 || true
+            timeout "$left" conntrack -D -d "$ip" >/dev/null 2>&1 || true
+        else
+            conntrack -D -s "$ip" >/dev/null 2>&1 || true
+            conntrack -D -d "$ip" >/dev/null 2>&1 || true
+        fi
+        done_n=$((done_n + 1))
+    done
+    echo "exit-route: conntrack flushed for $done_n address(es)"
+    if [ "${#skipped[@]}" -gt 0 ]; then
+        echo "exit-route: conntrack deadline hit, skipped: ${skipped[*]}" >&2
+        return 2
+    fi
 }
 
 del_forward() {
     iptables -D FORWARD -i "$CL_IFACE" -o "$US_IFACE" -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -i "$US_IFACE" -o "$CL_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     iptables -t nat -D POSTROUTING -o "$US_IFACE" -j MASQUERADE 2>/dev/null || true
+}
+
+del_chain() {
+    while jump_rule -D 2>/dev/null; do :; done
+    iptables -t mangle -F "$CHAIN" 2>/dev/null || true
+    iptables -t mangle -X "$CHAIN" 2>/dev/null || true
 }
 
 del_table() {
@@ -138,20 +192,59 @@ iface_up() {
     ip link show "$US_IFACE" >/dev/null 2>&1
 }
 
-count_owned_marks() {
-    awk -v c="$COMMENT" '
-        {
-            for (i = 1; i < NF; i++) {
-                value = $(i + 1)
-                sub(/^"/, "", value)
-                sub(/"$/, "", value)
-                if ($i == "--comment" && value == c) {
-                    count++
-                    next
-                }
-            }
+check_mangle() {
+    # usage: check_mangle <expected-count> <wanted-ips> < `iptables -t mangle -S`
+    # One dump, every invariant: exactly one guarded jump, no legacy per-IP rules
+    # left in PREROUTING, and $CHAIN holding exactly the wanted client marks.
+    # Prints the number of rules in $CHAIN; problems go to stderr (exit 1).
+    awk -v chain="$CHAIN" -v jc="$JUMP_COMMENT" -v c="$COMMENT" -v iface="$CL_IFACE" \
+        -v mark="$MARK" -v expected="$1" -v wanted="$(tr '\n' ' ' <<< "$2")" '
+        function comment(   i, v) {
+            for (i = 1; i < NF; i++)
+                if ($i == "--comment") { v = $(i + 1); gsub(/"/, "", v); return v }
+            return ""
         }
-        END { print count + 0 }
+        function has(seq) { return index(" " $0 " ", " " seq " ") > 0 }
+        BEGIN {
+            n = split(wanted, w, " ")
+            for (i = 1; i <= n; i++)
+                if (w[i] != "") { want[w[i] "/32"] = 1; nwant++ }
+        }
+        $1 == "-A" && $2 == "PREROUTING" {
+            k = comment()
+            if (k == c) legacy++
+            else if (k == jc) {
+                if (has("-i " iface) && (has("-m mark --mark 0x0") || has("-m mark --mark 0x0/0xffffffff")) \
+                    && $(NF - 1) == "-j" && $NF == chain) jumps++
+                else badjump++
+            }
+            next
+        }
+        $1 == "-A" && $2 == chain {
+            found++
+            src = ""
+            for (i = 3; i < NF; i++) if ($i == "-s") src = $(i + 1)
+            if (comment() == c && (src in want) && !(src in have) \
+                && (has("--set-xmark " mark "/0xffffffff") || has("--set-mark " mark)))
+                have[src] = 1
+            else bad++
+            next
+        }
+        END {
+            err = 0
+            if (found + 0 != expected + 0) {
+                printf "exit-route: expected %d mark rule(s), found %d\n", expected, found > "/dev/stderr"; err = 1
+            }
+            if (legacy) { printf "exit-route: %d legacy per-client rule(s) left in PREROUTING\n", legacy > "/dev/stderr"; err = 1 }
+            if (jumps != 1 || badjump) {
+                printf "exit-route: expected one guarded jump to %s, found %d (+%d malformed)\n", chain, jumps, badjump > "/dev/stderr"; err = 1
+            }
+            if (bad) { printf "exit-route: %d unexpected rule(s) in %s\n", bad, chain > "/dev/stderr"; err = 1 }
+            got = 0; for (k in have) got++
+            if (got != nwant) { printf "exit-route: %d wanted client mark(s) missing\n", nwant - got > "/dev/stderr"; err = 1 }
+            print found + 0
+            exit err
+        }
     '
 }
 
@@ -264,16 +357,12 @@ verify_forward() {
 }
 
 verify_sync() {
-    local expected="$1" wanted="$2" mark_rules actual ip
-    if ! mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null); then
+    local expected="$1" wanted="$2" dump
+    if ! dump=$(iptables -t mangle -S 2>/dev/null); then
         echo "exit-route: unable to inspect mark rules" >&2
         return 1
     fi
-    actual=$(count_owned_marks <<< "$mark_rules")
-    [ "$actual" -eq "$expected" ] || {
-        echo "exit-route: expected $expected mark rule(s), found $actual" >&2
-        return 1
-    }
+    check_mangle "$expected" "$wanted" <<< "$dump" >/dev/null || return 1
     verify_rpdb "$expected" || return 1
     [ "$expected" -eq 0 ] && return 0
     policy_rule_present || {
@@ -284,26 +373,22 @@ verify_sync() {
         echo "exit-route: US default route missing" >&2
         return 1
     }
-    while IFS= read -r ip; do
-        [ -z "$ip" ] && continue
-        mark_rule -C "$ip" 2>/dev/null || {
-            echo "exit-route: mark rule for $ip missing or in legacy form" >&2
-            return 1
-        }
-    done <<< "$wanted"
 }
 
 sync_rules() {
-    local wanted ip count=0
+    local wanted count
     if ! wanted=$(us_ips); then
         return 1
     fi
+    count=$(grep -c . <<< "$wanted" || true)
     if ! iface_up; then
-        if [ -n "$wanted" ]; then
+        if [ "$count" -gt 0 ]; then
             echo "exit-route: $US_IFACE is down while US clients are requested" >&2
             return 1
         fi
-        flush_marks
+        rebuild_chain ""
+        ensure_jump
+        flush_legacy_marks
         verify_sync 0 "$wanted"
         echo "exit-route: $US_IFACE down — no US clients requested"
         return 0
@@ -311,12 +396,11 @@ sync_rules() {
     ensure_table
     ensure_forward
     verify_forward
-    flush_marks
-    while IFS= read -r ip; do
-        [ -z "$ip" ] && continue
-        add_mark "$ip"
-        count=$((count + 1))
-    done <<< "$wanted"
+    # Chain first, then the jump, then drop legacy rules: legacy and new rules set
+    # the same mark, so a migrating client is never left unmarked in between.
+    rebuild_chain "$wanted"
+    ensure_jump
+    flush_legacy_marks
     verify_sync "$count" "$wanted"
     echo "exit-route: synced $count US client(s) → $US_IFACE (mark $MARK table $TABLE)"
 }
@@ -326,13 +410,20 @@ case "${1:-}" in
         sync_rules
         ;;
     flush-ct)
-        # usage: exit-route.sh flush-ct 10.10.0.5
-        if [ -z "${2:-}" ]; then echo "usage: $0 flush-ct <ip>"; exit 1; fi
-        flush_conntrack "$2"
-        echo "exit-route: conntrack flushed for $2"
+        # usage: exit-route.sh flush-ct [--deadline SECONDS] <ip> [<ip>...]
+        shift
+        deadline=20
+        if [ "${1:-}" = "--deadline" ]; then
+            deadline="${2:-}"
+            [[ "$deadline" =~ ^[0-9]+$ ]] || { echo "usage: $0 flush-ct [--deadline SECONDS] <ip>..."; exit 1; }
+            shift 2
+        fi
+        if [ $# -lt 1 ]; then echo "usage: $0 flush-ct [--deadline SECONDS] <ip>..."; exit 1; fi
+        flush_conntrack_many "$deadline" "$@"
         ;;
     down)
-        flush_marks
+        flush_legacy_marks
+        del_chain
         del_forward
         del_table
         echo "exit-route: rules removed"
@@ -340,8 +431,7 @@ case "${1:-}" in
     status)
         if ! wanted=$(us_ips); then exit 1; fi
         count=$(grep -c . <<< "$wanted" || true)
-        mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
-        rules=$(count_owned_marks <<< "$mark_rules")
+        rules=$(iptables -t mangle -S 2>/dev/null | awk -v chain="$CHAIN" '$1 == "-A" && $2 == chain { n++ } END { print n + 0 }')
         printf '{"iface":"%s","up":%s,"clients_us":%s,"mark_rules":%s}\n' \
             "$US_IFACE" \
             "$(iface_up && echo true || echo false)" \
@@ -349,7 +439,7 @@ case "${1:-}" in
             "${rules:-0}"
         ;;
     *)
-        echo "usage: $0 {sync|apply|flush-ct <ip>|down|status}"
+        echo "usage: $0 {sync|apply|flush-ct [--deadline S] <ip>...|down|status}"
         exit 1
         ;;
 esac

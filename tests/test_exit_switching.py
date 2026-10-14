@@ -60,14 +60,14 @@ class TestBulkAdmin(unittest.TestCase):
         ])
         calls = []
         self.patch("run_exit_sync_or_raise", lambda: calls.append("sync"))
-        self.patch("flush_exit_conntrack", lambda ip: calls.append(("flush", ip)))
+        self.patch("flush_exit_conntrack", lambda ips: calls.append(("flush", ips)))
         self.patch("audit", lambda op, detail: calls.append((op, detail)))
         result = wgadmin.setexitall_data("us", "manual")
         clients = json.loads(pathlib.Path(wgadmin.CLIENTS_JSON).read_text())
         self.assertEqual([x.get("exit") for x in clients], ["us", "us"])
         self.assertEqual(result["changed"], 1)
         self.assertEqual(calls.count("sync"), 1)
-        self.assertIn(("flush", "10.10.0.2"), calls)
+        self.assertIn(("flush", ["10.10.0.2"]), calls)
 
     def test_bulk_rolls_back_registry_and_routes(self):
         original = [{"name": "a", "ip": "10.10.0.2", "pubkey": "A", "enabled": True}]
@@ -174,16 +174,17 @@ class TestBulkAdmin(unittest.TestCase):
         self.patch("audit", lambda op, detail: None)
         result = wgadmin.setexitall_data("us", "quota")
         self.assertEqual(result["changed"], 3)
-        self.assertEqual(flushed, ["10.10.0.2", "10.10.0.3"])
+        self.assertEqual(flushed, [["10.10.0.2", "10.10.0.3"]])   # one batch, not n calls
 
     def test_conntrack_failure_does_not_falsify_committed_switch(self):
         self.write_clients([{"name": "a", "ip": "10.10.0.2", "enabled": True}])
         calls = []
         self.patch("run_exit_sync_or_raise", lambda: calls.append("sync"))
-        self.patch("flush_exit_conntrack", lambda ip: (_ for _ in ()).throw(RuntimeError("conntrack unavailable")))
+        self.patch("flush_exit_conntrack", lambda ips: (_ for _ in ()).throw(RuntimeError("conntrack unavailable")))
         self.patch("audit", lambda op, detail: calls.append((op, detail)))
         result = wgadmin.setexitall_data("us", "manual")
         self.assertEqual(result["changed"], 1)
+        self.assertIn("conntrack", result["cleanup_warning"])
         self.assertEqual(json.loads(pathlib.Path(wgadmin.CLIENTS_JSON).read_text())[0]["exit"], "us")
         self.assertEqual(calls.count("sync"), 1)
 
@@ -300,6 +301,7 @@ class TestBulkAdmin(unittest.TestCase):
 
         self.patch("op_setexitall", record("all"))
         self.patch("op_setexitpolicy", record("policy"))
+        self.addCleanup(wgadmin.reset_budget)
         old_argv = sys.argv
         self.addCleanup(setattr, sys, "argv", old_argv)
 
@@ -322,7 +324,8 @@ class TestBulkAdmin(unittest.TestCase):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
                     call_main()
-                self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "bad operation or arguments"})
+                self.assertEqual(json.loads(output.getvalue()),
+                                 {"ok": False, "error": "bad operation or arguments", "committed": False})
 
     def test_bulk_wrapper_preserves_structured_json(self):
         self.patch("setexitall_data", lambda target, reason: {"exit": target, "changed": 4})
@@ -335,7 +338,7 @@ class TestBulkAdmin(unittest.TestCase):
         self.patch("run_exit_sync_or_raise", lambda: (_ for _ in ()).throw(RuntimeError("route failed")))
         output = io.StringIO()
         with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
-            wgadmin.sync_exit_routes("10.10.0.2")
+            wgadmin.sync_exit_routes()
         self.assertEqual(json.loads(output.getvalue()), {"ok": False, "error": "route failed"})
 
     def test_recovery_export_includes_optional_exit_policy_with_safe_name(self):
