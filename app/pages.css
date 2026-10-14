@@ -300,7 +300,7 @@
  .ut-bar i{height:6px}
  .ut-d,.ut-u{display:none}
  .uc-name{min-height:44px;display:inline-flex;align-items:center}
- .ut-foot .linkbtn{min-height:44px}
+ .ut-foot .linkbtn,.uc-csv{display:inline-flex;align-items:center;min-height:44px}
  .jr-filter{width:100%;overflow-x:auto}
  .jr-filter .seg-b{flex:1 0 auto;padding:0 12px}
  .jr-export{width:100%}

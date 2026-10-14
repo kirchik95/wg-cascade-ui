@@ -601,7 +601,7 @@ function cardsHTML(data,info,s){
   const ratio=quota>0?used/quota:0,tone=ratio>=1?'bad':ratio>=.7?'warn':'';
   const o={key:k,used,quota,clients,info,series:series.map(d=>d[k])},f=forecast(o);
   h+='<div class="us-card is-'+k+(tone?' is-'+tone:'')+'"><div class="us-ch"><span class="label"><i class="us-sw is-'+k+'" aria-hidden="true"></i>'+XL(k)+' · '+esc(WG.exitCity(k))+'</span>'
-   +'<span class="us-quota">'+esc(quota?tr('quota {q} {unit}',{q:gibs(quota),unit:UNIT()}):tr('no quota set'))+'</span></div>'
+   +'<span class="us-quota">'+esc(quota?tr('quota {q} {unit}',{q:gibs(quota),unit:UNIT()}):s.loaded?tr('no quota set'):'')+'</span></div>'
    +'<div class="us-fig"><span class="us-num">'+gibs(used)+'</span><span class="us-unit">'+UNIT()+(quota?' · '+Math.floor(ratio*100)+'%':'')+'</span></div>'
    +(quota?'<div class="us-meter" role="meter" aria-valuemin="0" aria-valuemax="'+Math.round(quota/GIB)+'" aria-valuenow="'+Math.round(used/GIB)+'" aria-label="'+esc(XL(k))+'">'
     +'<i style="width:'+Math.min(100,ratio*100).toFixed(1)+'%"></i></div>':'')
