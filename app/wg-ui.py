@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
+import os, re, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
 import http.client
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1220,8 +1220,8 @@ def _month_bounds(now=None, month=None):
     return start, "%04d-%02d-01" % (year, number)
 
 
-def exit_usage_month(now=None):
-    month, next_month = _month_bounds(now=now)
+def exit_usage_month(now=None, month=None):
+    month, next_month = _month_bounds(now=now, month=month)
     out = {key: {"rx": 0, "tx": 0} for key in exit_policy.EXITS}
     with _db() as c:
         rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
@@ -1284,8 +1284,8 @@ def seed_exit_usage_from_registry(month=None):
 
 # The read helpers below raise sqlite3.Error instead of returning empty data:
 # "the DB failed" must not look like "no traffic" (or zero the cached month totals).
-def usage_month(now=None):
-    month, next_month = _month_bounds(now=now)
+def usage_month(now=None, month=None):
+    month, next_month = _month_bounds(now=now, month=month)
     with _db() as c:
         rows = c.execute("SELECT pubkey, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? AND day<? "
                          "GROUP BY pubkey", (month, next_month)).fetchall()
@@ -1301,6 +1301,54 @@ def usage_daily(days=30):
         rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? GROUP BY day "
                          "ORDER BY day", (cutoff["day"],)).fetchall()
     return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows]
+
+def usage_daily_month(month):
+    """Per-day client totals inside one calendar month ("YYYY-MM")."""
+    start, end = _month_bounds(month=month)
+    with _db() as c:
+        rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? AND day<? "
+                         "GROUP BY day ORDER BY day", (start, end)).fetchall()
+    return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows]
+
+def exit_usage_daily(now=None, month=None):
+    """{exit: [{day, rx, tx}, ...]} for one calendar month, from the exit peer counters."""
+    start, end = _month_bounds(now=now, month=month)
+    out = {key: [] for key in exit_policy.EXITS}
+    with _db() as c:
+        rows = c.execute("SELECT exit, day, rx, tx FROM exit_usage WHERE day>=? AND day<? "
+                         "ORDER BY day", (start, end)).fetchall()
+    for r in rows:
+        if r["exit"] in out:
+            out[r["exit"]].append({"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0})
+    return out
+
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+
+def parse_month(value):
+    """"YYYY-MM" -> the same string; anything else -> ValueError (the API answers 400)."""
+    if not isinstance(value, str) or not MONTH_RE.match(value):
+        raise ValueError("month must be YYYY-MM")
+    return value
+
+def history_payload(month=None, now=None):
+    """/api/history body. Without `month` the client series keep their rolling
+    30-day window (the current UI chart); the month totals and the exit series
+    cover the current calendar month. Raises sqlite3.Error (callers answer 503)."""
+    reg = load_registry()
+    names = {c["pubkey"]: c["name"] for c in reg}
+    if month is None:
+        label = time.strftime("%Y-%m", time.localtime(time.time() if now is None else now))
+        mu = usage_month(now=now)
+        daily = usage_daily(30)
+    else:
+        label = month
+        mu = usage_month(month=month)
+        daily = usage_daily_month(month)
+    clients = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
+                      for k, v in mu.items()], key=lambda x: -(x["rx"] + x["tx"]))
+    return {"month": label, "daily": daily, "clients": clients,
+            "exits_daily": exit_usage_daily(now=now, month=month),
+            "exits_month": exit_usage_month(now=now, month=month)}
 
 def usage_daily_for(pub, days=30):
     with _db() as c:
@@ -1498,20 +1546,20 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json(500, {"error": str(e)})
             if path.startswith("/api/history"):
-                pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
+                qs = parse_qs(urlparse(self.path).query)
+                pub = qs.get("pub", [""])[0]
+                month = None
+                if "month" in qs:
+                    try:
+                        month = parse_month(qs["month"][0])
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
                 try:
                     if pub:   # per-client daily series (config modal chart)
                         return self._json(200, {"daily": usage_daily_for(pub, 30)})
-                    reg = load_registry()
-                    names = {c["pubkey"]: c["name"] for c in reg}
-                    mu = usage_month()
-                    daily = usage_daily(30)
+                    return self._json(200, history_payload(month=month))
                 except sqlite3.Error as e:
                     return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
-                cl = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
-                             for k, v in mu.items()], key=lambda x: -(x["rx"] + x["tx"]))
-                return self._json(200, {"month": time.strftime("%Y-%m"),
-                                        "daily": daily, "clients": cl})
             if path.startswith("/api/audit"):
                 return self._json(200, {"events": audit_tail(60)})
             if path.startswith("/api/connections"):
