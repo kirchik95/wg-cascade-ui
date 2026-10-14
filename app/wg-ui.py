@@ -1865,7 +1865,6 @@ class H(BaseHTTPRequestHandler):
                "/modals.js": "application/javascript",
                "/pages.js": "application/javascript",
                "/boot.js": "application/javascript",
-               "/theme.js": "application/javascript",
                "/login.js": "application/javascript",
                "/icon.svg": "image/svg+xml",
                "/manifest.webmanifest": "application/manifest+json"}

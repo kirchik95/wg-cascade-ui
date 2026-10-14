@@ -398,7 +398,7 @@ class TestFrontendShell(unittest.TestCase):
 
     def test_service_worker_cache_is_bumped(self):
         sw = (ROOT / "app" / "sw.js").read_text()
-        self.assertIn("wgui-shell-v28", sw)
+        self.assertIn("wgui-shell-v29", sw)
         self.assertIn("cacheablePath", sw)
         for asset in ("/core.js", "/dashboard.js", "/icons.js", "/app.css"):
             self.assertIn("'%s'" % asset, sw)
