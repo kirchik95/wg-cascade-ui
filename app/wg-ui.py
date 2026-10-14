@@ -1813,7 +1813,8 @@ class H(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             # Skip noisy public assets + high-frequency status polls
             if path not in ("/api/status", "/healthz") and not path.startswith(
-                    ("/app.", "/icon", "/inter.", "/sw.js", "/manifest", "/cascade.", "/clients.")):
+                    ("/app.", "/core.", "/dashboard.", "/modals.", "/pages.", "/boot.", "/theme.",
+                     "/icon", "/inter.", "/sw.js", "/manifest", "/cascade.", "/clients.")):
                 ms = int((time.time() - t0) * 1000) if t0 else None
                 log_event("http", method=self.command, path=path, status=code,
                           ms=ms, ip=self.client_address[0])
@@ -1852,7 +1853,13 @@ class H(BaseHTTPRequestHandler):
             return self._json(200 if r["ready"] else 503, r)
         # PWA assets — public (no sensitive data), so the install/login page can load them
         _CT = {"/app.css": "text/css",
+               "/modals.css": "text/css",
+               "/pages.css": "text/css",
                "/app.js": "application/javascript",
+               "/core.js": "application/javascript",
+               "/dashboard.js": "application/javascript",
+               "/modals.js": "application/javascript",
+               "/pages.js": "application/javascript",
                "/boot.js": "application/javascript",
                "/theme.js": "application/javascript",
                "/login.js": "application/javascript",

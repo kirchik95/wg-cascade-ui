@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import pathlib
+import re
 import shutil
 import subprocess
 import textwrap
@@ -350,29 +351,40 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_header_has_accessible_exit_policy_controls(self):
+    def test_shell_has_accessible_navigation_and_live_regions(self):
         html = (ROOT / "app" / "index.html").read_text()
-        self.assertIn('<header class="topnav">', html)
-        self.assertIn('<section class="status-strip">', html)
-        self.assertIn('id="monthuse"', html)
-        self.assertIn('button class="pill monthpill" id="monthuse-nl"', html)
-        self.assertIn('button class="pill monthpill" id="monthuse-us"', html)
-        self.assertIn('data-act="exit-policy"', html)
-        self.assertIn('aria-label="NL exit routing settings"', html)
-        self.assertIn('aria-label="US exit routing settings"', html)
-        self.assertIn('id="policyalert" style="display:none" role="alert"', html)
+        self.assertIn('<header class="top" id="top">', html)
+        self.assertIn('<nav class="nav" id="nav" aria-label="Sections">', html)
+        self.assertIn('<nav class="tabbar" id="tabbar" aria-label="Sections">', html)
+        self.assertIn('aria-haspopup="menu"', html)
+        self.assertIn('id="ops" role="status" aria-live="polite"', html)
+        self.assertIn('class="banners" id="banner"', html)
+        self.assertIn('<main class="main" id="main" tabindex="-1">', html)
+        self.assertIn('class="skip" href="#main"', html)
+        self.assertNotRegex(html, r"\son[a-z]+=")           # CSP: no inline handlers
+        self.assertNotIn("<script>", html)                 # CSP: no inline scripts
+        scripts = re.findall(r'<script src="([^"]+)"', html)
+        self.assertEqual(scripts[0], "/boot.js")
+        self.assertLess(scripts.index("/core.js"), scripts.index("/dashboard.js"))
 
-    def test_policy_alert_css_uses_explicit_aa_text_without_nested_opacity(self):
+    def test_design_system_css_tokens_themes_and_motion(self):
         css = (ROOT / "app" / "app.css").read_text()
-        self.assertRegex(css, r"\.policyalert\{[^}]*color:var\(--txt\)")
-        self.assertRegex(css, r"\.policyalert span\{[^}]*opacity:1")
-        self.assertNotRegex(css, r"\.policyalert(?:-detail|>span)[^{]*\{[^}]*opacity:\s*\.(?:[0-9]+)")
+        for token in ("--color-bg:#FFFFFF", "--color-ink:#15140F", "--color-amber:#FFB020",
+                      "--color-amber-text:#A35F00", "--color-ok-text:#157A40", "--color-danger:#C2321B",
+                      "--color-stale:#4A463A", "--radius-sheet:12px", "--spacing-touch:44px"):
+            self.assertIn(token, css)
+        self.assertIn(':root[data-theme="dark"]{', css)
+        self.assertIn('@media (prefers-color-scheme: dark){\n :root[data-theme="auto"]{', css)
         self.assertIn("@media (prefers-reduced-motion:reduce)", css)
-        self.assertIn("@media(max-width:560px)", css)
+        self.assertIn("@media (max-width:600px)", css)
+        self.assertNotRegex(css, r"font:\s*[0-9]{3}\s+[0-9.]+px\s+inherit")   # 'font: 600 13px inherit' is invalid CSS
 
     def test_service_worker_cache_is_bumped(self):
-        self.assertIn("wgui-shell-v27", (ROOT / "app" / "sw.js").read_text())
-        self.assertIn("cacheablePath", (ROOT / "app" / "sw.js").read_text())
+        sw = (ROOT / "app" / "sw.js").read_text()
+        self.assertIn("wgui-shell-v28", sw)
+        self.assertIn("cacheablePath", sw)
+        for asset in ("/core.js", "/dashboard.js", "/app.css"):
+            self.assertIn("'%s'" % asset, sw)
 
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
     def test_monthly_helpers_still_render_usage_history(self):

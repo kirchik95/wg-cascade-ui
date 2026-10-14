@@ -1,9 +1,11 @@
-const C='wgui-shell-v27';
+const C='wgui-shell-v28';
 const NET_WAIT_MS=4000;
 const SHELL=[
  '/','/index.html','/login','/login.html',
- '/app.css','/app.js','/boot.js','/theme.js','/cascade.js','/clients.js','/login.js',
- '/inter.woff2','/icon.svg','/apple-touch-icon.png','/manifest.webmanifest'
+ '/app.css','/modals.css','/pages.css',
+ '/core.js','/dashboard.js','/modals.js','/pages.js',
+ '/boot.js','/theme.js','/login.js',
+ '/icon.svg','/apple-touch-icon.png','/manifest.webmanifest'
 ];
 function sameOrigin(url){
  try{return new URL(url).origin===self.location.origin}catch(e){return false}

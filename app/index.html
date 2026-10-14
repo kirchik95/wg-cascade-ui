@@ -1,96 +1,21 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="csrf" content="__CSRF__"><link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#101010" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="WG Cascade"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/svg+xml" href="/icon.svg"><title>WG Cascade</title><script src="/boot.js"></script><link rel="stylesheet" href="/app.css"></head><body>
-<div class="wrap">
-<header class="topnav">
-<div class="topnav-l">
-<a class="brand" href="/"><span class="brand-mark" aria-hidden="true">WG</span><span class="brand-name">WG Cascade</span></a>
-<nav class="admin-tools" aria-label="Admin tools">
-<button class="nav-tool" type="button" data-act="split" data-tip="Split-tunnel policy (what bypasses the cascade)" aria-label="Split"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg><span>Split</span></button>
-<button class="nav-tool" type="button" data-act="usage" data-tip="Traffic history and monthly usage" aria-label="Usage"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/></svg><span>Usage</span></button>
-<button class="nav-tool" type="button" data-act="audit" data-tip="Audit log — recent admin actions" aria-label="Log"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg><span>Log</span></button>
-<button class="nav-tool" type="button" data-act="export" data-tip="Download a backup (configs + keys)" aria-label="Backup"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg><span>Backup</span></button>
-</nav>
-</div>
-<div class="topnav-r">
-<button class="nav-text" id="lang" data-act="lang" data-tip="Language / Язык" aria-label="Language / Язык">RU</button>
-<button class="iconbtn" id="theme" data-act="theme" data-tip="Toggle theme" aria-label="Toggle theme" type="button"></button>
-<div class="menuwrap" id="acctwrap">
-<button class="acctbtn" id="acctbtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="acctmenu" data-tip="Account" aria-label="Account">
-<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>
-</button>
-<div class="menudrop" id="acctmenu" role="menu" hidden>
-<a class="menuitem" role="menuitem" href="/logout">Sign out</a>
-<button class="menuitem danger" role="menuitem" type="button" data-act="logout-confirm">Sign out all</button>
-</div>
-</div>
-<button class="primary" type="button" data-act="add" data-tip="Generate a new client config" aria-label="Add client"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="add-lbl">Client</span></button>
+<!doctype html><html lang="ru" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="csrf" content="__CSRF__"><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#FFFFFF"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="WG Cascade"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/svg+xml" href="/icon.svg"><title>WG Cascade</title><script src="/boot.js"></script><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/modals.css"><link rel="stylesheet" href="/pages.css"></head><body>
+<a class="skip" href="#main" data-i18n>Skip to content</a>
+<header class="top" id="top">
+<a class="logo" href="#/clients" aria-label="WG/CASCADE"><span class="logo-sq" aria-hidden="true"></span><span class="logo-t">WG/CASCADE</span></a>
+<nav class="nav" id="nav" aria-label="Sections"></nav>
+<div class="top-r">
+<span class="age" id="age" aria-live="off"></span>
+<button class="ibtn acct" id="acct" type="button" data-act="account" aria-haspopup="menu" aria-expanded="false" aria-label="Account"></button>
+<button class="btn btn-primary addbtn" id="addbtn" type="button" data-act="add-client" data-live aria-label="Add client"><span class="addbtn-plus" aria-hidden="true">+</span><span class="addbtn-t">Client</span></button>
 </div>
 </header>
-<section class="status-strip">
-<div class="status-copy">
-<h1 class="page-title">Dashboard</h1>
-<p class="page-sub" id="status-sub">updated just now · panel read-only · writes via helper</p>
-</div>
-<div class="status-pills" id="status-pills">
-<span class="pill healthchip" id="healthchip">…</span>
-<span class="pill" id="thr" data-tip="Aggregate live throughput across all clients">…</span>
-<span class="monthpills" id="monthuse">
-<button class="pill monthpill" id="monthuse-nl" type="button" data-act="exit-policy" data-tip="NL exit routing settings" aria-label="NL exit routing settings">…</button>
-<button class="pill monthpill" id="monthuse-us" type="button" data-act="exit-policy" data-tip="US exit routing settings" aria-label="US exit routing settings">…</button>
-</span>
-</div>
-</section>
-<div class="banner" id="offline" role="status" aria-live="polite"></div>
-<div class="alert" id="alert" style="display:none" role="alert"></div>
-<div class="alert bad policyalert" id="policyalert" style="display:none" role="alert"></div>
-<div class="bento">
-<div class="cascade card" id="cascade"></div>
-<div class="card chartcard">
-<div class="charth">
-<div class="t">Traffic · 5 min</div>
-<div class="chartleg" id="chartnow" aria-label="Down / Up legend"></div>
-</div>
-<div class="sparkwrap">
-<svg class="spark" id="spark" viewBox="0 0 600 62" preserveAspectRatio="none" role="img" aria-label="Traffic chart, last 5 minutes" tabindex="0"></svg>
-<div class="sparkticks" id="sparkticks" aria-hidden="true"></div>
-<div class="charttip" id="charttip" aria-hidden="true"></div>
-<div class="sr-live" id="chartlive" role="status" aria-live="polite"></div>
-</div>
-</div>
-<div class="card hosttile" id="hostbar"></div>
-</div>
-<div class="sech">
-<div class="sech-top">
-<div class="lt">Clients <b id="csum"></b></div>
-<div class="menuwrap sech-more">
-<button class="ghost ibtn" id="morebtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="moremenu" data-tip="More actions" aria-label="More"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
-<div class="menudrop" id="moremenu" role="menu" hidden>
-<button class="menuitem" role="menuitem" type="button" data-act="split"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Split</button>
-<button class="menuitem" role="menuitem" type="button" data-act="usage"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/></svg>Usage</button>
-<button class="menuitem" role="menuitem" type="button" data-act="audit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>Log</button>
-<button class="menuitem" role="menuitem" type="button" data-act="export"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>Backup</button>
-</div>
-</div>
-</div>
-<div class="sech-controls">
-<input class="csearch" id="csearch" type="search" placeholder="Search clients…" autocomplete="off" spellcheck="false" aria-label="Search clients">
-<div class="exitfilt" id="exitfilt" role="group" aria-label="Filter by exit">
-<button type="button" class="xf on" data-xf="all" aria-pressed="true" data-act="exit-filter">All</button>
-<button type="button" class="xf" data-xf="nl" aria-pressed="false" data-act="exit-filter">NL</button>
-<button type="button" class="xf" data-xf="us" aria-pressed="false" data-act="exit-filter">US</button>
-</div>
-<div class="viewfilt" id="viewfilt" role="group" aria-label="Clients view">
-<button type="button" class="vf on" data-view="cards" aria-pressed="true" data-act="view" data-tip="Cards view" aria-label="Cards view" data-ic="grid"></button>
-<button type="button" class="vf" data-view="list" aria-pressed="false" data-act="view" data-tip="List view" aria-label="List view" data-ic="list"></button>
-</div>
-</div>
-</div>
-<div class="cards bento2" id="cards"></div>
-<footer><span id="upd">…</span><span>read-only status · writes via secure helper</span></footer>
-</div>
-<div class="mbg" id="mbg" data-act="modal-bg"><div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="mtitle" tabindex="-1"></div></div>
-<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
-<script src="/theme.js"></script>
-<script src="/app.js"></script>
-<script src="/cascade.js"></script>
-<script src="/clients.js"></script>
+<div class="ops" id="ops" role="status" aria-live="polite"></div>
+<div class="banners" id="banner"></div>
+<main class="main" id="main" tabindex="-1"><div class="view" id="view"></div></main>
+<nav class="tabbar" id="tabbar" aria-label="Sections"></nav>
+<div class="layer" id="layer"></div>
+<script src="/core.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/modals.js"></script>
+<script src="/pages.js"></script>
 </body></html>
