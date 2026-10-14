@@ -763,13 +763,19 @@ class TestServerPolicy(unittest.TestCase):
 
         self.patch("evaluate_auto_switch", evaluate)
         self.patch("time", types.SimpleNamespace(
-            time=time.time,
+            time=time.time, monotonic=time.monotonic,
             sleep=lambda seconds: (_ for _ in ()).throw(StopSampling()),
         ))
+        wgui._usage_refreshed.clear()
         with self.assertRaises(StopSampling):
             wgui._sampler()
+        # the sampler only signals; the quota decision runs in the control loop
+        self.assertNotIn("evaluate", events)
+        self.assertTrue(wgui._usage_refreshed.is_set())
+        wgui.control_tick({"next_expire": float("inf"), "next_maint": float("inf")})
         self.assertLess(events.index("exit-persist"), events.index("usage-refresh"))
         self.assertLess(events.index("usage-refresh"), events.index("evaluate"))
+        self.assertFalse(wgui._usage_refreshed.is_set())
 
     def test_sampler_persists_health_block_with_missing_exit_peer(self):
         calls = []
@@ -795,7 +801,7 @@ class TestServerPolicy(unittest.TestCase):
         self.patch("refresh_status_cache", lambda: None)
         self.patch("log_connections", lambda eps: None)
         self.patch("time", types.SimpleNamespace(
-            time=time.time,
+            time=time.time, monotonic=time.monotonic,
             sleep=lambda seconds: (_ for _ in ()).throw(StopSampling()),
         ))
         with wgui._lock:
@@ -803,6 +809,7 @@ class TestServerPolicy(unittest.TestCase):
             wgui._egress["us"].update(ok=False, seen=None, at=int(time.time()))
         with self.assertRaises(StopSampling):
             wgui._sampler()
+        wgui.control_tick({"next_expire": float("inf"), "next_maint": float("inf")})
         with wgui._lock:
             blocked = dict(wgui._policy_runtime["blocked"] or {})
             self.assertIsNone(wgui._exit_totals["us"])

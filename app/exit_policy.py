@@ -141,7 +141,7 @@ def next_health_state(prev, probe_ok, now):
     return st
 
 
-def evaluate_health(policy, usage, assignments, states, now, last_health_switch=None):
+def evaluate_health(policy, usage, assignments, states, now, last_health_switch=None, mono_now=None):
     """Decide a health failover: move clients off a confirmed-down exit onto a healthy one.
 
     states: {exit: next_health_state(...) result}. There is no automatic failback;
@@ -167,7 +167,10 @@ def evaluate_health(policy, usage, assignments, states, now, last_health_switch=
     if int(usage.get(target, 0)) >= policy["quota_bytes"][target]:
         result["blocked"] = {"code": "target_exhausted", "source": source, "target": target}
         return result
-    if last_health_switch and now - int(last_health_switch) < HEALTH_COOLDOWN:
+    # Cooldown is measured on the clock last_health_switch came from: monotonic in
+    # the server (mono_now), so a wall-clock jump cannot stretch or skip it.
+    clock = now if mono_now is None else mono_now
+    if last_health_switch and clock - last_health_switch < HEALTH_COOLDOWN:
         result["blocked"] = {"code": "failover_cooldown", "source": source, "target": target}
         return result
     result["action"] = {"source": source, "target": target, "reason": "health"}

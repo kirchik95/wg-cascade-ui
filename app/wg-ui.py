@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress
+import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -53,7 +53,11 @@ EXIT_POLICY = os.environ.get("WGUI_EXIT_POLICY", "/etc/wg-ui/exit-policy.json")
 SPLIT_STATE = os.environ.get("WGUI_SPLIT_STATE", "/etc/wg-ui/split-server.state")
 AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/log/wg-ui/audit.log")
 MAX_CONN    = int(os.environ.get("WGUI_MAX_CONN", "64"))
-_STARTED_AT = time.time()
+_STARTED_AT = time.monotonic()        # uptime/grace: monotonic, immune to wall-clock jumps
+CONTROL_S   = 60                       # expiry + quota auto-switch cadence (control loop)
+MAINT_S     = 3600                     # DB retention cadence
+if SAMPLE_S <= 0 or PROBE_S <= 0:
+    raise SystemExit("wg-ui: WGUI_SAMPLE_SECS and WGUI_PROBE_SECS must be positive")
 
 def log_event(event, **fields):
     """Structured JSON log line to stderr (picked up by journald under systemd)."""
@@ -69,7 +73,7 @@ def healthz():
     """Process liveness for deploy/monitoring — no auth, no secrets."""
     return {
         "ok": True,
-        "uptime_s": int(time.time() - _STARTED_AT),
+        "uptime_s": int(time.monotonic() - _STARTED_AT),
         "sampler": sampler_info(),
         "threads": {"max_conn": MAX_CONN},
     }
@@ -82,19 +86,23 @@ def readyz():
     alive, status snapshot built. A just-started process gets a grace period.
     """
     now = int(time.time())
-    up = now - int(_STARTED_AT)
+    mono = time.monotonic()
+    up = int(mono - _STARTED_AT)
     grace = up < 3 * max(SAMPLE_S, PROBE_S) + 15
     with _lock:
         collection = dict(_sampler_meta["collection"])
         persistence = dict(_sampler_meta["persistence"])
         loop_at = _health_runtime["loop_at"]
-        snap_ok = _status_snap is not None
+        snap_ok_at = _snap_meta["ok_mono"]
+        control_at = _control_meta["loop_mono"]
     sampler_age = now - collection["ok_at"] if collection.get("ok_at") else -1
     checks = {
         "sampler": 0 <= sampler_age <= 3 * SAMPLE_S + 10,
         "persistence": not persistence.get("err"),
         "health_loop": bool(loop_at) and now - loop_at <= 3 * PROBE_S + 30,
-        "status": snap_ok,
+        # a snapshot that stopped refreshing must not keep serving "all online / up"
+        "status": bool(snap_ok_at) and mono - snap_ok_at <= SNAP_STALE_S,
+        "control_loop": bool(control_at) and mono - control_at <= 3 * CONTROL_S,
     }
     ready = all(checks.values())
     return {"ready": ready or (grace and checks["persistence"]), "starting": grace and not ready,
@@ -227,7 +235,10 @@ _policy_lock = threading.Lock()
 _policy_runtime = {"blocked": None, "last_switch": None}
 _health = {key: {"state": "unknown", "fails": 0, "oks": 0, "since": 0, "at": 0}
            for key in exit_policy.EXITS}  # debounced per-exit health (exit_policy.next_health_state)
-_health_runtime = {"blocked": None, "last_switch_at": 0, "loop_at": 0}
+_health_runtime = {"blocked": None, "last_switch_at": 0, "loop_at": 0}  # last_switch_at: monotonic
+_snap_meta = {"ok_mono": 0.0, "err": None, "err_at": 0, "logged": None}
+_control_meta = {"loop_mono": 0.0, "expire_ok_at": 0, "expire_err": None, "maint_err": None}
+_usage_refreshed = threading.Event()   # sampler → control loop: month totals are fresh
 
 
 def load_exit_policy():
@@ -510,7 +521,8 @@ def evaluate_health_failover():
         with _lock:
             last = _health_runtime["last_switch_at"]
         now = int(time.time())
-        decision = exit_policy.evaluate_health(policy, usage, assignments, health_states(), now, last)
+        decision = exit_policy.evaluate_health(policy, usage, assignments, health_states(), now, last,
+                                               mono_now=time.monotonic())
         if decision["blocked"]:
             blocked = _set_health_block(decision["blocked"])
             return {"ok": False, **blocked}
@@ -521,7 +533,7 @@ def evaluate_health_failover():
         result = _guarded_exit_switch_locked(action["target"], "health", inputs)
         if result.get("ok"):
             with _lock:
-                _health_runtime["last_switch_at"] = now
+                _health_runtime["last_switch_at"] = time.monotonic()
             _set_health_block(None)
             log_event("exit_failover", source=action["source"], target=action["target"],
                       changed=result.get("changed", 0))
@@ -672,8 +684,56 @@ def sampler_info():
         "age": (int(time.time()) - collection["ok_at"]) if collection.get("ok_at") else -1,
     }
 
+SNAP_STALE_S = 3 * SAMPLE_S + 10
+
+def _next_slot(deadline, period, now):
+    """Next future slot on a fixed grid; skips missed slots instead of bursting."""
+    if now < deadline:
+        return deadline
+    return deadline + (int((now - deadline) // period) + 1) * period
+
+def _persist_usage(per):
+    """Write deltas and refresh month caches; on failure keep the old caches."""
+    try:
+        if per:
+            record_usage(per)
+        with _lock:
+            exit_totals = {key: value for key, value in _exit_totals.items() if value is not None}
+        if exit_totals:
+            record_exit_usage(exit_totals)
+        client_month = usage_month()
+        exit_month = exit_usage_month()
+    except Exception as exc:
+        _sampler_persistence_note(False, "usage persistence: %s" % exc)
+        return False
+    with _lock:
+        _month_usage.clear(); _month_usage.update(client_month)
+        _exit_month_usage.clear(); _exit_month_usage.update(exit_month)
+    _sampler_persistence_note(True)
+    _usage_refreshed.set()
+    return True
+
+def _refresh_snapshot():
+    try:
+        refresh_status_cache()
+    except Exception as exc:
+        msg = str(exc)[:200]
+        with _lock:
+            _snap_meta.update(err=msg, err_at=int(time.time()))
+            first = _snap_meta["logged"] != msg
+            _snap_meta["logged"] = msg
+        if first:                       # log each distinct failure once, not every 5 s
+            log_event("status_refresh", ok=False, error=msg)
+        return False
+    with _lock:
+        _snap_meta.update(ok_mono=time.monotonic(), err=None, logged=None)
+    return True
+
 def _sampler():
-    i = 0
+    """Collect every SAMPLE_S on a monotonic grid. Only collection and persistence
+    live here — helper calls (expiry, quota switch) run in the control loop, so a
+    slow helper can never stretch sampling or the status refresh."""
+    next_tick = next_persist = time.monotonic()
     while True:
         per = {}; eps = {}
         try:
@@ -699,31 +759,9 @@ def _sampler():
         if eps:
             try: log_connections(eps)
             except Exception: pass
-        if i % 12 == 0:                # persist usage every ~60s
-            exit_totals = {}
-            try:
-                if per:
-                    record_usage(per)
-                with _lock:
-                    exit_totals = {key: value for key, value in _exit_totals.items() if value is not None}
-                if exit_totals:
-                    record_exit_usage(exit_totals)
-                client_month = usage_month()
-                exit_month = exit_usage_month()
-                with _lock:
-                    _month_usage.clear(); _month_usage.update(client_month)
-                    _exit_month_usage.clear(); _exit_month_usage.update(exit_month)
-                _sampler_persistence_note(True)
-            except Exception as exc:
-                _sampler_persistence_note(False, "usage persistence: %s" % exc)
-            else:
-                try:
-                    evaluate_auto_switch()
-                except Exception as exc:
-                    log_event("exit_auto_switch", ok=False, error=str(exc)[:200])
-        if i and i % 720 == 0:         # auto-disable expired clients ~hourly
-            try: call_admin(["expire"])
-            except Exception: pass
+        if time.monotonic() >= next_persist:     # persist usage every ~60s
+            _persist_usage(per)
+            next_persist = _next_slot(next_persist, 60, time.monotonic())
         try:                           # entry-node CPU% from /proc/stat deltas
             idle, total = _read_cpu()
             with _lock:
@@ -734,12 +772,65 @@ def _sampler():
                 _host["prev"] = (idle, total)
         except Exception:
             pass
+        _refresh_snapshot()
+        next_tick = _next_slot(next_tick + SAMPLE_S, SAMPLE_S, time.monotonic())
+        time.sleep(max(0.0, next_tick - time.monotonic()))
+
+def run_expire():
+    """Disable expired clients; a helper failure is recorded, not mistaken for success."""
+    res = call_admin(["expire"])
+    with _lock:
+        if res.get("ok"):
+            _control_meta.update(expire_ok_at=int(time.time()), expire_err=None)
+        else:
+            _control_meta["expire_err"] = str(res.get("error") or "expire failed")[:200]
+    if not res.get("ok"):
+        log_event("expire", ok=False, error=_control_meta["expire_err"])
+    elif res.get("expired"):
+        log_event("expire", ok=True, expired=res.get("expired"))
+    return res
+
+def control_tick(state, mono=None):
+    """One control-loop step. state = {"next_expire", "next_maint"} (monotonic)."""
+    mono = time.monotonic() if mono is None else mono
+    if _usage_refreshed.is_set():
+        _usage_refreshed.clear()
         try:
-            refresh_status_cache()
-        except Exception:
-            pass
-        i += 1
-        time.sleep(SAMPLE_S)
+            evaluate_auto_switch()
+        except Exception as exc:
+            log_event("exit_auto_switch", ok=False, error=str(exc)[:200])
+    if mono >= state["next_expire"]:
+        try:
+            ok_ = run_expire().get("ok")
+        except Exception as exc:
+            ok_ = False
+            log_event("expire", ok=False, error=str(exc)[:200])
+        # retry a failed expiry sooner than the regular cadence
+        state["next_expire"] = mono + (CONTROL_S if ok_ else 15)
+    if mono >= state["next_maint"]:
+        try:
+            db_maintenance(load_registry())
+            with _lock:
+                _control_meta["maint_err"] = None
+        except Exception as exc:
+            with _lock:
+                _control_meta["maint_err"] = str(exc)[:200]
+            log_event("db_maintenance", ok=False, error=str(exc)[:200])
+        state["next_maint"] = _next_slot(state["next_maint"], MAINT_S, mono)
+    with _lock:
+        _control_meta["loop_mono"] = time.monotonic()
+
+def _control_loop():
+    """Expiry (immediately at start, then every CONTROL_S), quota auto-switch after
+    each usage refresh, and hourly DB retention — all off the sampling path."""
+    now = time.monotonic()
+    state = {"next_expire": now, "next_maint": now + 300}
+    while True:
+        try:
+            control_tick(state)
+        except Exception as exc:
+            log_event("control_tick", ok=False, error=str(exc)[:200])
+        _usage_refreshed.wait(timeout=max(1.0, min(state["next_expire"], state["next_maint"]) - time.monotonic()))
 
 def health_tick():
     """One health round: probe both exits, fold results, then consider a failover."""
@@ -833,13 +924,18 @@ def tunnel(clients=None):
             clients = load_registry()
         except Exception:
             clients = []
+    return dict(_tunnel_state(exits, clients), exits=exits)
+
+def _tunnel_state(exits, clients):
+    """state + affected_clients from exit health and client assignments (also used
+    to re-derive the state of an aged snapshot). Annotates exits in place."""
     affected = _affected_clients(exits, clients)
     for key, n in affected.items():
         exits[key]["affected_clients"] = n
     total_affected = sum(affected.values())
     enabled = sum(1 for c in clients if c.get("enabled", True))
-    any_ok = any(e["ok"] for e in exits.values())
-    any_wg = any(e["wg_up"] for e in exits.values())
+    any_ok = any(e.get("ok") for e in exits.values())
+    any_wg = any(e.get("wg_up") for e in exits.values())
     if not any_ok:
         state = "degraded" if any_wg else "down"
     elif total_affected and total_affected >= enabled:
@@ -848,7 +944,7 @@ def tunnel(clients=None):
         state = "degraded"
     else:
         state = "up"
-    return {"state": state, "exits": exits, "affected_clients": total_affected}
+    return {"state": state, "affected_clients": total_affected}
 
 def rud_on():
     try:
@@ -867,21 +963,35 @@ def refresh_status_cache():
             "exit_policy": exit_policy_status(tunnel_data, peers)}
     with _lock:
         _status_snap = snap
-    return json.loads(json.dumps(snap))
+    return snap
 
 def _age_snapshot(snap, now):
     """Advance time-relative fields of a cached snapshot to `now`, so a stalled
-    sampler shows growing ages and expired exit checks instead of frozen 'ok'."""
+    sampler shows growing ages, offline peers and expired exit checks instead of a
+    frozen 'all online / up'. snapshot_age/stale tell the UI how old the data is."""
     drift = max(0, now - int(snap.get("now", now)))
+    snap["snapshot_age"] = drift
+    snap["stale"] = drift > SNAP_STALE_S
     snap["now"] = now
     snap["sampler"] = sampler_info()
     if not drift:
         return snap
-    for e in ((snap.get("tunnel") or {}).get("exits") or {}).values():
+    for p in snap.get("peers") or []:
+        if isinstance(p, dict) and p.get("age", -1) >= 0:
+            p["age"] += drift
+            p["online"] = bool(p.get("enabled", True) and p["age"] < ONLINE_S)
+    tun = snap.get("tunnel") or {}
+    for e in (tun.get("exits") or {}).values():
+        if isinstance(e, dict) and e.get("wg_age", -1) >= 0:
+            e["wg_age"] += drift
         if isinstance(e, dict) and e.get("checked_age", -1) >= 0:
             e["checked_age"] += drift
             if e["checked_age"] > exit_policy.HEALTH_MAX_AGE:
                 e["ok"] = False
+    if tun.get("exits"):
+        tun.update(_tunnel_state(tun["exits"], snap.get("peers") or []))
+    if snap["stale"] and tun:
+        tun["state"] = "unknown"        # don't present old data as a verdict
     for e in (((snap.get("exit_policy") or {}).get("exits")) or {}).values():
         if isinstance(e, dict) and e.get("checked_age", -1) >= 0:
             e["checked_age"] += drift
@@ -893,7 +1003,7 @@ def status():
     with _lock:
         snap = _status_snap
     if snap is None:
-        return refresh_status_cache()
+        snap = refresh_status_cache()
     return _age_snapshot(json.loads(json.dumps(snap)), int(time.time()))
 
 def call_admin(argv, timeout=30):
@@ -905,10 +1015,32 @@ def call_admin(argv, timeout=30):
         return {"ok": False, "error": "helper call failed: %s" % e}
 
 # -------------------------------------------------------- persistent history (SQLite)
+USAGE_RETENTION_DAYS = int(os.environ.get("WGUI_USAGE_RETENTION_DAYS", "400"))  # ~13 months
+CONN_KEEP = 40                                   # connection events kept per client
+
 def _conn():
     c = sqlite3.connect(DB, timeout=5)
     c.row_factory = sqlite3.Row
     return c
+
+@contextlib.contextmanager
+def _db(write=False):
+    """One connection per unit of work: commit on success, roll back on error,
+    and always close — a failed writer must not hold the WAL write lock until GC."""
+    c = _conn()
+    try:
+        if write:
+            c.execute("BEGIN IMMEDIATE")
+        yield c
+        if write:
+            c.commit()
+    except BaseException:
+        if write:
+            try: c.rollback()
+            except sqlite3.Error: pass
+        raise
+    finally:
+        c.close()
 
 def db_init():
     try:
@@ -923,43 +1055,60 @@ def db_init():
         c.execute("CREATE TABLE IF NOT EXISTS schema_meta(key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS connections(pubkey TEXT, ts INTEGER, endpoint TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_conn ON connections(pubkey, ts)")
-        c.commit(); c.close()
-    except Exception:
-        pass
+        # Month/daily aggregates filter on day across all clients; the (pubkey, day)
+        # PK cannot serve that, so without this index they scan the whole history.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_usage_day ON usage(day)")
+        c.commit()
+        c.execute("PRAGMA optimize")
+        c.close()
+    except Exception as exc:
+        log_event("db_init", ok=False, error=str(exc)[:200])
 
 _conn_prev = {}   # pubkey -> (online_bool, endpoint_ip) for connection-event detection
 
 def log_connections(eps):
-    """eps = {pubkey: (endpoint, handshake_ts)}; record a row on offline->online or roam (IP change)."""
+    """eps = {pubkey: (endpoint, handshake_ts)}; record a row on offline->online or roam (IP change).
+
+    The previous state of a client with an event is advanced only after the row is
+    committed, so a transient DB error retries the event next tick instead of losing it.
+    """
     now = int(time.time())
-    rows = []
+    rows, nxt = [], {}
     for pub, (ep, hs) in eps.items():
         online = bool(hs and (now - hs) < ONLINE_S)
         ipp = ep.rsplit(":", 1)[0] if ep else ""
         prev = _conn_prev.get(pub)
+        nxt[pub] = (online, ipp)
         if online and ep and prev is not None and (prev[0] is False or prev[1] != ipp):
             rows.append((pub, now, ep))
-        _conn_prev[pub] = (online, ipp)
-    if rows:
-        try:
-            c = _conn()
+    event_pubs = {r[0] for r in rows}
+    for pub, state in nxt.items():
+        if pub not in event_pubs:
+            _conn_prev[pub] = state
+    for pub in list(_conn_prev):       # drop clients that left (no unbounded growth on churn)
+        if pub not in nxt:
+            del _conn_prev[pub]
+    if not rows:
+        return
+    try:
+        with _db(write=True) as c:
             c.executemany("INSERT INTO connections(pubkey, ts, endpoint) VALUES(?,?,?)", rows)
-            for pub, _, _ in rows:        # keep last 40 per client
-                c.execute("DELETE FROM connections WHERE pubkey=? AND ts NOT IN "
-                          "(SELECT ts FROM connections WHERE pubkey=? ORDER BY ts DESC LIMIT 40)", (pub, pub))
-            c.commit(); c.close()
-        except Exception:
-            pass
+            for pub in event_pubs:     # keep the newest CONN_KEEP rows per client (rowid = strict cap)
+                c.execute("DELETE FROM connections WHERE pubkey=? AND rowid NOT IN "
+                          "(SELECT rowid FROM connections WHERE pubkey=? ORDER BY ts DESC, rowid DESC LIMIT ?)",
+                          (pub, pub, CONN_KEEP))
+    except sqlite3.Error as exc:
+        _sampler_persistence_note(False, "connection log: %s" % exc)
+        return
+    for pub in event_pubs:
+        _conn_prev[pub] = nxt[pub]
 
 def connections_for(pub, limit=20):
-    try:
-        c = _conn()
+    """Raises sqlite3.Error on failure — callers report 'unavailable', not 'no data'."""
+    with _db() as c:
         rows = c.execute("SELECT ts, endpoint FROM connections WHERE pubkey=? ORDER BY ts DESC LIMIT ?",
                          (pub, limit)).fetchall()
-        c.close()
-        return [{"ts": r["ts"], "endpoint": r["endpoint"]} for r in rows]
-    except Exception:
-        return []
+    return [{"ts": r["ts"], "endpoint": r["endpoint"]} for r in rows]
 
 def audit_tail(limit=50):
     """Read the last `limit` JSON lines without loading the whole file into memory."""
@@ -982,7 +1131,10 @@ def audit_tail(limit=50):
 def record_usage(cur):
     """cur = {pubkey: (rx_total, tx_total)} cumulative; accumulate deltas into daily buckets,
     handling wg counter resets (current < previous => peer re-added / iface restarted)."""
-    c = _conn()
+    with _db(write=True) as c:
+        _record_usage(c, cur)
+
+def _record_usage(c, cur):
     prev = {r["pubkey"]: (r["rx"], r["tx"]) for r in c.execute("SELECT pubkey, rx, tx FROM counters")}
     today = time.strftime("%Y-%m-%d")
     for pub, (rx, tx) in cur.items():
@@ -999,10 +1151,12 @@ def record_usage(cur):
                       (pub, today, drx, dtx, drx, dtx))
         c.execute("INSERT INTO counters(pubkey, rx, tx) VALUES(?,?,?) "
                   "ON CONFLICT(pubkey) DO UPDATE SET rx=?, tx=?", (pub, rx, tx, rx, tx))
-    c.commit(); c.close()
 
 def record_exit_usage(cur, day=None):
-    c = _conn()
+    with _db(write=True) as c:
+        _record_exit_usage(c, cur, day)
+
+def _record_exit_usage(c, cur, day=None):
     previous = {r["exit"]: (r["rx"], r["tx"])
                 for r in c.execute("SELECT exit,rx,tx FROM exit_counters")}
     day = day or time.strftime("%Y-%m-%d")
@@ -1023,7 +1177,6 @@ def record_exit_usage(cur, day=None):
         c.execute("INSERT INTO exit_counters(exit,rx,tx) VALUES(?,?,?) "
                   "ON CONFLICT(exit) DO UPDATE SET rx=?,tx=?",
                   (key, rx, tx, rx, tx))
-    c.commit(); c.close()
 
 
 def _month_bounds(now=None, month=None):
@@ -1044,10 +1197,9 @@ def _month_bounds(now=None, month=None):
 def exit_usage_month(now=None):
     month, next_month = _month_bounds(now=now)
     out = {key: {"rx": 0, "tx": 0} for key in exit_policy.EXITS}
-    c = _conn()
-    rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
-                     "WHERE day>=? AND day<? GROUP BY exit", (month, next_month)).fetchall()
-    c.close()
+    with _db() as c:
+        rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
+                         "WHERE day>=? AND day<? GROUP BY exit", (month, next_month)).fetchall()
     for row in rows:
         if row["exit"] in out:
             out[row["exit"]] = {"rx": row["rx"] or 0, "tx": row["tx"] or 0}
@@ -1104,35 +1256,49 @@ def seed_exit_usage_from_registry(month=None):
         c.close()
 
 
-def usage_month():
-    try:
-        c = _conn(); m = time.strftime("%Y-%m-01")
-        rows = c.execute("SELECT pubkey, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? GROUP BY pubkey",
-                         (m,)).fetchall()
-        c.close()
-        return {r["pubkey"]: {"rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows}
-    except Exception:
-        return {}
+# The read helpers below raise sqlite3.Error instead of returning empty data:
+# "the DB failed" must not look like "no traffic" (or zero the cached month totals).
+def usage_month(now=None):
+    month, next_month = _month_bounds(now=now)
+    with _db() as c:
+        rows = c.execute("SELECT pubkey, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? AND day<? "
+                         "GROUP BY pubkey", (month, next_month)).fetchall()
+    return {r["pubkey"]: {"rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows}
 
 def usage_daily(days=30):
-    try:
-        c = _conn()
-        rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage GROUP BY day "
-                         "ORDER BY day DESC LIMIT ?", (days,)).fetchall()
-        c.close()
-        return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in reversed(rows)]
-    except Exception:
-        return []
+    """Totals for the last `days` days that have data (index range scan on day)."""
+    with _db() as c:
+        cutoff = c.execute("SELECT day FROM (SELECT DISTINCT day FROM usage ORDER BY day DESC LIMIT ?) "
+                           "ORDER BY day LIMIT 1", (days,)).fetchone()
+        if not cutoff:
+            return []
+        rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? GROUP BY day "
+                         "ORDER BY day", (cutoff["day"],)).fetchall()
+    return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows]
 
 def usage_daily_for(pub, days=30):
-    try:
-        c = _conn()
+    with _db() as c:
         rows = c.execute("SELECT day, rx, tx FROM usage WHERE pubkey=? "
                          "ORDER BY day DESC LIMIT ?", (pub, days)).fetchall()
-        c.close()
-        return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in reversed(rows)]
-    except Exception:
-        return []
+    return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in reversed(rows)]
+
+def db_maintenance(registry=None, now=None):
+    """Retention: drop daily usage older than USAGE_RETENTION_DAYS (exit_usage too),
+    and counters/connections of clients no longer in the registry. Cheap; run hourly."""
+    stamp = time.time() if now is None else now
+    cutoff = time.strftime("%Y-%m-%d", time.localtime(stamp - USAGE_RETENTION_DAYS * 86400))
+    keep = None
+    if registry is not None:
+        keep = [c.get("pubkey") for c in registry if c.get("pubkey")]
+    with _db(write=True) as c:
+        c.execute("DELETE FROM usage WHERE day<?", (cutoff,))
+        c.execute("DELETE FROM exit_usage WHERE day<?", (cutoff,))
+        if keep:
+            marks = ",".join("?" * len(keep))
+            c.execute("DELETE FROM counters WHERE pubkey NOT IN (%s)" % marks, keep)
+            c.execute("DELETE FROM connections WHERE pubkey NOT IN (%s)" % marks, keep)
+    with _db() as c:
+        c.execute("PRAGMA optimize")
 
 # ----------------------------------------------------------------------- views
 
@@ -1262,20 +1428,27 @@ class H(BaseHTTPRequestHandler):
                     return self._json(500, {"error": str(e)})
             if path.startswith("/api/history"):
                 pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
-                if pub:   # per-client daily series (config modal chart)
-                    return self._json(200, {"daily": usage_daily_for(pub, 30)})
-                reg = load_registry()
-                names = {c["pubkey"]: c["name"] for c in reg}
-                mu = usage_month()
+                try:
+                    if pub:   # per-client daily series (config modal chart)
+                        return self._json(200, {"daily": usage_daily_for(pub, 30)})
+                    reg = load_registry()
+                    names = {c["pubkey"]: c["name"] for c in reg}
+                    mu = usage_month()
+                    daily = usage_daily(30)
+                except sqlite3.Error as e:
+                    return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
                 cl = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
                              for k, v in mu.items()], key=lambda x: -(x["rx"] + x["tx"]))
                 return self._json(200, {"month": time.strftime("%Y-%m"),
-                                        "daily": usage_daily(30), "clients": cl})
+                                        "daily": daily, "clients": cl})
             if path.startswith("/api/audit"):
                 return self._json(200, {"events": audit_tail(60)})
             if path.startswith("/api/connections"):
                 pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
-                return self._json(200, {"connections": connections_for(pub) if pub else []})
+                try:
+                    return self._json(200, {"connections": connections_for(pub) if pub else []})
+                except sqlite3.Error as e:
+                    return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
             return self._json(404, {"error": "not found"})
         if not user:
             return self._send(303, b"", None, {"Location": "/login"})
@@ -1461,6 +1634,7 @@ def main():
     seed_exit_usage_from_registry()
     threading.Thread(target=_sampler, daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
+    threading.Thread(target=_control_loop, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(CERT, KEY)

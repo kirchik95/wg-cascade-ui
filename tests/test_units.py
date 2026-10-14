@@ -434,7 +434,7 @@ class TestStatusCache(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].args[0][2], "/usr/bin/wg")
 
     def test_status_serves_snapshot(self):
-        snap = {"now": 1, "tunnel": {"state": "up"}, "host": None,
+        snap = {"now": int(time.time()), "tunnel": {"state": "up"}, "host": None,
                 "rud": False, "peers": [], "thr": {"series": [], "cur": {"down": 0, "up": 0}}}
         with wgui._lock:
             wgui._status_snap = snap

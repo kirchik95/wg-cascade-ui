@@ -239,6 +239,18 @@ class TestStatusSemantics(ServerCase):
             wgui._egress["nl"]["at"] = int(time.time()) - exit_policy.HEALTH_MAX_AGE - 1
         self.assertFalse(wgui.tunnel([])["exits"]["nl"]["ok"])
 
+    def test_aged_snapshot_marks_peers_offline_and_recomputes_state(self):
+        snap = {"now": 1000,
+                "peers": [{"enabled": True, "exit": "nl", "age": 10, "online": True}],
+                "tunnel": {"state": "up", "exits": {
+                    "nl": {"ok": True, "wg_up": True, "wg_age": 5, "checked_age": 5},
+                    "us": {"ok": True, "wg_up": True, "wg_age": 5, "checked_age": 5}}}}
+        out = wgui._age_snapshot(snap, 1000 + 600)
+        self.assertTrue(out["stale"])
+        self.assertEqual(out["snapshot_age"], 600)
+        self.assertFalse(out["peers"][0]["online"])
+        self.assertEqual(out["tunnel"]["state"], "unknown")
+
     def test_cached_snapshot_ages_on_read(self):
         snap = {"now": 1000, "tunnel": {"exits": {"nl": {"ok": True, "checked_age": 5}}},
                 "exit_policy": {"exits": {"nl": {"healthy": True, "checked_age": 5}}}}
@@ -248,28 +260,65 @@ class TestStatusSemantics(ServerCase):
         self.assertEqual(out["now"], 1000 + exit_policy.HEALTH_MAX_AGE)
 
 
+class TestScheduling(ServerCase):
+    def test_next_slot_skips_missed_periods_without_burst(self):
+        self.assertEqual(wgui._next_slot(100, 60, 50), 100)
+        self.assertEqual(wgui._next_slot(100, 60, 100), 160)
+        self.assertEqual(wgui._next_slot(100, 60, 400), 460)    # 5 missed slots → one run
+
+    def test_control_tick_runs_expiry_and_retries_failure_sooner(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": False, "error": "busy"})
+        self.patch("db_maintenance", lambda reg: None)
+        self.patch("load_registry", lambda: [])
+        state = {"next_expire": 0, "next_maint": float("inf")}
+        wgui.control_tick(state, mono=1000)
+        self.assertEqual(calls, [["expire"]])
+        self.assertEqual(state["next_expire"], 1015)            # failed → retry in 15 s
+        self.assertEqual(wgui._control_meta["expire_err"], "busy")
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True, "expired": []})
+        wgui.control_tick(state, mono=1015)
+        self.assertEqual(state["next_expire"], 1015 + wgui.CONTROL_S)
+        self.assertIsNone(wgui._control_meta["expire_err"])
+
+    def test_health_cooldown_uses_monotonic_clock(self):
+        policy = exit_policy.policy_from_gib(False, 500, 500)
+        st = states(us="down")
+        # wall clock jumped back an hour; monotonic says 400 s since the switch
+        d = exit_policy.evaluate_health(policy, {"nl": 0, "us": 0}, {"nl": 0, "us": 3}, st,
+                                        int(time.time()) - 3600, last_health_switch=100, mono_now=500)
+        self.assertEqual(d["action"]["target"], "nl")
+
+
 class TestReadyz(ServerCase):
     def setUp(self):
         super().setUp()
         with wgui._lock:
             self.saved_meta = {k: dict(v) for k, v in wgui._sampler_meta.items()}
             self.saved_snap = wgui._status_snap
+            self.saved_snapmeta = dict(wgui._snap_meta)
+            self.saved_control = dict(wgui._control_meta)
         def restore():
             with wgui._lock:
                 for k, v in self.saved_meta.items():
                     wgui._sampler_meta[k].clear()
                     wgui._sampler_meta[k].update(v)
                 wgui._status_snap = self.saved_snap
+                wgui._snap_meta.clear(); wgui._snap_meta.update(self.saved_snapmeta)
+                wgui._control_meta.clear(); wgui._control_meta.update(self.saved_control)
         self.addCleanup(restore)
-        self.patch("_STARTED_AT", time.time() - 3600)
+        self.patch("_STARTED_AT", time.monotonic() - 3600)
 
-    def set_ready(self, sampler_age=1, loop_age=1, persist_err=None):
+    def set_ready(self, sampler_age=1, loop_age=1, persist_err=None, snap_age=1, control_age=1):
         now = int(time.time())
+        mono = time.monotonic()
         with wgui._lock:
             wgui._sampler_meta["collection"].update(ok_at=now - sampler_age, err=None)
             wgui._sampler_meta["persistence"].update(err=persist_err)
             wgui._health_runtime["loop_at"] = now - loop_age
             wgui._status_snap = {"now": now}
+            wgui._snap_meta["ok_mono"] = mono - snap_age
+            wgui._control_meta["loop_mono"] = mono - control_age
 
     def test_ready_ignores_exit_outage(self):
         self.set_ready()
@@ -283,9 +332,13 @@ class TestReadyz(ServerCase):
         self.assertFalse(wgui.readyz()["ready"])
         self.set_ready(persist_err="disk full")
         self.assertFalse(wgui.readyz()["ready"])
+        self.set_ready(snap_age=600)            # snapshot stopped refreshing
+        self.assertFalse(wgui.readyz()["ready"])
+        self.set_ready(control_age=600)         # control loop (expiry/quota) wedged
+        self.assertFalse(wgui.readyz()["ready"])
 
     def test_startup_grace(self):
-        self.patch("_STARTED_AT", time.time())
+        self.patch("_STARTED_AT", time.monotonic())
         with wgui._lock:
             wgui._sampler_meta["collection"].update(ok_at=0)
             wgui._sampler_meta["persistence"].update(err=None)
