@@ -78,12 +78,14 @@ From your workstation (has the repo):
 ```sh
 git clone git@github.com:kirchik95/wg-cascade-ui.git
 cd wg-cascade-ui
-WGUI_HOST=root@$IP ./deploy.sh          # scp app/* → /opt/wg-ui, chmod +x, (re)start
+WGUI_HOST=root@$IP ./deploy.sh          # stage → lock → config → swap → readiness, rollback on failure
 ```
 
-`deploy.sh` also restarts the service and health-checks it — but the service unit,
-env, cert and sudoers below don't exist yet on a first run, so on the very first
-deploy just copy the files and continue:
+`deploy.sh` stages the release, installs changed sudoers/units, swaps the code in
+(root-owned), and waits for `/login` + `/readyz` before declaring success — any
+failure restores the previous release and config (see `deploy/remote-activate.sh`).
+On a first run the env and cert below don't exist yet, so the service can't become
+ready; for the very first deploy just copy the files and continue:
 
 ```sh
 scp app/* root@$IP:/opt/wg-ui/ && ssh root@$IP 'chmod 755 /opt/wg-ui/*.py /opt/wg-ui/*.sh'
@@ -153,18 +155,17 @@ See `deploy/wg-ui.env.example` for every tunable and its default.
 
 ## 7. sudoers — the security boundary
 
-The web service runs as `wgui` and can do exactly three privileged things: read the
-two `wg` dumps, and invoke the root helper. Nothing else.
+The web service runs as `wgui` and can do exactly two kinds of privileged things:
+read the tunnel dumps (`wg show … dump`, or `awg show … dump` for AmneziaWG exit
+legs), and invoke the root helper. Nothing else.
+
+The rules live in [`deploy/sudoers.wgui`](../deploy/sudoers.wgui); `deploy.sh`
+installs them to `/etc/sudoers.d/wg-ui` (mode 0440) whenever they change, and only
+after `visudo -cf` accepts them. On a first install, before the first deploy:
 
 ```sh
-cat > /etc/sudoers.d/wg-ui <<'EOF'
-wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-cl dump
-wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-do dump
-wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-us dump
-wgui ALL=(root) NOPASSWD: /usr/bin/python3 /opt/wg-ui/wg-admin.py *
-EOF
-chmod 440 /etc/sudoers.d/wg-ui
-visudo -c -f /etc/sudoers.d/wg-ui        # must print "parsed OK"
+scp deploy/sudoers.wgui root@$IP:/etc/sudoers.d/wg-ui
+ssh root@$IP 'chmod 440 /etc/sudoers.d/wg-ui && visudo -c -f /etc/sudoers.d/wg-ui'   # "parsed OK"
 ```
 
 `wg-admin.py` (root, 755, in `/opt/wg-ui`) is what actually mutates WireGuard — it

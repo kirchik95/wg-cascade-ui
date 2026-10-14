@@ -1,0 +1,33 @@
+# Entry node: /etc/amnezia/amneziawg/wg-do.conf — entry → NL exit (AmneziaWG).
+# Template only: deploy.sh never installs it. Keys, endpoint and the obfuscation
+# values are placeholders; Jc..H4 MUST match the exit's awg0.conf exactly.
+# Brought up by `awg-quick@wg-do` (systemctl enable --now awg-quick@wg-do).
+[Interface]
+Address = 10.21.0.2/24
+PrivateKey = <entry-nl-private-key>
+Table = off
+Jc = 5
+Jmin = 40
+Jmax = 70
+S1 = <15..150>
+S2 = <15..150, and S1 + 56 != S2>
+H1 = <random uint32 > 4>
+H2 = <random uint32 > 4, distinct>
+H3 = <random uint32 > 4, distinct>
+H4 = <random uint32 > 4, distinct>
+# Default cascade path for client traffic. The rule priority is pinned: without
+# it, restarting this tunnel re-adds the rule ABOVE the split (fwmark 0x64, pri
+# 1000) and US (fwmark 0x65, pri 1100) rules and silently overrides both.
+PostUp = ip rule add from 10.10.0.0/24 lookup 200 priority 32765
+PostUp = ip route add default dev wg-do table 200
+PostUp = iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o wg-do -j MASQUERADE
+PostDown = ip rule del from 10.10.0.0/24 lookup 200 priority 32765
+PostDown = ip route del default dev wg-do table 200
+PostDown = iptables -t nat -D POSTROUTING -s 10.10.0.0/24 -o wg-do -j MASQUERADE
+
+[Peer]
+# NL exit node (AmneziaWG)
+PublicKey = <nl-exit-public-key>
+Endpoint = 198.51.100.10:<exit-listen-port>
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
