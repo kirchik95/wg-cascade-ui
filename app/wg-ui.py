@@ -1053,9 +1053,10 @@ def throughput():
         dt = b[0] - a[0]
         if dt <= 0:
             continue
+        # Client point of view: what the entry sends to clients (peer tx) is their download.
         series.append({"t": b[0],
-                       "down": max(0, b[1] - a[1]) // dt,
-                       "up": max(0, b[2] - a[2]) // dt})
+                       "down": max(0, b[2] - a[2]) // dt,
+                       "up": max(0, b[1] - a[1]) // dt})
     cur = series[-1] if series else {"down": 0, "up": 0}
     return {"series": series[-60:], "cur": cur}
 

@@ -52,6 +52,15 @@ def quiet_exit(fn, *a):
     return False
 
 
+class TestThroughputDirection(unittest.TestCase):
+    def test_down_is_what_clients_receive(self):
+        # samples are (t, total peer rx, total peer tx): peer tx = bytes sent to clients = their download
+        with mock.patch.object(wgui, "_samples", [(0, 0, 0), (10, 100, 5000)]):
+            cur = wgui.throughput()["cur"]
+        self.assertEqual(cur["down"], 500)
+        self.assertEqual(cur["up"], 10)
+
+
 class TestAdminValidation(unittest.TestCase):
     def test_name_re(self):
         ok = ["iphone", "a", "Client_1", "x" * 32, "mac-book", "0led"]
