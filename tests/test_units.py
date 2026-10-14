@@ -404,6 +404,15 @@ class TestStatusCache(unittest.TestCase):
         finally:
             wgui._dump = orig
 
+    def test_dump_uses_awg_for_amneziawg_ifaces(self):
+        done = mock.Mock(returncode=0, stdout="line\n", stderr="")
+        with mock.patch.object(wgui, "AWG_IFACES", {"wg-do"}), \
+             mock.patch.object(wgui.subprocess, "run", return_value=done) as run:
+            wgui._dump("wg-do")
+            wgui._dump("wg-cl")
+        self.assertEqual(run.call_args_list[0].args[0][2], "/usr/bin/awg")
+        self.assertEqual(run.call_args_list[1].args[0][2], "/usr/bin/wg")
+
     def test_status_serves_snapshot(self):
         snap = {"now": 1, "tunnel": {"state": "up"}, "host": None,
                 "rud": False, "peers": [], "thr": {"series": [], "cur": {"down": 0, "up": 0}}}

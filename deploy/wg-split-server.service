@@ -1,6 +1,6 @@
 [Unit]
 Description=Cascade server-side split-tunnel (RU direct) — re-applies state on boot
-After=wg-quick@wg-cl.service wg-quick@wg-do.service network-online.target
+After=wg-quick@wg-cl.service wg-quick@wg-do.service awg-quick@wg-do.service network-online.target
 Wants=network-online.target
 Requires=wg-quick@wg-cl.service
 

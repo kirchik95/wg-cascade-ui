@@ -520,6 +520,9 @@ def op_export():
                   CLIENTS_JSON, SPLIT_EXTRA, EXIT_POLICY):
             if os.path.exists(p):
                 tar.add(p, arcname=os.path.basename(p))
+        for p in ("/etc/amnezia/amneziawg/wg-do.conf", "/etc/amnezia/amneziawg/wg-us.conf"):
+            if os.path.exists(p):
+                tar.add(p, arcname="awg-" + os.path.basename(p))
         if os.path.isdir(CLIENT_DIR):
             tar.add(CLIENT_DIR, arcname="clients")
     audit("export", "backup downloaded")

@@ -1,6 +1,6 @@
 [Unit]
 Description=Cascade per-client exit routing (NL default / US via mark) — re-applies on boot
-After=wg-quick@wg-cl.service wg-quick@wg-do.service wg-quick@wg-us.service network-online.target
+After=wg-quick@wg-cl.service wg-quick@wg-do.service awg-quick@wg-do.service wg-quick@wg-us.service awg-quick@wg-us.service network-online.target
 Wants=network-online.target
 Requires=wg-quick@wg-cl.service
 
