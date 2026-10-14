@@ -13,6 +13,11 @@ function renderAlert(t){
  const key=t.state+'|'+!!nl.ok+'|'+!!us.ok+'|'+affected+'|'+LANG;
  if(el.__k===key)return;
  el.__k=key;
+ if(t.state==='unknown'){
+  el.className='alert warn';
+  el.innerHTML=ic('warn',17)+'<div><b>'+tr('Cascade status unknown')+'</b> <span>'+tr('The server has not refreshed status recently — values below are old.')+'</span></div>';
+  applyI18n(el);return;
+ }
  const bad=t.state==='down';
  el.className='alert '+(bad?'bad':'warn');
  const failing=['nl','us'].filter(k=>(+exitOf(t,k).affected_clients||0)>0).map(k=>k.toUpperCase()).join(', ');

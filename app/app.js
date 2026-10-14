@@ -326,7 +326,7 @@ const RU={
  "e.g. iphone, laptop":"напр. iphone, laptop",
  "VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)":"Входная нода VDSina — потолок производительности каскада (1 vCPU, двойное шифрование)",
  "Sampler error":"Ошибка сэмплера","live peer data may lag":"данные по пирам могут отставать",
- "Status sampler stale":"Сэмплер статуса устарел",
+ "Status sampler stale":"Сэмплер статуса устарел","Cascade status unknown":"Состояние каскада неизвестно","The server has not refreshed status recently — values below are old.":"Сервер давно не обновлял статус — значения ниже устарели.",
  "↓ down · ↑ up":"↓ приём · ↑ передача","/day":"/день",
  "Split-tunnel: RU & local IPs go direct, the rest via the cascade. Large config — import the .conf file (too big for QR), then re-import to apply.":"Сплит-туннель: РФ и локальные IP — напрямую, остальное через каскад. Большой конфиг — импортируйте <b>.conf файл</b> (слишком большой для QR), затем переимпортируйте.",
  "ON — RU exits via VDSina (RU IP); the rest via the cascade (NL)":"ВКЛ — РФ выходит через VDSina (РФ IP); остальное через каскад (NL)",
