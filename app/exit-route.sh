@@ -17,6 +17,14 @@ TABLE=65
 PRI=1100
 COMMENT="wgui-exit-us"
 SUBNET="10.10.0.0/24"
+# RPDB contract shared with split-server.sh and the wg-do tunnel config:
+#   1000  fwmark 0x64 → main        RU-direct (split-server.sh)
+#   1100  fwmark 0x65 → table 65    US exit (this script)
+#   32765 from $SUBNET → table 200  NL cascade (wg-do PostUp)
+# No other rule may sit below 1100 and steer client traffic first.
+SPLIT_MARK="0x64"
+NL_TABLE=200
+NL_PRI=32765
 
 us_ips() {
     python3 - "$CLIENTS_JSON" <<'PY'
@@ -179,6 +187,82 @@ us_default_route_present() {
     ' <<< "$routes"
 }
 
+rpdb_problems() {
+    # Print every RPDB rule that breaks the contract above (one per line).
+    local rules
+    rules=$(ip -N rule show) || return 2
+    awk -v us_pri="$PRI" -v split_mark="$SPLIT_MARK" -v subnet="$SUBNET" \
+        -v nl_table="$NL_TABLE" -v nl_pri="$NL_PRI" '
+        {
+            pri = $1
+            sub(/:$/, "", pri)
+            pri += 0
+            if (pri == 0)
+                next
+            mark = ""
+            for (i = 2; i < NF; i++)
+                if ($i == "fwmark") {
+                    mark = $(i + 1)
+                    sub(/\/0xffffffff$/, "", mark)
+                }
+            if (mark != "" && $2 != "not") {
+                # Marked packets only: harmless unless split lands behind US.
+                if (mark == split_mark && pri >= us_pri)
+                    print "split rule must precede the US rule: " $0
+                next
+            }
+            if (pri < us_pri)
+                print "rule ahead of exit marks captures client traffic: " $0
+            else if ($2 == "from" && $3 == subnet && ($4 == "lookup" || $4 == "table") &&
+                     $5 == nl_table && pri != nl_pri)
+                print "NL cascade rule expected at priority " nl_pri ": " $0
+        }
+    ' <<< "$rules"
+}
+
+verify_rpdb() {
+    # usage: verify_rpdb <us-client-count>. Broken contract fails only while US
+    # clients are requested: with none, refusing would also block an emergency
+    # move of everyone to NL, so it is reported but not fatal.
+    local problems rc=0
+    problems=$(rpdb_problems) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "exit-route: unable to inspect policy rules" >&2
+        return 1
+    fi
+    [ -z "$problems" ] && return 0
+    while IFS= read -r line; do
+        echo "exit-route: RPDB contract: $line" >&2
+    done <<< "$problems"
+    [ "$1" -eq 0 ]
+}
+
+verify_forward() {
+    # Accept rules must exist and sit above any kill-switch DROP in FORWARD.
+    local rules
+    iptables -C FORWARD -i "$CL_IFACE" -o "$US_IFACE" -j ACCEPT 2>/dev/null \
+        && iptables -C FORWARD -i "$US_IFACE" -o "$CL_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || {
+        echo "exit-route: FORWARD accept rules for $US_IFACE missing" >&2
+        return 1
+    }
+    iptables -t nat -C POSTROUTING -o "$US_IFACE" -j MASQUERADE 2>/dev/null || {
+        echo "exit-route: NAT rule for $US_IFACE missing" >&2
+        return 1
+    }
+    rules=$(iptables -S FORWARD) || {
+        echo "exit-route: unable to inspect FORWARD chain" >&2
+        return 1
+    }
+    awk -v want="-A FORWARD -i $CL_IFACE -o $US_IFACE -j ACCEPT" '
+        $0 == want && !accept { accept = NR }
+        $NF == "DROP" && $(NF - 1) == "-j" && !drop { drop = NR }
+        END { exit !(accept && (!drop || accept < drop)) }
+    ' <<< "$rules" || {
+        echo "exit-route: FORWARD accept for $US_IFACE sits below the kill-switch DROP" >&2
+        return 1
+    }
+}
+
 verify_sync() {
     local expected="$1" wanted="$2" mark_rules actual ip
     if ! mark_rules=$(iptables -t mangle -S PREROUTING 2>/dev/null); then
@@ -190,6 +274,7 @@ verify_sync() {
         echo "exit-route: expected $expected mark rule(s), found $actual" >&2
         return 1
     }
+    verify_rpdb "$expected" || return 1
     [ "$expected" -eq 0 ] && return 0
     policy_rule_present || {
         echo "exit-route: policy rule missing" >&2
@@ -225,6 +310,7 @@ sync_rules() {
     fi
     ensure_table
     ensure_forward
+    verify_forward
     flush_marks
     while IFS= read -r ip; do
         [ -z "$ip" ] && continue

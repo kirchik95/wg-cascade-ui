@@ -67,6 +67,7 @@ class TestExitRoute(unittest.TestCase):
         quote_comments=False,
         table_alias=None,
         registry_mode="json",
+        initial_forward=(),
     ):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -93,7 +94,7 @@ class TestExitRoute(unittest.TestCase):
             route = root / "route"
             route.write_text("" if initial_route is None else "|".join(initial_route) + "\n")
             forward = root / "forward"
-            forward.write_text("")
+            forward.write_text("".join(f"{row}\n" for row in initial_forward))
             nat = root / "nat"
             nat.write_text("")
             rule_show_count = root / "rule-show-count"
@@ -244,8 +245,19 @@ class TestExitRoute(unittest.TestCase):
                             sys.exit(1)
                         key = "out" if args == forward_out_add else "return"
                         if "forward" not in silent and key not in lines(forward):
-                            with forward.open("a") as f:
-                                f.write(key + "\n")
+                            write_lines(forward, [key] + lines(forward))
+                        sys.exit(0)
+                    if args == ["-S", "FORWARD"]:
+                        if "forward_inspect" in failures:
+                            sys.exit(1)
+                        render = {
+                            "out": "-A FORWARD -i wg-cl -o wg-us -j ACCEPT",
+                            "return": "-A FORWARD -i wg-us -o wg-cl -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                            "drop": "-A FORWARD -s 10.10.0.0/24 ! -d 10.10.0.0/24 ! -o wg-do -j DROP",
+                        }
+                        print("-P FORWARD ACCEPT")
+                        for key in lines(forward):
+                            print(render[key])
                         sys.exit(0)
 
                     nat_check = ["-t", "nat", "-C", "POSTROUTING", "-o", "wg-us", "-j", "MASQUERADE"]
@@ -400,7 +412,7 @@ class TestExitRoute(unittest.TestCase):
         self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
         self.assertEqual(state["policy"], [CORRECT_POLICY])
         self.assertEqual(state["route"], "wg-us|65")
-        self.assertEqual(state["forward"], ["out", "return"])
+        self.assertEqual(sorted(state["forward"]), ["out", "return"])
         self.assertEqual(state["nat"], ["wg-us"])
         self.assertIn("synced 1 US client", result.stdout)
 
@@ -547,6 +559,110 @@ class TestExitRoute(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
         self.assertTrue(all("--mark 0x0" in rule for rule in state["mangle"]))
+
+    def test_early_nl_rule_fails_sync_with_us_clients(self):
+        # 2026-10-14: wg-do re-added its rule without a priority and it landed at 999.
+        early = "999: from 10.10.0.0/24 lookup 200"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(early,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RPDB contract", result.stderr)
+        self.assertIn(early, result.stderr)
+
+    def test_early_rule_only_warns_without_us_clients(self):
+        early = "999: from 10.10.0.0/24 lookup 200"
+        for iface_up in (True, False):
+            with self.subTest(iface_up=iface_up):
+                result, _ = self.run_sync([], iface_up=iface_up, initial_policy=(early,))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("RPDB contract", result.stderr)
+
+    def test_full_contract_passes(self):
+        contract = (
+            "0: from all lookup local",
+            "1000: from all fwmark 0x64 lookup main",
+            CORRECT_POLICY,
+            "32765: from 10.10.0.0/24 lookup 200",
+            "32766: from all lookup main",
+            "32767: from all lookup default",
+        )
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=contract,
+            initial_forward=("drop",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("RPDB", result.stderr)
+        self.assertEqual(state["forward"][-1], "drop")
+
+    def test_negated_fwmark_rule_ahead_of_marks_is_a_conflict(self):
+        rule = "900: not from all fwmark 0xca6c lookup 51820"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(rule,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(rule, result.stderr)
+
+    def test_split_rule_behind_us_rule_fails(self):
+        late_split = "1200: from all fwmark 0x64 lookup main"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(late_split,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("split rule must precede", result.stderr)
+
+    def test_nl_rule_at_unexpected_priority_is_reported(self):
+        odd = "20000: from 10.10.0.0/24 lookup 200"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(odd,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected at priority 32765", result.stderr)
+
+    def test_silently_missing_forward_accept_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            silent_applies=("forward",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FORWARD accept rules", result.stderr)
+
+    def test_silently_missing_nat_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            silent_applies=("nat",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("NAT rule", result.stderr)
+
+    def test_forward_accept_below_kill_switch_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_forward=("drop", "out", "return"),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("below the kill-switch DROP", result.stderr)
+
+    def test_forward_inspect_failure_propagates(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            failures=("forward_inspect",),
+        )
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
