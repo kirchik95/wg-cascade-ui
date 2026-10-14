@@ -592,7 +592,7 @@ doc.addEventListener('keydown',e=>{
    const n=e.key==='ArrowDown'?(i+1)%list.length:(i<=0?list.length-1:i-1);list[n].focus();return;
   }
   if(e.key==='Home'||e.key==='End'){e.preventDefault();const n=e.key==='Home'?list[0]:list[list.length-1];if(n)n.focus();return}
-  if(e.key==='Tab'){menuClose(false);return}
+  if(e.key==='Tab'){menuClose();return}           /* back to the anchor; Tab then moves on from it */
   if(e.key&&e.key.length===1&&!e.metaKey&&!e.ctrlKey&&!e.altKey){
    const k=e.key.toLowerCase(),idx=_menu.items.findIndex(it=>it&&it.key&&String(it.key).toLowerCase()===k&&!it.disabled);
    if(idx>=0){e.preventDefault();const it=_menu.items[idx];menuClose();if(typeof it.act==='function')it.act()}
@@ -639,7 +639,14 @@ function renderBanners(){
  const el=$('banner');if(!el)return;
  const list=visibleBanners();
  const sig=JSON.stringify([_bannerOpen,WG.state.offline,list.map(b=>[b.id,b.level,b.tag,b.note,b.text,(b.actions||[]).map(a=>a.label+(a.disabled?'!':''))])]);
- if(sig===_bannerSig)return;
+ if(sig===_bannerSig){
+  /* same plaques: only move a countdown to its new target (a retry was rescheduled) */
+  (el.querySelectorAll?el.querySelectorAll('[data-countdown]'):[]).forEach(n=>{
+   const box=n.closest('[data-b]'),b=box&&BANNERS.get(box.getAttribute('data-b'));
+   if(b&&b.countdownTo){n.setAttribute('data-countdown',String(+b.countdownTo));n.textContent=countdownText(b.note,b.countdownTo)}
+  });
+  return;
+ }
  _bannerSig=sig;
  if(!list.length){el.innerHTML='';el.hidden=true;return}
  el.hidden=false;

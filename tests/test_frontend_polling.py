@@ -44,6 +44,8 @@ class TestFrontendPolling(unittest.TestCase):
           const d=WG._poll.nextTickDelay();
           if(d<32000||d>48000)throw new Error('expected ~40 s backoff after 4 failures, got '+d);
           if(!(WG.state.retryAt>Date.now()))throw new Error('the offline plaque needs the retry time');
+          const cd=element('banner').querySelector('[data-countdown]');
+          if(!cd||+cd.getAttribute('data-countdown')!==WG.state.retryAt)throw new Error('countdown must follow the latest retry');
           for(let i=0;i<6;i++)await WG._poll.tick();
           if(WG._poll.nextTickDelay()>60000*1.2)throw new Error('backoff not capped');
           WG.refresh();
@@ -254,6 +256,9 @@ class TestFrontendPolling(unittest.TestCase):
           WG.menu.open(anchor,[{icon:'qr',label:'Config',act:()=>hits.push('q')}]);
           document.dispatchEvent(makeEvent('keydown',anchor,{key:'Escape'}));
           if(element('layer').querySelector('.menu')||anchor.getAttribute('aria-expanded')!=='false')throw new Error('Escape closes');
+          WG.menu.open(anchor,[{icon:'qr',label:'Config',act:()=>hits.push('q')}]);runTimers(0);
+          document.dispatchEvent(makeEvent('keydown',document.activeElement,{key:'Tab'}));
+          if(element('layer').querySelector('.menu')||document.activeElement!==anchor)throw new Error('Tab leaves the menu from its anchor');
           process.exitCode=0;
           console.log('__OK__');
         })().catch(e=>{console.error(e);process.exitCode=1;});

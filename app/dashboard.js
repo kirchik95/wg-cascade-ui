@@ -200,7 +200,8 @@ function metaHTML(s,m,peers){
   +'<span class="m-only">'+esc(tr('as of {t}',{t:WG.fmtTime(s.dataAt)}))+' · '+peers.length+'</span>';
  if(m==='crash'){
   const aff=+(s.tunnel&&s.tunnel.affected_clients)||0;
-  return esc(on+' '+tr('connected to the entry')+' · '+aff+' '+tr('affected')+' · '+off+' '+tr('off'));
+  return'<span class="d-only">'+esc(on+' '+tr('connected to the entry')+' · '+aff+' '+tr('affected')+' · '+off+' '+tr('off'))+'</span>'
+   +'<span class="m-only">'+esc(aff+' '+tr('affected')+' · '+peers.length)+'</span>';
  }
  return'<span class="d-only">'+esc(on+' '+tr('online')+' · '+peers.length+' '+tr('total')+' · '+off+' '+tr('off'))+'</span>'
   +'<span class="m-only">'+esc(on+' '+tr('online')+' · '+peers.length)+'</span>';
