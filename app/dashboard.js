@@ -115,7 +115,14 @@ function bar(ratio,n,unknownTone){
  }
  return h+'</span>';
 }
+function statusShort(x){
+ const t={ok:['is-ok','● '+tr('OK')],down:['is-bad','× '+tr('NO ANSWER')],warn:['is-warn','! '+Math.min(3,+(x.t&&x.t.fails)||1)+'/3'],unknown:['is-u','● ?']}[x.health];
+ return'<span class="g-st m-only '+t[0]+'">'+esc(t[1])+'</span>';
+}
 function statusChip(x,s){
+ return'<span class="d-only">'+statusLong(x,s)+'</span>'+statusShort(x);
+}
+function statusLong(x,s){
  if(x.health==='ok')return'<span class="g-st is-ok">● '+esc(tr('OK'))+' '+esc(WG.fmtAgo(+x.t.checked_age,{suffix:false}))+'</span>';
  if(x.health==='down'){
   const since=+x.t.health_since?now(s)-x.t.health_since:-1;
@@ -130,7 +137,7 @@ function gaugesHTML(s,m){
  const thr=(s.thr&&s.thr.cur)||{down:0,up:0};
  let state,tone,sub;
  if(m==='loading'){state=tr('Loading…');tone='u';sub=tr('Waiting for the first data…')}
- else if(u){state=tr('Unknown');tone='u';sub=tr('last data {t}',{t:WG.fmtTime(s.dataAt)})}
+ else if(u){state=tr('Unknown');tone='u';sub=s.loaded?tr('last data {t}',{t:WG.fmtTime(s.dataAt)}):tr('no data')}
  else if(m==='crash'){
   const since=Math.max(+(nl.t&&nl.t.health_since)||0,+(us.t&&us.t.health_since)||0);
   state=tr('Outage');tone='bad';sub=tr('both exits down · {t}',{t:since?WG.fmtAgo(now(s)-since,{suffix:false}):'—'});
@@ -144,7 +151,7 @@ function gaugesHTML(s,m){
  const speed=u?'—':'↓'+bigNum(+WG.mbit(thr.down))+' ↑'+bigNum(+WG.mbit(thr.up));
  let h='<div class="g-cell g-casc"><div class="g-lab d-only">'+esc(tr('Cascade'))+'</div>'
   +'<div class="g-state is-'+tone+'"><span class="g-dot" aria-hidden="true"></span><span class="g-state-t">'+esc(state)+'</span>'
-  +'<span class="g-speed m-only">'+esc(speed)+(u?'':' '+esc(tr('Mbit/s')))+'</span></div>'
+  +'<span class="g-speed m-only">'+(u?(s.loaded?esc(tr('as of {t}',{t:WG.fmtTime(s.dataAt)})):'—'):esc(speed)+' '+esc(tr('Mbit/s')))+'</span></div>'
   +'<div class="g-sub d-only">'+esc(sub)+'</div></div>';
  [nl,us].forEach(x=>{
   const affected=m==='crash'||(x.health==='down'&&!u)?+(x.t&&x.t.affected_clients)||0:0;
@@ -187,7 +194,7 @@ function schemeHTML(s,m){
   +'<a class="sc-more" href="#/exits">'+esc(tr('More details'))+' →</a>';
 }
 function metaHTML(s,m,peers){
- if(m==='loading')return'';
+ if(!s.loaded)return'';
  const on=peers.filter(p=>p.online).length,off=peers.filter(p=>!p.enabled).length;
  if(isUnknown(m))return'<span class="d-only">'+esc(tr('data as of {t}',{t:WG.fmtTime(s.dataAt)}))+'</span>'
   +'<span class="m-only">'+esc(tr('as of {t}',{t:WG.fmtTime(s.dataAt)}))+' · '+peers.length+'</span>';
@@ -329,7 +336,7 @@ function update(s){
  const shown=_expanded||narrowed?list:list.slice(0,ROW_LIMIT);
  renderRows(_ui.rows,s,m,shown);
  let empty='';
- if(m==='loading')empty='<p class="ct-msg">'+esc(tr('Waiting for the first data…'))+'</p>';
+ if(!s.loaded)empty='<p class="ct-msg">'+esc(tr('Waiting for the first data…'))+'</p>';
  else if(!peers.length)empty='<p class="ct-title">'+esc(tr('No clients yet'))+'</p><p class="ct-msg">'+esc(tr('Add the first device — the config and QR code appear right away.'))+'</p>'
   +'<button type="button" class="btn btn-primary" data-act="add-client" data-live'+(s.offline?' disabled':'')+'>'+icon('add',16)+esc(tr('Add client'))+'</button>';
  else if(!list.length)empty='<p class="ct-title">'+esc(tr('Nobody matches'))+'</p><button type="button" class="btn btn-outline" data-act="cl-reset">'+esc(tr('Reset filters'))+'</button>';
@@ -375,6 +382,116 @@ function clientMenu(p){
   {icon:'delete',label:tr('Delete client…'),danger:true,act:()=>WG.actions.deleteClient(pk)}
  ];
 }
+
+/* ------------------------------------------------------------ plaques (DS-2, D-priority)
+ * Derived from every status poll, whatever section is open. One shows at a time:
+ * outage → stale / no connection → failover and switches → quota. Each has an action. */
+WG.addStrings('ru',{
+ 'Outage':'Авария','Data is stale':'Данные устарели','No connection':'Нет связи','Failure {exit}':'Сбой {exit}',
+ 'Switch':'Переключение','Auto-switch':'Автопереключение','Quota {exit}':'Квота {exit}',
+ 'Both exits are down since {t}.':'Оба выхода недоступны с {t}.',
+ 'Affected: {n} enabled, {k} of them connected to the entry.':'Затронуто {n} включённых, {k} из них подключены ко входу.',
+ 'RU subnets work directly — split is on.':'Подсети РФ работают напрямую — сплит включён.',
+ 'Split is off, so client traffic has no way out.':'Сплит выключен — трафику клиентов некуда выйти.',
+ '{exit} does not answer since {t}: {n} enabled without an exit.':'{exit} не отвечает с {t}: без выхода {n} включённых.',
+ 'Automatic switch did not run: {r}':'Автопереключение не выполнено: {r}',
+ 'Automatic failover is off.':'Автопереключение при сбое выключено.',
+ 'The server answers but has not refreshed the state for {t} — data collection is stuck. Values below are from {at}; things may be different now.':
+  'Сервер отвечает, но не обновлял состояние {t} — сбор данных завис. Ниже значения на {at}, сейчас всё может быть иначе.',
+ 'The panel does not answer. Showing data from {at} ({t}); actions are off.':'Панель не отвечает. Показаны данные от {at} ({t}), действия выключены.',
+ 'The server did not answer in 12 s. Showing data from {at} ({t}); actions are off.':'Сервер не ответил за 12 с. Показаны данные от {at} ({t}), действия выключены.',
+ 'The panel does not answer and there is no data yet.':'Панель не отвечает, данных пока нет.',
+ 'retry in {n} s':'повтор через {n} с',
+ '{at} — {n} moved {from} → {to}. {from} failed its checks several times in a row.':'{at} — {n} переведены {from} → {to}. {from} не прошёл проверки несколько раз подряд.',
+ '{at} — {n} moved {from} → {to}: the monthly quota of {from} ran out.':'{at} — {n} переведены {from} → {to}: месячная квота {from} исчерпана.',
+ '{exit} healthy again since {t}':'{exit} снова в норме с {t}','{exit} still down':'{exit} пока недоступен',
+ 'Move {n} back to {exit}':'Вернуть {n} на {exit}',
+ '{exit} used {p}% of its monthly quota ({u} of {q}).':'{exit} израсходовал {p}% месячной квоты ({u} из {q}).',
+ 'The {exit} quota is used up ({u} of {q}).':'Квота {exit} исчерпана ({u} из {q}).',
+ 'At 100% its clients move to {other} automatically.':'При 100% клиенты перейдут на {other} автоматически.',
+ 'Its clients move to {other} automatically.':'Клиенты переводятся на {other} автоматически.',
+ 'Switching by quota is off.':'Переключение по квоте выключено.',
+ 'Exits':'Выходы','Journal':'Журнал','Retry now':'Повторить сейчас','Configure':'Настроить'
+});
+const SWITCH_BANNER_S=24*3600;
+function deriveBanners(s){
+ const m=mode(s),want={},nowTs=now(s),pol=s.exit_policy||{},go=name=>()=>WG.router.go(name);
+ const toExits={label:tr('Exits'),act:go('exits'),primary:true};
+ const toJournal={label:tr('Journal'),act:go('journal')};
+ if(m==='offline'){
+  const age=WG.dataAge();
+  const text=!s.loaded?tr('The panel does not answer and there is no data yet.')
+   :tr(s.timedOut?'The server did not answer in 12 s. Showing data from {at} ({t}); actions are off.':'The panel does not answer. Showing data from {at} ({t}); actions are off.',
+    {at:WG.fmtTime(s.dataAt),t:WG.fmtAgo(age)});
+  want.offline={level:'offline',tag:tr('No connection'),icon:'offline',text,note:tr('retry in {n} s'),countdownTo:s.retryAt,
+   actions:[{label:tr('Retry now'),act:()=>WG.refresh()}]};
+ }else if(m==='stale'){
+  want.stale={level:'stale',tag:tr('Data is stale'),icon:'clock',
+   text:tr('The server answers but has not refreshed the state for {t} — data collection is stuck. Values below are from {at}; things may be different now.',
+    {t:WG.fmtAgo(+s.snapshot_age||0,{suffix:false}),at:WG.fmtTime(s.dataAt)}),actions:[toJournal]};
+ }else if(m==='crash'){
+  const xs=WG.EXITS.map(k=>exitInfo(s,k)),since=Math.max.apply(null,xs.map(x=>+(x.t&&x.t.health_since)||0));
+  const enabled=(s.peers||[]).filter(p=>p.enabled),connected=enabled.filter(p=>p.online).length;
+  want.crash={level:'crash',tag:tr('Outage'),icon:'error',note:since?WG.fmtAgo(nowTs-since,{suffix:false}):'',
+   text:tr('Both exits are down since {t}.',{t:since?WG.fmtTime(since):'—'})+' '
+    +tr('Affected: {n} enabled, {k} of them connected to the entry.',{n:enabled.length,k:connected})+' '
+    +tr(s.rud?'RU subnets work directly — split is on.':'Split is off, so client traffic has no way out.'),
+   actions:[toExits,toJournal]};
+ }else if(m==='live'){
+  WG.EXITS.map(k=>exitInfo(s,k)).forEach(x=>{
+   const aff=+(x.t&&x.t.affected_clients)||0;
+   if(!x.t||x.t.ok||!aff)return;
+   const since=+x.t.health_since||0,hb=pol.health_blocked;
+   let extra='';
+   if(pol.health_failover===false)extra=' '+tr('Automatic failover is off.');
+   else if(hb)extra=' '+tr('Automatic switch did not run: {r}',{r:WG.reasonText(hb.code||hb)});
+   want['down-'+x.key]={level:'crash',tag:tr('Failure {exit}',{exit:exitLabel(x.key)}),icon:'error',
+    note:since?WG.fmtAgo(nowTs-since,{suffix:false}):'',
+    text:tr('{exit} does not answer since {t}: {n} enabled without an exit.',{exit:exitLabel(x.key),t:since?WG.fmtTime(since):'—',n:aff})+extra,
+    actions:[toExits]};
+  });
+ }
+ const ls=pol.last_switch;
+ if(ls&&typeof ls==='object'&&!ls.revert_of&&ls.changed!==false&&+ls.ts>0&&nowTs-ls.ts<SWITCH_BANNER_S
+  &&(ls.reason==='health'||ls.reason==='quota')&&WG.EXITS.indexOf(ls.source)>=0&&WG.EXITS.indexOf(ls.target)>=0){
+  const n=+ls.members_count||0,from=exitLabel(ls.source),to=exitLabel(ls.target),src=exitInfo(s,ls.source);
+  const who=n?WG.count(n,'client'):tr('clients');
+  const at=WG.fmtTime(ls.ts);
+  if(ls.reason==='health'){
+   const healthy=src.health==='ok',since=src.t&&+src.t.health_since;
+   const canRevert=healthy&&n>0&&+ls.event_id>0;
+   want.failover={level:'failover',tag:tr('Failure {exit}',{exit:from}),icon:'warning',
+    text:tr('{at} — {n} moved {from} → {to}. {from} failed its checks several times in a row.',{at,n:who,from,to}),
+    note:isUnknown(m)?'':healthy?tr('{exit} healthy again since {t}',{exit:from,t:since?WG.fmtTime(since):'—'}):tr('{exit} still down',{exit:from}),
+    actions:[canRevert?{label:tr('Move {n} back to {exit}',{n,exit:from}),act:()=>WG.actions.revertSwitch(+ls.event_id),primary:true,live:true}:toExits],
+    dismiss:'switch:'+(ls.event_id||ls.ts)};
+  }else{
+   want.failover={level:'failover',tag:tr('Switch'),icon:'switch-exit',
+    text:tr('{at} — {n} moved {from} → {to}: the monthly quota of {from} ran out.',{at,n:who,from,to}),
+    actions:[toExits],dismiss:'switch:'+(ls.event_id||ls.ts)};
+  }
+ }
+ const blocked=pol.blocked;
+ if(blocked&&!want.failover&&!Object.keys(want).some(k=>k.indexOf('down-')===0)){
+  want.blocked={level:'failover',tag:tr('Auto-switch'),icon:'warning',
+   text:tr('Automatic switch did not run: {r}',{r:WG.reasonText(blocked.code||blocked)}),actions:[toExits]};
+ }
+ WG.EXITS.map(k=>exitInfo(s,k)).forEach(x=>{
+  if(!x.quota||x.ratio<.9||!x.clients)return;
+  const other=exitLabel(x.key==='us'?'nl':'us'),E=exitLabel(x.key),u=gib(x.used)+' '+GIB(),q=gib(x.quota)+' '+GIB();
+  const first=x.exhausted?tr('The {exit} quota is used up ({u} of {q}).',{exit:E,u,q}):tr('{exit} used {p}% of its monthly quota ({u} of {q}).',{exit:E,p:Math.floor(x.ratio*100),u,q});
+  const then=pol.auto_switch===false?tr('Switching by quota is off.'):tr(x.exhausted?'Its clients move to {other} automatically.':'At 100% its clients move to {other} automatically.',{other});
+  want['quota-'+x.key]={level:'quota',tag:tr('Quota {exit}',{exit:E}),icon:'usage',text:first+' '+then,
+   actions:[{label:tr('Configure'),act:()=>WG.actions.exitsSettings(),live:true}],
+   dismiss:'quota:'+x.key+':'+(x.exhausted?'full':'90')+':'+new Date(nowTs*1000).toISOString().slice(0,7)};
+ });
+ ['offline','stale','crash','down-nl','down-us','failover','blocked','quota-nl','quota-us'].forEach(id=>{
+  if(want[id])WG.banner.set(id,want[id],true);else WG.banner.clear(id,true);
+ });
+ WG.banner.render();
+}
+WG.addStrings('ru',{'clients':'клиенты'});
+WG.on('status',deriveBanners);
 
 /* ------------------------------------------------------------ placeholders */
 function placeholder(name,title,action){

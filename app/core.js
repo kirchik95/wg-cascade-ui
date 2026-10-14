@@ -44,9 +44,11 @@
  *             ctx.on(event, fn) unsubscribes when the route is left; re-registering replaces.
  *             Routes: #/clients (default), #/exits, #/usage, #/journal, #/split.
  *           WG.router.go(name), WG.router.current()
- *  Banners  WG.banner.set(id, {level, tag, icon, text, note, actions:[{label, act, primary,
- *             live}], dismiss}) / WG.banner.clear(id). level: crash | stale | offline |
- *             failover | quota | info — one banner shows (that order), the rest fold into «ещё N».
+ *  Banners  WG.banner.set(id, {level, tag, icon, text, note, countdownTo, actions:[{label, act,
+ *             primary, live}], dismiss}, quiet?) / WG.banner.clear(id, quiet?) / WG.banner.render().
+ *             level: crash | stale | offline | failover | quota | info — one banner shows (that
+ *             order), the rest fold into «ещё N». dismiss: key remembered by «Скрыть»; '{n}' in
+ *             note counts down to countdownTo (ms); live actions are off without a connection.
  *  Actions  WG.actions.<name> — stage 1 stubs; stage 2B assigns real ones with
  *           Object.assign(WG.actions, {…}). addClient(), showConfig(pubkey, {section}?),
  *           editClient(pubkey), toggleEnabled(pubkey), deleteClient(pubkey),
@@ -605,8 +607,8 @@ const LEVEL_RANK={crash:0,stale:1,offline:1,failover:2,quota:3,info:4};
 const BANNERS=new Map();
 let _bannerSig='',_bannerOpen=false;
 function hiddenBanners(){try{return JSON.parse(store('wgui-banner-hidden')||'[]')||[]}catch(e){return[]}}
-function bannerSet(id,spec){BANNERS.set(id,Object.assign({id},spec));renderBanners()}
-function bannerClear(id){if(BANNERS.delete(id))renderBanners()}
+function bannerSet(id,spec,quiet){BANNERS.set(id,Object.assign({id},spec));if(!quiet)renderBanners()}
+function bannerClear(id,quiet){if(BANNERS.delete(id)&&!quiet)renderBanners()}
 function visibleBanners(){
  const hidden=hiddenBanners();
  return [...BANNERS.values()].filter(b=>!(b.dismiss&&hidden.indexOf(b.dismiss)>=0))
