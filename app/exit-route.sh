@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Per-client exit routing for the cascade.
 # Clients with exit=us in /etc/wg-ui/clients.json get fwmark 0x65 → table 65 → wg-us.
-# RU-direct (split-server.sh, mark 0x64, pri 1000) stays higher priority.
+# RU-direct (split-server.sh, mark 0x64, pri 1000) stays higher priority: the US
+# MARK only touches packets that are still unmarked, so whichever of the two
+# scripts appended its PREROUTING rule first, a RU destination keeps 0x64.
 # Everyone else keeps the default path through wg-do (NL).
 #
 # Idempotent. State is derived from clients.json on every sync — no separate state file.
@@ -96,10 +98,15 @@ flush_marks() {
     done
 }
 
+mark_rule() {
+    # usage: mark_rule -C|-A <ip>. Only unmarked packets from the client iface:
+    # never overwrite RU-direct 0x64, whichever rule was appended first.
+    iptables -t mangle "$1" PREROUTING -i "$CL_IFACE" -s "$2/32" -m mark --mark 0 \
+        -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
+}
+
 add_mark() {
-    local ip="$1"
-    iptables -t mangle -C PREROUTING -s "$ip/32" -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK" 2>/dev/null \
-        || iptables -t mangle -A PREROUTING -s "$ip/32" -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
+    mark_rule -C "$1" 2>/dev/null || mark_rule -A "$1"
 }
 
 flush_conntrack() {
@@ -193,8 +200,11 @@ verify_sync() {
         return 1
     }
     while IFS= read -r ip; do
-        [ -z "$ip" ] || iptables -t mangle -C PREROUTING -s "$ip/32" \
-            -m comment --comment "$COMMENT" -j MARK --set-mark "$MARK"
+        [ -z "$ip" ] && continue
+        mark_rule -C "$ip" 2>/dev/null || {
+            echo "exit-route: mark rule for $ip missing or in legacy form" >&2
+            return 1
+        }
     done <<< "$wanted"
 }
 

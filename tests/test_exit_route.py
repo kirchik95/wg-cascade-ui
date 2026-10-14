@@ -14,6 +14,41 @@ COMMENT = "wgui-exit-us"
 MARK = "0x65"
 CORRECT_POLICY = "1100: from all fwmark 0x65 lookup 65"
 
+SPLIT_RULE = "-A PREROUTING -s 10.10.0.0/24 -m set --match-set ru-direct dst -j MARK --set-xmark 0x64/0xffffffff"
+
+
+def mangle_mark(rules, src, iif, ru_dst):
+    """Tiny netfilter model of mangle/PREROUTING MARK rules (-S form); returns final mark."""
+    mark = 0
+    for rule in rules:
+        t = rule.split()
+        i, ok, new = 2, True, None
+        while i < len(t):
+            if t[i] == "-s":
+                net, _, bits = t[i + 1].partition("/")
+                bits = int(bits or 32)
+                as_int = lambda a: int.from_bytes(bytes(map(int, a.split("."))), "big")
+                maskv = (0xffffffff << (32 - bits)) & 0xffffffff
+                ok &= (as_int(src) & maskv) == (as_int(net) & maskv)
+                i += 2
+            elif t[i] == "-i":
+                ok &= iif == t[i + 1]; i += 2
+            elif t[i:i + 3] == ["-m", "mark", "--mark"]:
+                ok &= mark == int(t[i + 3], 16); i += 4
+            elif t[i:i + 3] == ["-m", "set", "--match-set"]:
+                ok &= ru_dst; i += 5
+            elif t[i:i + 3] == ["-m", "comment", "--comment"]:
+                i += 4
+            elif t[i] == "-j":
+                i += 2
+            elif t[i] in ("--set-xmark", "--set-mark"):
+                new = int(t[i + 1].split("/")[0], 16); i += 2
+            else:
+                raise AssertionError("unmodeled token %r in %r" % (t[i], rule))
+        if ok and new is not None:
+            mark = new
+    return mark
+
 
 class TestExitRoute(unittest.TestCase):
     def _executable(self, path, body):
@@ -148,19 +183,28 @@ class TestExitRoute(unittest.TestCase):
                     def write_lines(path, values):
                         path.write_text("".join(f"{value}\n" for value in values))
 
+                    # Rows: ip|comment|mark[|legacy]. Legacy rows model the pre-guard
+                    # rule form (no iif / mark==0 match) left over from older releases.
+                    def parse(row):
+                        parts = row.split("|")
+                        return parts[0], parts[1], parts[2], len(parts) > 3 and parts[3] == "legacy"
+
                     if args == ["-t", "mangle", "-L", "PREROUTING", "-n", "-v", "--line-numbers"]:
                         for number, row in enumerate(lines(marks), 1):
-                            ip, comment, mark = row.split("|")
-                            print(f"{number} 0 0 MARK all -- * * {ip}/32 0.0.0.0/0 /* {comment} */ MARK set {mark}")
+                            ip, comment, mark, legacy = parse(row)
+                            match = "" if legacy else "mark match 0x0 "
+                            print(f"{number} 0 0 MARK all -- wg-cl * {ip}/32 0.0.0.0/0 {match}/* {comment} */ MARK set {mark}")
                         sys.exit(0)
                     if args == ["-t", "mangle", "-S", "PREROUTING"]:
                         if "mark_inspect" in failures:
                             sys.exit(1)
                         for row in lines(marks):
-                            ip, comment, mark = row.split("|")
+                            ip, comment, mark, legacy = parse(row)
                             if os.environ["FAKE_QUOTE_COMMENTS"] == "1":
                                 comment = f'"{comment}"'
-                            print(f"-A PREROUTING -s {ip}/32 -m comment --comment {comment} -j MARK --set-mark {mark}")
+                            guard = "" if legacy else "-i wg-cl "
+                            match = "" if legacy else "-m mark --mark 0x0 "
+                            print(f"-A PREROUTING {guard}-s {ip}/32 {match}-m comment --comment {comment} -j MARK --set-xmark {mark}/0xffffffff")
                         sys.exit(0)
                     if args[:4] == ["-t", "mangle", "-D", "PREROUTING"] and len(args) == 5:
                         number = int(args[4])
@@ -172,12 +216,13 @@ class TestExitRoute(unittest.TestCase):
                     if args[:4] in (
                         ["-t", "mangle", "-C", "PREROUTING"],
                         ["-t", "mangle", "-A", "PREROUTING"],
-                    ) and len(args) == 14:
+                    ) and len(args) == 20:
                         op = args[2]
-                        expected = ["-s", args[5], "-m", "comment", "--comment", "wgui-exit-us", "-j", "MARK", "--set-mark", "0x65"]
-                        if args[4:] != expected or not args[5].endswith("/32"):
+                        expected = ["-i", "wg-cl", "-s", args[7], "-m", "mark", "--mark", "0",
+                                    "-m", "comment", "--comment", "wgui-exit-us", "-j", "MARK", "--set-mark", "0x65"]
+                        if args[4:] != expected or not args[7].endswith("/32"):
                             sys.exit(64)
-                        row = f"{args[5][:-3]}|wgui-exit-us|0x65"
+                        row = f"{args[7][:-3]}|wgui-exit-us|0x65"
                         if op == "-C":
                             sys.exit(0 if row in lines(marks) else 1)
                         if "mark" in failures:
@@ -244,7 +289,12 @@ class TestExitRoute(unittest.TestCase):
                 text=True,
                 timeout=10,
             )
+            rendered = subprocess.run(
+                [str(bindir / "iptables"), "-t", "mangle", "-S", "PREROUTING"],
+                env=dict(env, FAKE_FAILURES=""), capture_output=True, text=True,
+            ).stdout.splitlines()
             return result, {
+                "mangle": rendered,
                 "marks": [tuple(row.split("|")) for row in marks.read_text().splitlines()],
                 "policy": policy.read_text().splitlines(),
                 "route": route.read_text().strip(),
@@ -461,6 +511,42 @@ class TestExitRoute(unittest.TestCase):
             failures=("route_inspect",),
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_us_mark_rule_is_guarded_and_client_scoped(self):
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (rule,) = state["mangle"]
+        self.assertIn("-i wg-cl ", rule)
+        self.assertIn("-m mark --mark 0x0 ", rule)
+
+    def test_ru_direct_wins_in_either_rule_order(self):
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        us_rules = state["mangle"]
+        for label, chain in (("split first", [SPLIT_RULE] + us_rules),
+                             ("us first", us_rules + [SPLIT_RULE])):
+            with self.subTest(order=label):
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "wg-cl", ru_dst=True), 0x64)
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "wg-cl", ru_dst=False), 0x65)
+                self.assertEqual(mangle_mark(chain, "10.10.0.3", "wg-cl", ru_dst=False), 0)
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "ens3", ru_dst=False), 0)
+
+    def test_legacy_unguarded_mark_is_replaced_on_sync(self):
+        legacy = ("10.10.0.2", COMMENT, MARK, "legacy")
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_marks=(legacy,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
+        self.assertTrue(all("--mark 0x0" in rule for rule in state["mangle"]))
 
 
 if __name__ == "__main__":
