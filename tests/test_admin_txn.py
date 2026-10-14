@@ -89,7 +89,13 @@ class TestTransactions(TxnCase):
     def test_rename_failure_moves_config_files_back(self):
         conf = os.path.join(wgadmin.CLIENT_DIR, "phone.conf")
         pathlib.Path(conf).write_text("conf")
-        self.route_fail = True
+        fails = [True]
+
+        def kernel_sync():
+            if fails and fails.pop():
+                raise RuntimeError("wg syncconf failed: boom")
+            self.kernel.append(pathlib.Path(wgadmin.WG_CONF).read_text())
+        self.patch("sync_kernel", kernel_sync)
         res = self.call(wgadmin.op_rename, PUB, "tablet")
         self.assertFalse(res["ok"])
         self.assertTrue(os.path.exists(conf))
