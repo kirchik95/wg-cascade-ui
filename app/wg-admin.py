@@ -16,9 +16,11 @@ Usage: wg-admin.py <op> [args]
   delete <pubkey>              -> {}
   getconf <pubkey>             -> {name,ip,conf,qr,exit}
   regenerate                   -> {}   (rewrite conf from clients.json, no change)
+  blockipv6                    -> {updated}  (add ::/0 to full-tunnel client configs)
+  export                       -> {archive,name}  (full recovery bundle, base64 tar.gz)
 All output is a single JSON line: {"ok":true,...} or {"ok":false,"error":...}.
 """
-import sys, os, re, json, time, base64, fcntl, grp, shutil, tempfile, tarfile, io, subprocess
+import sys, os, re, json, time, base64, fcntl, grp, shutil, tempfile, tarfile, io, subprocess, sqlite3, platform
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if _APP_DIR not in sys.path:
@@ -269,7 +271,7 @@ def genkeypair():
 
 def client_conf(priv, ip):
     return ("[Interface]\nPrivateKey = %s\nAddress = %s/32\nDNS = %s\nMTU = %s\n\n"
-            "[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 0.0.0.0/0\n"
+            "[Peer]\nPublicKey = %s\nEndpoint = %s\nAllowedIPs = 0.0.0.0/0, ::/0\n"
             "PersistentKeepalive = 25\n" % (priv, ip, DNS, MTU, SERVER_PUB, ENDPOINT))
 
 def qr_b64(conf_path, png_path):
@@ -638,21 +640,102 @@ def op_expire():
             audit("expire", c["name"])
     ok({"expired": [c["name"] for c in expired]})
 
+IPV6_BLOCK_OLD = "AllowedIPs = 0.0.0.0/0\n"
+IPV6_BLOCK_NEW = "AllowedIPs = 0.0.0.0/0, ::/0\n"
+
+def op_blockipv6():
+    """Route IPv6 into the tunnel (where wg-cl drops it) so it cannot bypass the cascade.
+
+    Only full-tunnel configs are touched; legacy client-side split configs with
+    long AllowedIPs lists are left alone. Devices must re-import their config.
+    """
+    updated = []
+    if os.path.isdir(CLIENT_DIR):
+        for fn in sorted(os.listdir(CLIENT_DIR)):
+            if not fn.endswith(".conf"):
+                continue
+            path = os.path.join(CLIENT_DIR, fn)
+            with open(path) as f:
+                conf = f.read()
+            if IPV6_BLOCK_OLD in conf:
+                write_atomic(path, conf.replace(IPV6_BLOCK_OLD, IPV6_BLOCK_NEW), 0o600)
+                updated.append(fn[:-5])
+    if updated:
+        audit("ipv6-block", "%d client configs" % len(updated))
+    ok({"updated": updated})
+
+# Recovery bundle: (source path, archive name). Old names stay stable for restores
+# made from earlier bundles; everything new goes under extra/.
+_EXPORT_FILES = (
+    ("WG_CONF", None), ("/etc/wireguard/wg-do.conf", None), ("/etc/wireguard/wg-us.conf", None),
+    ("CLIENTS_JSON", None), ("SPLIT_EXTRA", None), ("EXIT_POLICY", None),
+    ("/etc/amnezia/amneziawg/wg-do.conf", "awg-wg-do.conf"),
+    ("/etc/amnezia/amneziawg/wg-us.conf", "awg-wg-us.conf"),
+    ("NAMES_JSON", "extra/names.json"), ("SPLIT_META", "extra/split-meta.json"),
+    ("/etc/wg-ui/split-server.state", "extra/split-server.state"),
+    ("/etc/wg-ui/wg-ui.env", "extra/wg-ui.env"),
+    ("/etc/wg-ui/cert.pem", "extra/cert.pem"), ("/etc/wg-ui/key.pem", "extra/key.pem"),
+    ("/etc/sudoers.d/wg-ui", "extra/sudoers.wg-ui"),
+    ("/etc/systemd/system/wg-ui.service", "extra/units/wg-ui.service"),
+    ("/etc/systemd/system/wg-split-server.service", "extra/units/wg-split-server.service"),
+    ("/etc/systemd/system/wg-exit-route.service", "extra/units/wg-exit-route.service"),
+)
+HISTORY_DB = "/var/lib/wg-ui/history.db"
+
+def _tool_version(cmd):
+    try:
+        r = run(cmd, timeout=5)
+        return (r.stdout or r.stderr).strip().splitlines()[0][:120] if r.returncode == 0 else None
+    except Exception:
+        return None
+
 def op_export():
-    """tar.gz of recovery-critical files (server + client keys, registry), returned base64. Sensitive."""
+    """tar.gz recovery bundle (keys, registry, panel secrets/TLS, history, units), base64.
+
+    Sensitive. A manifest.json lists every expected file and whether it was found,
+    so a restore can tell a deliberate absence from a silently missing file.
+    """
     buf = io.BytesIO()
+    manifest = {"created": int(time.time()), "files": [],
+                "versions": {"kernel": platform.release(),
+                             "wg": _tool_version(["wg", "--version"]),
+                             "awg": _tool_version(["awg", "--version"])}}
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for p in (WG_CONF, "/etc/wireguard/wg-do.conf", "/etc/wireguard/wg-us.conf",
-                  CLIENTS_JSON, SPLIT_EXTRA, EXIT_POLICY):
-            if os.path.exists(p):
-                tar.add(p, arcname=os.path.basename(p))
-        for p in ("/etc/amnezia/amneziawg/wg-do.conf", "/etc/amnezia/amneziawg/wg-us.conf"):
-            if os.path.exists(p):
-                tar.add(p, arcname="awg-" + os.path.basename(p))
+        for src, arc in _EXPORT_FILES:
+            path = globals().get(src, src)
+            name = arc or os.path.basename(path)
+            present = os.path.isfile(path)
+            if present:
+                tar.add(path, arcname=name)
+            manifest["files"].append({"name": name, "source": path, "present": present})
         if os.path.isdir(CLIENT_DIR):
             tar.add(CLIENT_DIR, arcname="clients")
+        manifest["files"].append({"name": "clients/", "source": CLIENT_DIR,
+                                  "present": os.path.isdir(CLIENT_DIR)})
+        # Consistent SQLite copy (WAL-safe) via the backup API, not a raw file copy.
+        db_present = False
+        if os.path.isfile(HISTORY_DB):
+            with tempfile.TemporaryDirectory() as td:
+                tmp_db = os.path.join(td, "history.db")
+                try:
+                    src_db = sqlite3.connect("file:%s?mode=ro" % HISTORY_DB, uri=True, timeout=10)
+                    dst_db = sqlite3.connect(tmp_db)
+                    with dst_db:
+                        src_db.backup(dst_db)
+                    src_db.close(); dst_db.close()
+                    tar.add(tmp_db, arcname="extra/history.db")
+                    db_present = True
+                except sqlite3.Error as e:
+                    manifest["history_error"] = str(e)[:200]
+        manifest["files"].append({"name": "extra/history.db", "source": HISTORY_DB, "present": db_present})
+        data = json.dumps(manifest, indent=1).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size, info.mtime, info.mode = len(data), int(time.time()), 0o600
+        tar.addfile(info, io.BytesIO(data))
+    missing = [f["name"] for f in manifest["files"] if not f["present"]]
     audit("export", "backup downloaded")
-    ok({"archive": base64.b64encode(buf.getvalue()).decode(), "name": "wg-cascade-backup.tar.gz"})
+    ok({"archive": base64.b64encode(buf.getvalue()).decode(), "name": "wg-cascade-backup.tar.gz",
+        "missing": missing})
 
 # -------------------------------------------------- global split-tunnel policy
 def split_server_status():
@@ -730,6 +813,7 @@ def main():
     elif op == "setexitpolicy" and len(a) == 4: op_setexitpolicy(a[0], a[1], a[2], a[3])
     elif op == "expire":                  op_expire()
     elif op == "export":                  op_export()
+    elif op == "blockipv6":               op_blockipv6()
     elif op == "rename"     and len(a) >= 2: op_rename(a[0], a[1])
     elif op == "setenabled" and len(a) >= 2: op_setenabled(a[0], a[1])
     elif op == "delete"     and len(a) >= 1: op_delete(a[0])

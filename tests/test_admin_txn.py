@@ -117,5 +117,40 @@ class TestTransactions(TxnCase):
         self.assertNotIn(PUB, self.kernel[-1])
 
 
+class TestIPv6AndExport(TxnCase):
+    def test_new_client_config_routes_ipv6_into_tunnel(self):
+        self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", wgadmin.client_conf("priv", "10.10.0.9"))
+
+    def test_blockipv6_updates_only_full_tunnel_configs(self):
+        full = pathlib.Path(wgadmin.CLIENT_DIR, "phone.conf")
+        split = pathlib.Path(wgadmin.CLIENT_DIR, "legacy.conf")
+        full.write_text("[Peer]\nAllowedIPs = 0.0.0.0/0\n")
+        split.write_text("[Peer]\nAllowedIPs = 1.0.0.0/8, 2.0.0.0/7\n")
+        res = self.call(wgadmin.op_blockipv6)
+        self.assertEqual(res["updated"], ["phone"])
+        self.assertIn("::/0", full.read_text())
+        self.assertNotIn("::/0", split.read_text())
+        self.assertEqual(self.call(wgadmin.op_blockipv6)["updated"], [])   # idempotent
+
+    def test_export_has_manifest_and_consistent_history(self):
+        import base64, sqlite3, tarfile
+        db = os.path.join(self.tmp.name, "history.db")
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE t(x)"); con.execute("INSERT INTO t VALUES (42)"); con.commit(); con.close()
+        self.patch("HISTORY_DB", db)
+        res = self.call(wgadmin.op_export)
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(res["archive"])), mode="r:gz") as tar:
+            names = tar.getnames()
+            manifest = json.load(tar.extractfile("manifest.json"))
+            restored = os.path.join(self.tmp.name, "restored.db")
+            pathlib.Path(restored).write_bytes(tar.extractfile("extra/history.db").read())
+        self.assertIn("clients.json", names)
+        self.assertEqual(sqlite3.connect(restored).execute("SELECT x FROM t").fetchone(), (42,))
+        present = {f["name"]: f["present"] for f in manifest["files"]}
+        self.assertTrue(present["extra/history.db"])
+        self.assertFalse(present["extra/wg-ui.env"])
+        self.assertIn("extra/wg-ui.env", res["missing"])
+
+
 if __name__ == "__main__":
     unittest.main()
