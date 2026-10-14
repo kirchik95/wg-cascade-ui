@@ -14,6 +14,41 @@ COMMENT = "wgui-exit-us"
 MARK = "0x65"
 CORRECT_POLICY = "1100: from all fwmark 0x65 lookup 65"
 
+SPLIT_RULE = "-A PREROUTING -s 10.10.0.0/24 -m set --match-set ru-direct dst -j MARK --set-xmark 0x64/0xffffffff"
+
+
+def mangle_mark(rules, src, iif, ru_dst):
+    """Tiny netfilter model of mangle/PREROUTING MARK rules (-S form); returns final mark."""
+    mark = 0
+    for rule in rules:
+        t = rule.split()
+        i, ok, new = 2, True, None
+        while i < len(t):
+            if t[i] == "-s":
+                net, _, bits = t[i + 1].partition("/")
+                bits = int(bits or 32)
+                as_int = lambda a: int.from_bytes(bytes(map(int, a.split("."))), "big")
+                maskv = (0xffffffff << (32 - bits)) & 0xffffffff
+                ok &= (as_int(src) & maskv) == (as_int(net) & maskv)
+                i += 2
+            elif t[i] == "-i":
+                ok &= iif == t[i + 1]; i += 2
+            elif t[i:i + 3] == ["-m", "mark", "--mark"]:
+                ok &= mark == int(t[i + 3], 16); i += 4
+            elif t[i:i + 3] == ["-m", "set", "--match-set"]:
+                ok &= ru_dst; i += 5
+            elif t[i:i + 3] == ["-m", "comment", "--comment"]:
+                i += 4
+            elif t[i] == "-j":
+                i += 2
+            elif t[i] in ("--set-xmark", "--set-mark"):
+                new = int(t[i + 1].split("/")[0], 16); i += 2
+            else:
+                raise AssertionError("unmodeled token %r in %r" % (t[i], rule))
+        if ok and new is not None:
+            mark = new
+    return mark
+
 
 class TestExitRoute(unittest.TestCase):
     def _executable(self, path, body):
@@ -32,6 +67,7 @@ class TestExitRoute(unittest.TestCase):
         quote_comments=False,
         table_alias=None,
         registry_mode="json",
+        initial_forward=(),
     ):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)
@@ -58,7 +94,7 @@ class TestExitRoute(unittest.TestCase):
             route = root / "route"
             route.write_text("" if initial_route is None else "|".join(initial_route) + "\n")
             forward = root / "forward"
-            forward.write_text("")
+            forward.write_text("".join(f"{row}\n" for row in initial_forward))
             nat = root / "nat"
             nat.write_text("")
             rule_show_count = root / "rule-show-count"
@@ -148,19 +184,28 @@ class TestExitRoute(unittest.TestCase):
                     def write_lines(path, values):
                         path.write_text("".join(f"{value}\n" for value in values))
 
+                    # Rows: ip|comment|mark[|legacy]. Legacy rows model the pre-guard
+                    # rule form (no iif / mark==0 match) left over from older releases.
+                    def parse(row):
+                        parts = row.split("|")
+                        return parts[0], parts[1], parts[2], len(parts) > 3 and parts[3] == "legacy"
+
                     if args == ["-t", "mangle", "-L", "PREROUTING", "-n", "-v", "--line-numbers"]:
                         for number, row in enumerate(lines(marks), 1):
-                            ip, comment, mark = row.split("|")
-                            print(f"{number} 0 0 MARK all -- * * {ip}/32 0.0.0.0/0 /* {comment} */ MARK set {mark}")
+                            ip, comment, mark, legacy = parse(row)
+                            match = "" if legacy else "mark match 0x0 "
+                            print(f"{number} 0 0 MARK all -- wg-cl * {ip}/32 0.0.0.0/0 {match}/* {comment} */ MARK set {mark}")
                         sys.exit(0)
                     if args == ["-t", "mangle", "-S", "PREROUTING"]:
                         if "mark_inspect" in failures:
                             sys.exit(1)
                         for row in lines(marks):
-                            ip, comment, mark = row.split("|")
+                            ip, comment, mark, legacy = parse(row)
                             if os.environ["FAKE_QUOTE_COMMENTS"] == "1":
                                 comment = f'"{comment}"'
-                            print(f"-A PREROUTING -s {ip}/32 -m comment --comment {comment} -j MARK --set-mark {mark}")
+                            guard = "" if legacy else "-i wg-cl "
+                            match = "" if legacy else "-m mark --mark 0x0 "
+                            print(f"-A PREROUTING {guard}-s {ip}/32 {match}-m comment --comment {comment} -j MARK --set-xmark {mark}/0xffffffff")
                         sys.exit(0)
                     if args[:4] == ["-t", "mangle", "-D", "PREROUTING"] and len(args) == 5:
                         number = int(args[4])
@@ -172,12 +217,13 @@ class TestExitRoute(unittest.TestCase):
                     if args[:4] in (
                         ["-t", "mangle", "-C", "PREROUTING"],
                         ["-t", "mangle", "-A", "PREROUTING"],
-                    ) and len(args) == 14:
+                    ) and len(args) == 20:
                         op = args[2]
-                        expected = ["-s", args[5], "-m", "comment", "--comment", "wgui-exit-us", "-j", "MARK", "--set-mark", "0x65"]
-                        if args[4:] != expected or not args[5].endswith("/32"):
+                        expected = ["-i", "wg-cl", "-s", args[7], "-m", "mark", "--mark", "0",
+                                    "-m", "comment", "--comment", "wgui-exit-us", "-j", "MARK", "--set-mark", "0x65"]
+                        if args[4:] != expected or not args[7].endswith("/32"):
                             sys.exit(64)
-                        row = f"{args[5][:-3]}|wgui-exit-us|0x65"
+                        row = f"{args[7][:-3]}|wgui-exit-us|0x65"
                         if op == "-C":
                             sys.exit(0 if row in lines(marks) else 1)
                         if "mark" in failures:
@@ -199,8 +245,19 @@ class TestExitRoute(unittest.TestCase):
                             sys.exit(1)
                         key = "out" if args == forward_out_add else "return"
                         if "forward" not in silent and key not in lines(forward):
-                            with forward.open("a") as f:
-                                f.write(key + "\n")
+                            write_lines(forward, [key] + lines(forward))
+                        sys.exit(0)
+                    if args == ["-S", "FORWARD"]:
+                        if "forward_inspect" in failures:
+                            sys.exit(1)
+                        render = {
+                            "out": "-A FORWARD -i wg-cl -o wg-us -j ACCEPT",
+                            "return": "-A FORWARD -i wg-us -o wg-cl -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+                            "drop": "-A FORWARD -s 10.10.0.0/24 ! -d 10.10.0.0/24 ! -o wg-do -j DROP",
+                        }
+                        print("-P FORWARD ACCEPT")
+                        for key in lines(forward):
+                            print(render[key])
                         sys.exit(0)
 
                     nat_check = ["-t", "nat", "-C", "POSTROUTING", "-o", "wg-us", "-j", "MASQUERADE"]
@@ -244,7 +301,12 @@ class TestExitRoute(unittest.TestCase):
                 text=True,
                 timeout=10,
             )
+            rendered = subprocess.run(
+                [str(bindir / "iptables"), "-t", "mangle", "-S", "PREROUTING"],
+                env=dict(env, FAKE_FAILURES=""), capture_output=True, text=True,
+            ).stdout.splitlines()
             return result, {
+                "mangle": rendered,
                 "marks": [tuple(row.split("|")) for row in marks.read_text().splitlines()],
                 "policy": policy.read_text().splitlines(),
                 "route": route.read_text().strip(),
@@ -350,7 +412,7 @@ class TestExitRoute(unittest.TestCase):
         self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
         self.assertEqual(state["policy"], [CORRECT_POLICY])
         self.assertEqual(state["route"], "wg-us|65")
-        self.assertEqual(state["forward"], ["out", "return"])
+        self.assertEqual(sorted(state["forward"]), ["out", "return"])
         self.assertEqual(state["nat"], ["wg-us"])
         self.assertIn("synced 1 US client", result.stdout)
 
@@ -459,6 +521,146 @@ class TestExitRoute(unittest.TestCase):
             [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
             iface_up=True,
             failures=("route_inspect",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_us_mark_rule_is_guarded_and_client_scoped(self):
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (rule,) = state["mangle"]
+        self.assertIn("-i wg-cl ", rule)
+        self.assertIn("-m mark --mark 0x0 ", rule)
+
+    def test_ru_direct_wins_in_either_rule_order(self):
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        us_rules = state["mangle"]
+        for label, chain in (("split first", [SPLIT_RULE] + us_rules),
+                             ("us first", us_rules + [SPLIT_RULE])):
+            with self.subTest(order=label):
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "wg-cl", ru_dst=True), 0x64)
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "wg-cl", ru_dst=False), 0x65)
+                self.assertEqual(mangle_mark(chain, "10.10.0.3", "wg-cl", ru_dst=False), 0)
+                self.assertEqual(mangle_mark(chain, "10.10.0.2", "ens3", ru_dst=False), 0)
+
+    def test_legacy_unguarded_mark_is_replaced_on_sync(self):
+        legacy = ("10.10.0.2", COMMENT, MARK, "legacy")
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_marks=(legacy,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["marks"], [("10.10.0.2", COMMENT, MARK)])
+        self.assertTrue(all("--mark 0x0" in rule for rule in state["mangle"]))
+
+    def test_early_nl_rule_fails_sync_with_us_clients(self):
+        # 2026-10-14: wg-do re-added its rule without a priority and it landed at 999.
+        early = "999: from 10.10.0.0/24 lookup 200"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(early,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("RPDB contract", result.stderr)
+        self.assertIn(early, result.stderr)
+
+    def test_early_rule_only_warns_without_us_clients(self):
+        early = "999: from 10.10.0.0/24 lookup 200"
+        for iface_up in (True, False):
+            with self.subTest(iface_up=iface_up):
+                result, _ = self.run_sync([], iface_up=iface_up, initial_policy=(early,))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("RPDB contract", result.stderr)
+
+    def test_full_contract_passes(self):
+        contract = (
+            "0: from all lookup local",
+            "1000: from all fwmark 0x64 lookup main",
+            CORRECT_POLICY,
+            "32765: from 10.10.0.0/24 lookup 200",
+            "32766: from all lookup main",
+            "32767: from all lookup default",
+        )
+        result, state = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=contract,
+            initial_forward=("drop",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("RPDB", result.stderr)
+        self.assertEqual(state["forward"][-1], "drop")
+
+    def test_negated_fwmark_rule_ahead_of_marks_is_a_conflict(self):
+        rule = "900: not from all fwmark 0xca6c lookup 51820"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(rule,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(rule, result.stderr)
+
+    def test_split_rule_behind_us_rule_fails(self):
+        late_split = "1200: from all fwmark 0x64 lookup main"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(late_split,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("split rule must precede", result.stderr)
+
+    def test_nl_rule_at_unexpected_priority_is_reported(self):
+        odd = "20000: from 10.10.0.0/24 lookup 200"
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_policy=(odd,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected at priority 32765", result.stderr)
+
+    def test_silently_missing_forward_accept_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            silent_applies=("forward",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FORWARD accept rules", result.stderr)
+
+    def test_silently_missing_nat_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            silent_applies=("nat",),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("NAT rule", result.stderr)
+
+    def test_forward_accept_below_kill_switch_fails(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            initial_forward=("drop", "out", "return"),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("below the kill-switch DROP", result.stderr)
+
+    def test_forward_inspect_failure_propagates(self):
+        result, _ = self.run_sync(
+            [{"ip": "10.10.0.2", "exit": "us", "enabled": True}],
+            iface_up=True,
+            failures=("forward_inspect",),
         )
         self.assertNotEqual(result.returncode, 0)
 
