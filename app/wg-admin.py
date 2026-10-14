@@ -190,12 +190,64 @@ def regenerate(clients):
         pass
     write_atomic(WG_CONF, new, 0o600)
     write_atomic(NAMES_JSON, json.dumps({c["pubkey"]: c["name"] for c in clients}), 0o644)
+    sync_kernel()
+
+def sync_kernel():
+    """Load wg-cl.conf peers into the kernel; raises RuntimeError on failure."""
     strip = run(["wg-quick", "strip", IFACE])
     if strip.returncode != 0:
-        die("wg-quick strip failed: " + strip.stderr.strip())
+        raise RuntimeError("wg-quick strip failed: " + strip.stderr.strip())
     sync = run(["wg", "syncconf", IFACE, "/dev/stdin"], inp=strip.stdout)
     if sync.returncode != 0:
-        die("wg syncconf failed: " + sync.stderr.strip())
+        raise RuntimeError("wg syncconf failed: " + sync.stderr.strip())
+
+def _txn_files():
+    return ((CLIENTS_JSON, 0o644), (WG_CONF, 0o600), (NAMES_JSON, 0o644))
+
+def _snapshot_files():
+    snap = []
+    for path, mode in _txn_files():
+        try:
+            with open(path, "rb") as f:
+                snap.append((path, mode, f.read()))
+        except FileNotFoundError:
+            snap.append((path, mode, None))
+    return snap
+
+def _restore_files(snap):
+    for path, mode, data in snap:
+        if data is None:
+            try: os.unlink(path)
+            except FileNotFoundError: pass
+        else:
+            write_atomic(path, data, mode)
+
+def apply_clients(clients, regen=True, on_fail=None):
+    """Commit a registry change to disk, kernel peers and exit routes as one unit.
+
+    Any failure restores clients.json / wg-cl.conf / names.json byte-for-byte,
+    re-applies the restored state, runs on_fail (undo side files), and dies with
+    an error that says whether the rollback itself worked.
+    """
+    snap = _snapshot_files()
+    try:
+        save_clients(clients)
+        if regen:
+            regenerate(clients)
+        run_exit_sync_or_raise()
+    except Exception as apply_error:
+        try:
+            _restore_files(snap)
+            if regen:
+                sync_kernel()
+            run_exit_sync_or_raise()
+        except Exception as rollback_error:
+            die("apply failed: %s; rollback failed: %s" % (apply_error, rollback_error))
+        finally:
+            if on_fail:
+                try: on_fail()
+                except Exception: pass
+        die("apply failed and rolled back: %s" % apply_error)
 
 # ----------------------------------------------------------------------- helpers
 def next_free_ip(clients):
@@ -452,9 +504,12 @@ def op_add(name, expires="0", exit_="nl"):
     if exp > 0:
         entry["expires"] = exp
     clients.append(entry)
-    save_clients(clients)
-    regenerate(clients)
-    sync_exit_routes()
+
+    def drop_files():
+        for p_ in (cpath, ppath):
+            try: os.unlink(p_)
+            except OSError: pass
+    apply_clients(clients, on_fail=drop_files)
     audit("add", name + (" (temporary)" if exp else "") + (" → us" if exit_ == "us" else ""))
     ok({"name": name, "ip": ip, "pubkey": pub, "conf": conf, "qr": qr, "exit": exit_})
 
@@ -470,12 +525,17 @@ def op_rename(pub, newname):
         die("a client named '%s' already exists" % newname)
     old = c["name"]
     oc, op_ = paths(old); nc, np_ = paths(newname)
+    moved = []
     for src, dst in ((oc, nc), (op_, np_)):
         if os.path.exists(src):
             os.replace(src, dst)
+            moved.append((src, dst))
     c["name"] = newname
-    save_clients(clients)
-    regenerate(clients)
+
+    def unmove():
+        for src, dst in reversed(moved):
+            os.replace(dst, src)
+    apply_clients(clients, on_fail=unmove)
     audit("rename", "%s -> %s" % (old, newname))
     ok()
 
@@ -487,9 +547,9 @@ def op_setenabled(pub, val):
     clients = load_clients()
     c = find(clients, pub)
     c["enabled"] = (val == "1")
-    save_clients(clients)
-    regenerate(clients)
-    sync_exit_routes(flush_ip=c["ip"] if val == "0" else None)
+    apply_clients(clients)
+    if val == "0":
+        flush_exit_conntrack(c["ip"])
     audit("enable" if val == "1" else "disable", c["name"])
     ok()
 
@@ -502,12 +562,11 @@ def op_delete(pub):
     nm = c["name"]
     ip = c["ip"]
     clients = [x for x in clients if x["pubkey"] != pub]
-    save_clients(clients)
-    regenerate(clients)
-    for p in (cpath, ppath):
+    apply_clients(clients)
+    for p in (cpath, ppath):        # only after the peer is really gone
         try: os.unlink(p)
         except OSError: pass
-    sync_exit_routes(flush_ip=ip)
+    flush_exit_conntrack(ip)
     audit("delete", nm)
     ok()
 
@@ -519,13 +578,14 @@ def op_setexit(pub, exit_):
     c = find(clients, pub)
     old = client_exit(c)
     if old == exit_:
+        sync_exit_routes()      # retry reconciles kernel state with the registry
         ok({"name": c["name"], "exit": exit_})
     if exit_ == "nl":
         c.pop("exit", None)   # absence == nl (keep JSON lean)
     else:
         c["exit"] = exit_
-    save_clients(clients)
-    sync_exit_routes(flush_ip=c["ip"])
+    apply_clients(clients, regen=False)
+    flush_exit_conntrack(c["ip"])
     audit("setexit", "%s %s -> %s" % (c["name"], old, exit_))
     ok({"name": c["name"], "exit": exit_})
 
@@ -573,9 +633,7 @@ def op_expire():
     if expired:
         for c in expired:
             c["enabled"] = False
-        save_clients(clients)
-        regenerate(clients)
-        sync_exit_routes()
+        apply_clients(clients)
         for c in expired:
             audit("expire", c["name"])
     ok({"expired": [c["name"] for c in expired]})
@@ -646,7 +704,9 @@ def op_splitsave(refresh, entries):
     r = run(["python3", BUILD_SPLIT] + (["--refresh"] if refresh == "1" else []), timeout=90)
     if r.returncode != 0:
         die("rebuild failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
-    run([SPLIT_SH, "reload"], timeout=30)          # server-side: repopulate the ipset
+    r = run([SPLIT_SH, "reload"], timeout=30)      # server-side: repopulate the ipset
+    if r.returncode != 0:
+        die("split reload failed: " + ((r.stderr or r.stdout) or "").strip()[-200:])
     audit("split-list", ("refreshed RU + " if refresh == "1" else "") + "%d custom" % len(clean))
     ok(splitinfo_data())
 
@@ -677,7 +737,7 @@ def main():
     elif op == "splitinfo":               op_splitinfo()
     elif op == "splitsave"  and len(a) >= 1: op_splitsave(a[0], a[1:])
     elif op == "splitserver" and len(a) >= 1: op_splitserver(a[0])
-    elif op == "regenerate":              regenerate(load_clients()); ok()
+    elif op == "regenerate":              apply_clients(load_clients()); ok()
     else:                                  die("bad operation or arguments")
 
 if __name__ == "__main__":
