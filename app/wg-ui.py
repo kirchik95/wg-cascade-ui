@@ -50,7 +50,7 @@ ADMIN       = ["sudo", "-n", "/usr/bin/python3", "/opt/wg-ui/wg-admin.py"]
 DB          = os.environ.get("WGUI_DB", "/var/lib/wg-ui/history.db")
 EXIT_POLICY = os.environ.get("WGUI_EXIT_POLICY", "/etc/wg-ui/exit-policy.json")
 SPLIT_STATE = os.environ.get("WGUI_SPLIT_STATE", "/etc/wg-ui/split-server.state")
-AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/lib/wg-ui/audit.log")
+AUDIT_LOG   = os.environ.get("WGUI_AUDIT", "/var/log/wg-ui/audit.log")
 MAX_CONN    = int(os.environ.get("WGUI_MAX_CONN", "64"))
 _STARTED_AT = time.time()
 

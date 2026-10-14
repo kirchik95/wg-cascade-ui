@@ -472,17 +472,57 @@ class TestAuditRotate(unittest.TestCase):
         finally:
             wgui.AUDIT_LOG = saved
 
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="audit-", dir=TMP)
+        self.saved = (wgadmin.AUDIT_DIR, wgadmin.LEGACY_AUDIT, wgadmin.AUDIT_MAX_BYTES)
+        wgadmin.AUDIT_DIR = self.dir
+        wgadmin.LEGACY_AUDIT = os.path.join(TMP, "no-legacy.log")
+
+    def tearDown(self):
+        wgadmin.AUDIT_DIR, wgadmin.LEGACY_AUDIT, wgadmin.AUDIT_MAX_BYTES = self.saved
+
+    def _path(self):
+        return os.path.join(self.dir, "audit.log")
+
     def test_audit_rotate_trims(self):
-        saved = (wgadmin.AUDIT_LOG, wgadmin.AUDIT_MAX_BYTES)
-        path = os.path.join(TMP, "audit-rot.log")
-        wgadmin.AUDIT_LOG = path
         wgadmin.AUDIT_MAX_BYTES = 200
-        try:
-            for i in range(50):
-                wgadmin.audit("op", "detail-%d" % i)
-            self.assertTrue(os.path.getsize(path) <= wgadmin.AUDIT_MAX_BYTES + 500)
-        finally:
-            wgadmin.AUDIT_LOG, wgadmin.AUDIT_MAX_BYTES = saved
+        for i in range(50):
+            wgadmin.audit("op", "detail-%d" % i)
+        self.assertTrue(os.path.getsize(self._path()) <= wgadmin.AUDIT_MAX_BYTES + 500)
+        with open(self._path()) as f:
+            rows = [json.loads(l) for l in f]
+        self.assertEqual(rows[-1]["detail"], "detail-49")
+
+    def test_audit_refuses_symlinked_log(self):
+        victim = os.path.join(TMP, "victim.txt")
+        with open(victim, "w") as f:
+            f.write("keep")
+        os.chmod(victim, 0o600)
+        os.symlink(victim, self._path())
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            wgadmin.audit("op", "x")
+        self.assertIn("audit write failed", err.getvalue())
+        with open(victim) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(os.stat(victim).st_mode & 0o777, 0o600)
+
+    def test_audit_refuses_group_writable_dir(self):
+        os.chmod(self.dir, 0o770)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            wgadmin.audit("op", "x")
+        self.assertIn("audit write failed", err.getvalue())
+        self.assertFalse(os.path.exists(self._path()))
+
+    def test_audit_carries_over_legacy_log(self):
+        legacy = os.path.join(TMP, "legacy-audit.log")
+        with open(legacy, "w") as f:
+            f.write(json.dumps({"ts": 1, "op": "old", "detail": ""}) + "\n")
+        wgadmin.LEGACY_AUDIT = legacy
+        wgadmin.audit("new", "")
+        with open(self._path()) as f:
+            ops = [json.loads(l)["op"] for l in f]
+        self.assertEqual(ops, ["old", "new"])
+        self.assertEqual(os.stat(self._path()).st_mode & 0o777, 0o640)
 
 
 class TestHealthHandler(unittest.TestCase):

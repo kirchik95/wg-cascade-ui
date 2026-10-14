@@ -60,14 +60,16 @@ useradd --system --home /home/wgui --shell /usr/sbin/nologin wgui
 ```sh
 install -d -o root -g root  -m 755 /opt/wg-ui          # code (world-readable)
 install -d -o root -g wgui  -m 750 /etc/wg-ui          # config + secrets (wgui reads)
-install -d -o wgui -g wgui  -m 750 /var/lib/wg-ui      # history.db + audit.log
+install -d -o wgui -g wgui  -m 750 /var/lib/wg-ui      # history.db, session.gen
+install -d -o root -g wgui  -m 750 /var/log/wg-ui      # audit.log (root helper writes, wgui reads)
 ```
 
 | Dir | Owner | Mode | Holds |
 | --- | --- | --- | --- |
 | `/opt/wg-ui` | `root:root` | 755 | the code (from `app/`) |
 | `/etc/wg-ui` | `root:wgui` | 750 | `cert.pem`, `key.pem`, `wg-ui.env`, `clients.json`, `exit-policy.json`, split data |
-| `/var/lib/wg-ui` | `wgui:wgui` | 750 | `history.db` (service), `audit.log` (helper, as root) |
+| `/var/lib/wg-ui` | `wgui:wgui` | 750 | `history.db`, `session.gen` (service) |
+| `/var/log/wg-ui` | `root:wgui` | 750 | `audit.log` (helper, as root; wgui can read but not replace it) |
 
 ---
 
@@ -293,7 +295,7 @@ the reason; an automatic block remains as a critical main-screen alert and is
 retried by the server. For `counter_unavailable`, verify that both exit
 interfaces are up, their `wg show ... dump` commands work through the configured
 sudoers rules, and the service is collecting samples. For `helper_failed`, check
-`journalctl -u wg-ui.service`, `/var/lib/wg-ui/audit.log`, and
+`journalctl -u wg-ui.service`, `/var/log/wg-ui/audit.log`, and
 `/opt/wg-ui/exit-route.sh status` before retrying.
 
 The helper applies and verifies the new registry and routing as one operation.

@@ -36,7 +36,9 @@ SPLIT_SH     = "/opt/wg-ui/split-server.sh"        # server-side global RU-direc
 EXIT_SH      = "/opt/wg-ui/exit-route.sh"          # per-client NL/US exit routing
 CLIENT_DIR   = "/etc/wireguard/clients"
 LOCKFILE     = "/etc/wg-ui/.adminlock"
-AUDIT_LOG    = "/var/lib/wg-ui/audit.log"          # append-only admin action log (UI reads it)
+AUDIT_DIR    = "/var/log/wg-ui"                    # root-owned: wgui can read but not swap entries
+AUDIT_LOG    = os.path.join(AUDIT_DIR, "audit.log")  # append-only admin action log (UI reads it)
+LEGACY_AUDIT = "/var/lib/wg-ui/audit.log"          # pre-2026-10 location (wgui-owned dir)
 AUDIT_MAX_BYTES = 512 * 1024                       # rotate when larger — keep last half
 SUBNET_PRE   = "10.10.0."
 SERVER_IP    = 1                       # 10.10.0.1 reserved for the server
@@ -238,24 +240,87 @@ def paths(name):
     return (os.path.join(CLIENT_DIR, name + ".conf"),
             os.path.join(CLIENT_DIR, name + ".png"))
 
-def audit(op, detail=""):
-    """Append-only admin-action log; the web service reads it for the UI Audit view."""
+def _audit_dir_fd(audit_dir, gid):
+    """Open the audit dir, creating it root:wgui 0750; refuse anything but a root-owned real dir."""
     try:
-        try:
-            if os.path.getsize(AUDIT_LOG) > AUDIT_MAX_BYTES:
-                with open(AUDIT_LOG, "rb") as f:
-                    f.seek(max(0, os.path.getsize(AUDIT_LOG) - AUDIT_MAX_BYTES // 2))
-                    f.readline()  # drop partial first line
-                    keep = f.read()
-                with open(AUDIT_LOG, "wb") as f:
-                    f.write(keep)
-        except OSError:
-            pass
-        with open(AUDIT_LOG, "a") as f:
-            f.write(json.dumps({"ts": int(time.time()), "op": op, "detail": detail}) + "\n")
-        os.chmod(AUDIT_LOG, 0o644)
-    except Exception:
+        os.mkdir(audit_dir, 0o750)
+    except FileExistsError:
         pass
+    dfd = os.open(audit_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    st = os.fstat(dfd)
+    if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        os.close(dfd)
+        raise PermissionError("audit dir must be owned by the helper user and not group/world-writable")
+    if st.st_gid != gid or st.st_mode & 0o777 != 0o750:
+        os.fchown(dfd, -1, gid)
+        os.fchmod(dfd, 0o750)
+    return dfd
+
+def _audit_gid():
+    try:
+        return grp.getgrnam("wgui").gr_gid
+    except KeyError:
+        return os.getegid()
+
+def _read_nofollow(path, dir_fd=None):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    with os.fdopen(fd, "rb") as f:
+        return f.read()
+
+def audit(op, detail="", audit_dir=None):
+    """Append-only admin-action log; the web service reads it for the UI Audit view.
+
+    Runs as root, so every path step refuses symlinks (O_NOFOLLOW + dir fd) and
+    rotation swaps a fresh file in via rename inside the root-owned directory.
+    Failures go to stderr instead of vanishing silently.
+    """
+    audit_dir = audit_dir or AUDIT_DIR
+    name = os.path.basename(AUDIT_LOG)
+    line = (json.dumps({"ts": int(time.time()), "op": op, "detail": detail}) + "\n").encode()
+    dfd = None
+    try:
+        gid = _audit_gid()
+        dfd = _audit_dir_fd(audit_dir, gid)
+        try:
+            os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        keep = b""
+        if not exists:
+            try:  # one-time carry-over from the old wgui-owned location
+                keep = _read_nofollow(LEGACY_AUDIT)[-AUDIT_MAX_BYTES // 2:]
+            except OSError:
+                keep = b""
+        else:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if st.st_size > AUDIT_MAX_BYTES:
+                data = _read_nofollow(name, dir_fd=dfd)
+                keep = data[-AUDIT_MAX_BYTES // 2:]
+                keep = keep[keep.find(b"\n") + 1:]  # drop partial first line
+        if not exists or keep:
+            tmp = name + ".tmp"
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=dfd)
+            with os.fdopen(fd, "wb") as f:
+                os.fchown(f.fileno(), -1, gid)
+                os.fchmod(f.fileno(), 0o640)
+                f.write(keep)
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=dfd)
+        with os.fdopen(fd, "ab") as f:
+            st = os.fstat(f.fileno())
+            if st.st_uid != os.geteuid() or st.st_nlink != 1:
+                raise PermissionError("audit log ownership/link count unexpected")
+            f.write(line)
+    except Exception as e:
+        sys.stderr.write("wg-admin: audit write failed: %s\n" % e)
+    finally:
+        if dfd is not None:
+            os.close(dfd)
 
 def normalize_exit(val):
     try:
