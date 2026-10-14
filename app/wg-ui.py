@@ -399,7 +399,7 @@ def _set_incomplete_policy_block(incomplete, assignments):
     return value
 
 
-def _guarded_exit_switch_locked(target, reason, inputs=None):
+def _guarded_exit_switch_locked(target, reason, inputs=None, actor="system", ip=None):
     policy, usage, assignments, health, warning = inputs or policy_inputs()
     availability = counter_availability()
     source = "us" if target == "nl" else "nl"
@@ -442,6 +442,9 @@ def _guarded_exit_switch_locked(target, reason, inputs=None):
             "reason": reason,
             "changed": result.get("changed", 0),
         }
+        if event["changed"]:
+            record_event("exit_switch", subject="%s->%s" % (source, target), actor=actor, ip=ip,
+                         data=dict(event), ts=event["ts"])
         with _lock:
             _policy_runtime["blocked"] = None
             _policy_runtime["last_switch"] = event
@@ -458,9 +461,9 @@ def _guarded_exit_switch_locked(target, reason, inputs=None):
     return result
 
 
-def guarded_exit_switch(target, reason):
+def guarded_exit_switch(target, reason, actor="system", ip=None):
     with _policy_lock:
-        return _guarded_exit_switch_locked(target, reason)
+        return _guarded_exit_switch_locked(target, reason, actor=actor, ip=ip)
 
 
 def _evaluate_auto_switch_locked(inputs=None):
@@ -646,12 +649,27 @@ def _probe_egress():
         t.join(20)
     return {key: out.get(key, (False, None)) for key in ("nl", "us")}
 
+def _health_transition(prev, cur):
+    """A confirmed state change worth a journal row: up<->down, and a start that
+    comes up already down. unknown -> up is the normal start and stays quiet."""
+    old, new = (prev or {}).get("state", "unknown"), cur.get("state", "unknown")
+    return old != new and new in ("up", "down") and not (old == "unknown" and new == "up")
+
 def _record_probe(res, now):
+    transitions = []
     with _lock:
         for key in ("nl", "us"):
             ok_, ip = res[key]
             _egress[key].update(ok=ok_, seen=ip, at=now)
-            _health[key] = exit_policy.next_health_state(_health[key], ok_, now)
+            prev = _health[key]
+            _health[key] = exit_policy.next_health_state(prev, ok_, now)
+            if _health_transition(prev, _health[key]):
+                transitions.append((key, prev.get("state", "unknown"), _health[key], ip))
+    for key, old, cur, ip in transitions:      # journal writes happen outside _lock
+        record_event("health", subject=key, actor="system",
+                     data={"exit": key, "from": old, "to": cur["state"], "since": cur.get("since"),
+                           "fails": cur.get("fails", 0), "oks": cur.get("oks", 0), "seen": ip},
+                     ts=now)
 
 def _sampler_note(ok=True, err=None):
     with _lock:
@@ -1084,6 +1102,11 @@ def db_init():
         # Month/daily aggregates filter on day across all clients; the (pubkey, day)
         # PK cannot serve that, so without this index they scan the whole history.
         c.execute("CREATE INDEX IF NOT EXISTS ix_usage_day ON usage(day)")
+        # Panel event journal (logins, admin ops, exit health, switches) — see record_event.
+        c.execute("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, "
+                  "kind TEXT NOT NULL, actor TEXT, ip TEXT, subject TEXT, data_json TEXT)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_events_kind ON events(kind, id)")
         c.commit()
         c.execute("PRAGMA optimize")
         c.close()
@@ -1153,6 +1176,122 @@ def audit_tail(limit=50):
         return [json.loads(l) for l in reversed(lines)]
     except Exception:
         return []
+
+# ------------------------------------------------------------- event journal
+# One durable, queryable journal for what the panel and the server did: logins,
+# admin operations (with actor/IP and the helper's verdict), exit health
+# transitions and exit switches. The helper's audit.log stays the root-side
+# record of mutations; this table is what the UI timeline reads.
+EVENT_KINDS = ("login", "logout_all", "admin", "health", "exit_switch")
+EVENTS_RETENTION_DAYS = int(os.environ.get("WGUI_EVENTS_RETENTION_DAYS", "90"))
+EVENTS_MAX_ROWS = int(os.environ.get("WGUI_EVENTS_MAX_ROWS", "20000"))
+EVENTS_PAGE_MAX = 200
+_event_err = {"logged": None}
+
+def record_event(kind, subject=None, actor=None, ip=None, data=None, ts=None):
+    """Append one event; returns its id, or None when the journal is unavailable.
+
+    Never raises: losing a journal row must not fail the login, the admin op or
+    the failover it describes. Each distinct storage error is logged once.
+    """
+    try:
+        payload = json.dumps(data or {}, separators=(",", ":"), default=str)
+        with _db(write=True) as c:
+            cur = c.execute("INSERT INTO events(ts, kind, actor, ip, subject, data_json) "
+                            "VALUES(?,?,?,?,?,?)",
+                            (int(ts if ts is not None else time.time()), kind,
+                             actor, ip, subject, payload))
+            event_id = cur.lastrowid
+    except Exception as exc:
+        msg = str(exc)[:200]
+        if _event_err["logged"] != msg:
+            _event_err["logged"] = msg
+            log_event("events", ok=False, kind=kind, error=msg)
+        return None
+    _event_err["logged"] = None
+    return event_id
+
+def _event_row(r):
+    try:
+        data = json.loads(r["data_json"] or "{}")
+    except ValueError:
+        data = {}
+    return {"id": r["id"], "ts": r["ts"], "kind": r["kind"], "actor": r["actor"],
+            "ip": r["ip"], "subject": r["subject"], "data": data}
+
+def events_page(before=None, limit=50, kinds=None):
+    """Newest-first page of events with id < before. Raises sqlite3.Error."""
+    sql = "SELECT id, ts, kind, actor, ip, subject, data_json FROM events"
+    where, args = [], []
+    if before:
+        where.append("id < ?"); args.append(int(before))
+    if kinds:
+        where.append("kind IN (%s)" % ",".join("?" * len(kinds))); args.extend(kinds)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    with _db() as c:
+        rows = c.execute(sql, args).fetchall()
+    return [_event_row(r) for r in rows]
+
+def event_by_id(event_id):
+    """One event or None. Raises sqlite3.Error."""
+    with _db() as c:
+        r = c.execute("SELECT id, ts, kind, actor, ip, subject, data_json FROM events WHERE id=?",
+                      (int(event_id),)).fetchone()
+    return _event_row(r) if r else None
+
+def parse_events_query(query):
+    """/api/events query → (before, limit, kinds, event_id); raises ValueError."""
+    q = parse_qs(query)
+    def one(name):
+        return (q.get(name) or [""])[0].strip()
+    def positive(name):
+        raw = one(name)
+        if not raw:
+            return None
+        if not raw.isdigit() or int(raw) <= 0:
+            raise ValueError("invalid %s" % name)
+        return int(raw)
+    event_id = positive("id")
+    before = positive("before")
+    limit = positive("limit") or 50
+    if limit > EVENTS_PAGE_MAX:
+        raise ValueError("invalid limit")
+    kinds = [k for k in one("kind").split(",") if k] if one("kind") else []
+    for k in kinds:
+        if k not in EVENT_KINDS:
+            raise ValueError("invalid kind")
+    return before, limit, kinds, event_id
+
+def _events_maintenance(c, stamp):
+    c.execute("DELETE FROM events WHERE ts < ?", (int(stamp - EVENTS_RETENTION_DAYS * 86400),))
+    c.execute("DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC "
+              "LIMIT 1 OFFSET ?)", (EVENTS_MAX_ROWS,))
+
+# Admin-op fields that may enter the journal. Everything else — configs, QR
+# codes, backup archives, passwords, split entry lists — stays out by design.
+_ADMIN_EVENT_REQ = ("name", "pubkey", "exit", "enabled", "expires", "refresh", "split", "event_id")
+_ADMIN_EVENT_RES = ("ok", "committed", "busy", "timeout", "code", "changed", "name", "exit",
+                    "event_id", "cleanup_warning")
+
+def admin_event_data(op, body, res):
+    data = {"op": op}
+    for key in _ADMIN_EVENT_REQ:
+        if isinstance(body, dict) and key in body and isinstance(body[key], (str, int, bool)):
+            data[key] = body[key]
+    if isinstance(body, dict) and isinstance(body.get("entries"), list):
+        data["entries"] = len(body["entries"])
+    for key in _ADMIN_EVENT_RES:
+        if isinstance(res, dict) and key in res:
+            value = res[key]
+            if key == "changed" and isinstance(value, list):
+                value = len(value)
+            data[key] = value
+    if isinstance(res, dict) and not res.get("ok") and res.get("error"):
+        data["error"] = str(res["error"])[:200]
+    return data
 
 def record_usage(cur):
     """cur = {pubkey: (rx_total, tx_total)} cumulative; accumulate deltas into daily buckets,
@@ -1323,6 +1462,7 @@ def db_maintenance(registry=None, now=None):
             marks = ",".join("?" * len(keep))
             c.execute("DELETE FROM counters WHERE pubkey NOT IN (%s)" % marks, keep)
             c.execute("DELETE FROM connections WHERE pubkey NOT IN (%s)" % marks, keep)
+        _events_maintenance(c, stamp)
     with _db() as c:
         c.execute("PRAGMA optimize")
 
@@ -1514,6 +1654,22 @@ class H(BaseHTTPRequestHandler):
                                         "daily": daily, "clients": cl})
             if path.startswith("/api/audit"):
                 return self._json(200, {"events": audit_tail(60)})
+            if path == "/api/events":
+                try:
+                    before, limit, kinds, event_id = parse_events_query(urlparse(self.path).query)
+                except ValueError as e:
+                    return self._json(400, {"error": str(e)})
+                try:
+                    if event_id:
+                        ev = event_by_id(event_id)
+                        if not ev:
+                            return self._json(404, {"error": "event not found"})
+                        return self._json(200, {"event": ev})
+                    rows = events_page(before, limit, kinds)
+                except sqlite3.Error as e:
+                    return self._json(503, {"error": "events unavailable", "detail": str(e)[:120]})
+                nxt = rows[-1]["id"] if len(rows) == limit else None
+                return self._json(200, {"events": rows, "next_before": nxt})
             if path.startswith("/api/connections"):
                 pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
                 try:
@@ -1535,6 +1691,7 @@ class H(BaseHTTPRequestHandler):
             ip = self.client_address[0]
             if login_blocked(ip):
                 log_event("login", ok=False, reason="throttled", ip=ip)
+                record_event("login", ip=ip, data={"ok": False, "reason": "throttled"})
                 return self._send(303, b"", None, {"Location": "/login?e=2"})
             try:
                 form = parse_qs(self._body(BODY_LOGIN_MAX).decode("utf-8", "replace"))
@@ -1548,13 +1705,17 @@ class H(BaseHTTPRequestHandler):
                     tok = make_token(u, int(time.time()) + SESSION_TTL)
                 except RuntimeError as e:
                     log_event("login", ok=False, reason="session_gen", ip=ip, error=str(e))
+                    record_event("login", actor=u, ip=ip, data={"ok": False, "reason": "session_gen"})
                     return self._send(503, b"session state unavailable")
                 cookie = ("wgui_session=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d"
                           % (tok, SESSION_TTL))
                 log_event("login", ok=True, user=u, ip=ip)
+                record_event("login", actor=u, ip=ip, data={"ok": True})
                 return self._send(303, b"", None, {"Location": "/", "Set-Cookie": cookie})
             login_failed(ip)
             log_event("login", ok=False, reason="bad_creds", ip=ip)
+            # The attempted username is not stored: a password typed into it would leak.
+            record_event("login", ip=ip, data={"ok": False, "reason": "bad_creds"})
             time.sleep(1.0)
             return self._send(303, b"", None, {"Location": "/login?e=1"})
         if path == "/logout-all":
@@ -1568,6 +1729,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json(500, {"ok": False, "error": "cannot bump session gen: %s" % e})
             log_event("logout_all", user=user, ip=self.client_address[0])
+            record_event("logout_all", actor=user, ip=self.client_address[0], data={"ok": True})
             return self._json(200, {"ok": True})
         if path == "/api/admin":
             user = self._user()
@@ -1617,9 +1779,11 @@ class H(BaseHTTPRequestHandler):
                     target = normalize_exit(target)
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
-                res = guarded_exit_switch(target, "manual")
+                res = guarded_exit_switch(target, "manual", actor=user, ip=self.client_address[0])
                 log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                           ip=self.client_address[0], name=None)
+                record_event("admin", subject=op, actor=user, ip=self.client_address[0],
+                             data=admin_event_data(op, b, res))
                 payload = dict(res)
                 http_status = payload.pop("http_status", 200 if payload.get("ok") else 400)
                 return self._json(http_status, payload)
@@ -1656,6 +1820,8 @@ class H(BaseHTTPRequestHandler):
                 if not creds_ok(user, pw):
                     login_failed(ip)
                     log_event("admin", op=op, ok=False, user=user, ip=ip, reason="bad_password")
+                    record_event("admin", subject=op, actor=user, ip=ip,
+                                 data={"op": op, "ok": False, "error": "wrong password"})
                     return self._json(403, {"ok": False, "error": "wrong password"})
                 login_ok(ip)
                 argv = ["export"]
@@ -1686,6 +1852,9 @@ class H(BaseHTTPRequestHandler):
                 res = call_admin(argv)
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
+            if op not in ("getconf", "splitinfo"):        # reads are not journal events
+                record_event("admin", subject=op, actor=user, ip=self.client_address[0],
+                             data=admin_event_data(op, b, res))
             return self._json(200 if res.get("ok") else 400, res)
         self._send(404, b"not found")
 
