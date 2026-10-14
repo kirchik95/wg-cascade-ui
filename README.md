@@ -57,7 +57,8 @@ app/                    # deployed verbatim to /opt/wg-ui/ on the entry node
   index.html login.html # HTML shells
   app.css app.js cascade.js clients.js  # front end (bento UI, i18n, charts, PWA)
   exit_model.py         # shared NL/US exit contract (admin + UI + exit-route)
-  sw.js manifest.webmanifest icon*.png icon.svg inter.woff2   # PWA + self-hosted font
+  sw.js manifest.webmanifest icon*.png icon.svg   # PWA
+  fonts/                # self-hosted JetBrains Mono + Inter Tight (woff2 subsets, OFL)
   build-split.py split-server.sh exit-route.sh refresh-names.sh   # split + per-client exit + helpers
 deploy/
   wg-ui.service         # systemd unit (secrets via EnvironmentFile, none inline)

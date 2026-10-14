@@ -1736,6 +1736,10 @@ def asset(name):
         return f.read()
 
 
+# Self-hosted fonts (app/fonts, OFL): an explicit list, so no path ever reaches the disk.
+FONTS = frozenset("/fonts/%s-%s.woff2" % (family, subset)
+                  for family in ("jetbrains-mono", "inter-tight") for subset in ("latin", "cyrillic"))
+
 CSP = ("default-src 'self'; script-src 'self'; "
        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; "
@@ -1814,7 +1818,7 @@ class H(BaseHTTPRequestHandler):
             # Skip noisy public assets + high-frequency status polls
             if path not in ("/api/status", "/healthz") and not path.startswith(
                     ("/app.", "/core.", "/dashboard.", "/modals.", "/pages.", "/boot.", "/theme.",
-                     "/icon", "/inter.", "/sw.js", "/manifest", "/cascade.", "/clients.")):
+                     "/login.js", "/icon", "/fonts/", "/sw.js", "/manifest", "/cascade.", "/clients.")):
                 ms = int((time.time() - t0) * 1000) if t0 else None
                 log_event("http", method=self.command, path=path, status=code,
                           ms=ms, ip=self.client_address[0])
@@ -1858,6 +1862,7 @@ class H(BaseHTTPRequestHandler):
                "/app.js": "application/javascript",
                "/core.js": "application/javascript",
                "/dashboard.js": "application/javascript",
+               "/icons.js": "application/javascript",
                "/modals.js": "application/javascript",
                "/pages.js": "application/javascript",
                "/boot.js": "application/javascript",
@@ -1884,10 +1889,10 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), "image/png", {"Cache-Control": "max-age=86400"})
             except Exception:
                 return self._send(404, b"")
-        if path == "/inter.woff2":
+        if path in FONTS:
             try:
-                with open("/opt/wg-ui/inter.woff2", "rb") as f:
-                    return self._send(200, f.read(), "font/woff2", {"Cache-Control": "max-age=604800"})
+                return self._send(200, asset("fonts/" + path[len("/fonts/"):]), "font/woff2",
+                                  {"Cache-Control": "max-age=604800"})
             except Exception:
                 return self._send(404, b"")
         if path == "/login":

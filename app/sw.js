@@ -3,8 +3,10 @@ const NET_WAIT_MS=4000;
 const SHELL=[
  '/','/index.html','/login','/login.html',
  '/app.css','/modals.css','/pages.css',
- '/core.js','/dashboard.js','/modals.js','/pages.js',
+ '/icons.js','/core.js','/dashboard.js','/modals.js','/pages.js',
  '/boot.js','/theme.js','/login.js',
+ '/fonts/jetbrains-mono-latin.woff2','/fonts/jetbrains-mono-cyrillic.woff2',
+ '/fonts/inter-tight-latin.woff2','/fonts/inter-tight-cyrillic.woff2',
  '/icon.svg','/apple-touch-icon.png','/manifest.webmanifest'
 ];
 function sameOrigin(url){
