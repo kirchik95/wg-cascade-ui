@@ -70,11 +70,31 @@ function emptyStateHTML(kind){
  }
  return '<div class="empty">'+ic('search',28)+'<b>'+tr('No matches')+'</b><p>'+tr('Try a different name or IP.')+'</p></div>';
 }
+/* Fresh-handshake flashes are restarted in one batch: drop the class now, re-add it in the
+   next frame. No per-card `void el.offsetWidth` (a forced synchronous layout each). */
+let _flashQueue=[];
+function queueFlash(el){el.classList.remove('flash');_flashQueue.push(el);}
+function flushFlashes(){
+ if(!_flashQueue.length)return;
+ const els=_flashQueue;_flashQueue=[];
+ const add=()=>els.forEach(el=>el.classList.add('flash'));
+ if(typeof requestAnimationFrame==='function')requestAnimationFrame(()=>requestAnimationFrame(add));
+ else add();
+}
+function tweenCard(el,p){
+ el.querySelectorAll('.vx').forEach(b=>{
+  const k=b.dataset.k;const to=k.indexOf('rx-')===0?p.rx:p.tx;b.dataset.to=to;tw(b,k,+to,fmtB);
+ });
+}
+function cardFromHTML(html){
+ const tmp=document.createElement('div');tmp.innerHTML=html;
+ return tmp.firstElementChild||tmp.firstChild;
+}
 function updateCardLive(el,p){
  const prevAge=_pv['age-'+p.pubkey];
  const fresh=p.online&&prevAge!=null&&p.age>=0&&p.age<prevAge;
  _pv['age-'+p.pubkey]=p.age;
- if(fresh){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash');}
+ if(fresh)queueFlash(el);
  el.classList.toggle('on',!!p.online);
  const av=el.querySelector('.av');
  if(av){
@@ -89,9 +109,7 @@ function updateCardLive(el,p){
  }
  const pillstat=el.querySelector('.pillstat');
  if(pillstat)pillstat.classList.toggle('o',!p.online);
- el.querySelectorAll('.vx').forEach(b=>{
-  const k=b.dataset.k;const to=k.indexOf('rx-')===0?p.rx:p.tx;b.dataset.to=to;tw(b,k,+to,fmtB);
- });
+ tweenCard(el,p);
  if(el.classList.contains('crow-list'))return;
  const ep=el.querySelector('.ep');
  if(p.endpoint){
@@ -156,28 +174,23 @@ function renderClients(peers){
  /* drop non-cards (empty/skel) */
  if(!root.querySelector('.crow[data-pk]'))root.innerHTML='';
 
+ /* One pass, element references kept in `order`: no per-key DOM queries (was O(n²)). */
  const order=[];
  filtered.forEach(p=>{
-  order.push(p.pubkey);
   let el=existing.get(p.pubkey);
   const ssig=cardStructSig(p);
   if(!el){
-   if(typeof root.insertAdjacentHTML==='function'){
-    root.insertAdjacentHTML('beforeend',clientCardHTML(p));
-   }else{
-    root.innerHTML=(root.innerHTML||'')+clientCardHTML(p);
-   }
-   el=findCard(root,p.pubkey);
-   if(el)applyI18n(el);
+   el=cardFromHTML(clientCardHTML(p));
+   if(el){root.appendChild(el);applyI18n(el);tweenCard(el,p);}
   }else if(el.dataset.ssig!==ssig){
-   const tmp=document.createElement('div');tmp.innerHTML=clientCardHTML(p);
-   let neu=tmp.firstChild;
-   if(typeof el.replaceWith==='function')el.replaceWith(neu);
-   else{el.outerHTML=clientCardHTML(p);neu=findCard(root,p.pubkey);}
-   el=neu||findCard(root,p.pubkey);if(el)applyI18n(el);
+   const neu=cardFromHTML(clientCardHTML(p));
+   if(neu&&typeof el.replaceWith==='function'){el.replaceWith(neu);el=neu;}
+   else if(neu){root.appendChild(neu);el.remove();el=neu;}
+   applyI18n(el);tweenCard(el,p);
   }else{
    updateCardLive(el,p);
   }
+  if(el)order.push(el);
   existing.delete(p.pubkey);
  });
  existing.forEach(el=>{
@@ -185,13 +198,19 @@ function renderClients(peers){
   if(pk){delete _pv['age-'+pk];delete _pv['rx-'+pk];delete _pv['tx-'+pk];}
   if(typeof el.remove==='function')el.remove();
  });
- /* preserve visual order */
- order.forEach(pk=>{
-  const el=findCard(root,pk);
-  if(el&&root.appendChild)root.appendChild(el);
- });
- const vxs=root.querySelectorAll?root.querySelectorAll('.vx'):[];
- [...vxs].forEach(b=>{if(b.dataset&&b.dataset.to!=null)tw(b,b.dataset.k,+b.dataset.to,fmtB);});
+ placeInOrder(root,order);
+ flushFlashes();
+}
+/* Move only cards that are out of place; a stable list costs n reference compares. */
+function placeInOrder(root,order){
+ const kids=root.children;
+ for(let i=0;i<order.length;i++){
+  const el=order[i];
+  if(kids[i]===el)continue;
+  if(typeof root.insertBefore==='function'){root.insertBefore(el,kids[i]||null);continue;}
+  for(let j=i;j<order.length;j++)root.appendChild(order[j]);   /* no insertBefore: re-append the tail */
+  break;
+ }
 }
 function findCard(root,pk){
  if(!root||!root.querySelectorAll)return null;
@@ -298,7 +317,7 @@ function bindTips(){
 }
 setLangBtn();hydrateIcons();applyI18n();applyClientsView();bindMenus();bindActions();bindSearch();bindTips();renderSkeleton();tick();scheduleTick(5000);
 if(typeof window!=='undefined'&&window.addEventListener){
- window.addEventListener('online',()=>{setOffline(false);tick();});
+ window.addEventListener('online',()=>{setOffline(false);kickTick();});
  window.addEventListener('offline',()=>setOffline(true));
- document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick();});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)kickTick();});
 }
