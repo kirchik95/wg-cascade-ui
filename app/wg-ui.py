@@ -5,7 +5,8 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib
+import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
+import http.client
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -1315,18 +1316,57 @@ CSP = ("default-src 'self'; script-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; "
        "frame-ancestors 'none'; form-action 'self'")
 
+# Slow-drip clients: the socket timeout bounds each recv, not a whole request, so a
+# client sending one byte every few seconds could hold a worker slot indefinitely.
+# Whole-phase deadlines close such connections; header size is capped well below
+# the stdlib's 100 lines × 64 KiB.
+HEADER_DEADLINE_S = 10        # TLS handshake + request line + headers
+BODY_DEADLINE_S = 15          # reading a (≤256 KiB) request body
+http.client._MAXHEADERS = 40
+http.client._MAXLINE = 8192
+
 class H(BaseHTTPRequestHandler):
     server_version = "wgui"
     timeout = 20
 
+    def _arm(self, seconds):
+        self._disarm()
+        t = threading.Timer(seconds, self._abort)
+        t.daemon = True
+        self._deadline = t
+        t.start()
+
+    def _disarm(self):
+        t = getattr(self, "_deadline", None)
+        if t is not None:
+            t.cancel()
+            self._deadline = None
+
+    def _abort(self):
+        try:
+            self.request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def setup(self):
         # Run the TLS handshake here, inside the per-request worker thread,
         # rather than in the main accept loop. A half-open / stalled client
-        # then blocks only its own thread (bounded by the socket timeout set
-        # in get_request) instead of wedging the whole server. On failure,
-        # ThreadingMixIn.shutdown_request still closes the socket.
+        # then blocks only its own thread instead of wedging the whole server.
+        # The header deadline covers handshake + request line + headers.
+        # On failure, ThreadingMixIn.shutdown_request still closes the socket.
+        self._arm(HEADER_DEADLINE_S)
         self.request.do_handshake()
         super().setup()
+
+    def parse_request(self):
+        try:
+            return super().parse_request()
+        finally:
+            self._disarm()          # headers are in; handler time is not limited here
+
+    def finish(self):
+        self._disarm()
+        super().finish()
 
     def _send(self, code, body=b"", ctype="text/plain", extra=None, _log=True):
         t0 = getattr(self, "_t0", None)
@@ -1369,7 +1409,13 @@ class H(BaseHTTPRequestHandler):
         except ValueError:
             raise ValueError("bad content-length")
         check_body_length(n, limit)
-        return self.rfile.read(n) if n else b""
+        if not n:
+            return b""
+        self._arm(BODY_DEADLINE_S)
+        try:
+            return self.rfile.read(n)
+        finally:
+            self._disarm()
 
     def do_GET(self):
         self._t0 = time.time()
