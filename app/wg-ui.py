@@ -1818,7 +1818,7 @@ class H(BaseHTTPRequestHandler):
             # Skip noisy public assets + high-frequency status polls
             if path not in ("/api/status", "/healthz") and not path.startswith(
                     ("/app.", "/core.", "/dashboard.", "/modals.", "/pages.", "/boot.", "/theme.",
-                     "/login.js", "/icon", "/fonts/", "/sw.js", "/manifest", "/cascade.", "/clients.")):
+                     "/login.js", "/icon", "/fonts/", "/sw.js", "/manifest")):
                 ms = int((time.time() - t0) * 1000) if t0 else None
                 log_event("http", method=self.command, path=path, status=code,
                           ms=ms, ip=self.client_address[0])
@@ -1859,7 +1859,6 @@ class H(BaseHTTPRequestHandler):
         _CT = {"/app.css": "text/css",
                "/modals.css": "text/css",
                "/pages.css": "text/css",
-               "/app.js": "application/javascript",
                "/core.js": "application/javascript",
                "/dashboard.js": "application/javascript",
                "/icons.js": "application/javascript",
@@ -1868,8 +1867,6 @@ class H(BaseHTTPRequestHandler):
                "/boot.js": "application/javascript",
                "/theme.js": "application/javascript",
                "/login.js": "application/javascript",
-               "/cascade.js": "application/javascript",
-               "/clients.js": "application/javascript",
                "/icon.svg": "image/svg+xml",
                "/manifest.webmanifest": "application/manifest+json"}
         if path in _CT:

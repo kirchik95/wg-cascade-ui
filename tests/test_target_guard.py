@@ -157,7 +157,7 @@ class TestTargetGuard(unittest.TestCase):
 
 class TestTargetTexts(unittest.TestCase):
     def test_every_code_is_translated(self):
-        src = (APP / "app.js").read_text()
+        src = (APP / "core.js").read_text()
         block = src[src.index("const TARGET_TEXT"):src.index("function targetText")]
         for code in ("target_unhealthy", "target_exhausted", "target_stale", "target_unverified"):
             self.assertEqual(block.count(code + ":"), 2, code)

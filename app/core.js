@@ -817,7 +817,7 @@ function go(name){
  if(!ROUTES.has(name))return;
  if(_route===name)return renderRoute(true);
  try{location.hash='#/'+name}catch(e){}
- if(!root.location||location.hash!=='#/'+name)renderRoute();
+ renderRoute();                 /* the hashchange that follows finds the route already shown */
 }
 function renderRoute(force){
  const name=routeFromHash();
