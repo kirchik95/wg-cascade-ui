@@ -435,19 +435,9 @@ def _guarded_exit_switch_locked(target, reason, inputs=None, actor="system", ip=
         return _blocked_result(incomplete)
     result = call_admin(["setexitall", target, reason])
     if result.get("ok"):
-        event = {
-            "ts": int(time.time()),
-            "source": source,
-            "target": target,
-            "reason": reason,
-            "changed": result.get("changed", 0),
-        }
-        if event["changed"]:
-            record_event("exit_switch", subject="%s->%s" % (source, target), actor=actor, ip=ip,
-                         data=dict(event), ts=event["ts"])
+        _publish_switch(source, target, reason, result, actor, ip)
         with _lock:
             _policy_runtime["blocked"] = None
-            _policy_runtime["last_switch"] = event
     elif reason == "quota":
         _set_policy_block({
             "code": "helper_failed",
@@ -460,6 +450,76 @@ def _guarded_exit_switch_locked(target, reason, inputs=None, actor="system", ip=
               error=result.get("error"))
     return result
 
+
+def _switch_members(result):
+    """The helper's changed_clients, sanitised: [{pubkey, name, from}]."""
+    out = []
+    for m in result.get("changed_clients") or []:
+        if isinstance(m, dict) and isinstance(m.get("pubkey"), str) and m["pubkey"]:
+            out.append({"pubkey": m["pubkey"], "name": str(m.get("name") or ""),
+                        "from": m.get("from") if m.get("from") in exit_policy.EXITS else None})
+    return out
+
+def _switch_from_event(row):
+    """last_switch view of an exit_switch journal row (no member list: status stays small)."""
+    data = row.get("data") or {}
+    value = {
+        "ts": row["ts"],
+        "source": data.get("source"),
+        "target": data.get("target"),
+        "reason": data.get("reason"),
+        "changed": int(data.get("changed") or 0),
+        "members_count": len(data.get("members") or []),
+        "event_id": row["id"],
+    }
+    if data.get("revert_of"):
+        value["revert_of"] = data["revert_of"]
+    return value
+
+def _publish_switch(source, target, reason, result, actor="system", ip=None, extra=None):
+    """Journal a committed switch with who moved, and make it the last_switch.
+
+    The event id lets the operator later move exactly this group back
+    (revertswitch). members_count < changed means the helper did not report
+    membership (older helper): such an event cannot be reverted as a group.
+    """
+    members = _switch_members(result)
+    changed = result.get("changed", 0)
+    changed = len(changed) if isinstance(changed, list) else int(changed or 0)
+    event = {"ts": int(time.time()), "source": source, "target": target, "reason": reason,
+             "changed": changed, "members_count": len(members), "event_id": None}
+    if changed:
+        data = {"source": source, "target": target, "reason": reason, "changed": changed,
+                "members": members}
+        data.update(extra or {})
+        event["event_id"] = record_event("exit_switch", subject="%s->%s" % (source, target),
+                                         actor=actor, ip=ip, data=data, ts=event["ts"])
+        if (extra or {}).get("revert_of"):
+            event["revert_of"] = extra["revert_of"]
+    result["event_id"] = event["event_id"]
+    with _lock:
+        _policy_runtime["last_switch"] = event
+    return event
+
+def restore_last_switch(now=None):
+    """After a restart, last_switch (and the health cooldown it implies) comes
+    back from the journal instead of starting empty."""
+    try:
+        rows = events_page(limit=1, kinds=["exit_switch"])
+    except sqlite3.Error as exc:
+        log_event("restore_last_switch", ok=False, error=str(exc)[:200])
+        return None
+    if not rows:
+        return None
+    value = _switch_from_event(rows[0])
+    now = int(time.time()) if now is None else now
+    with _lock:
+        if _policy_runtime.get("last_switch") is None:
+            _policy_runtime["last_switch"] = value
+        elapsed = now - int(value["ts"] or 0)
+        if value["reason"] == "health" and 0 <= elapsed < exit_policy.HEALTH_COOLDOWN:
+            _health_runtime["last_switch_at"] = time.monotonic() - elapsed
+    return value
 
 def guarded_exit_switch(target, reason, actor="system", ip=None):
     with _policy_lock:
@@ -1870,6 +1930,7 @@ def main():
     if not (auth.PASS_PBKDF2 or auth.PASS_SHA):
         raise SystemExit("wg-ui: no password hash configured (WGUI_PASS_PBKDF2 or WGUI_PASS_SHA256)")
     db_init()
+    restore_last_switch()
     ensure_client_registry()
     seed_exit_usage_from_registry()
     threading.Thread(target=_sampler, daemon=True).start()

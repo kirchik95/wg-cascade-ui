@@ -11,7 +11,7 @@ Usage: wg-admin.py <op> [args]
   rename <pubkey> <newname>    -> {}
   setenabled <pubkey> <0|1>    -> {}
   setexit <pubkey> <nl|us>     -> {name,exit}
-  setexitall <nl|us> <manual|quota|health> -> {exit,changed,source_counts}
+  setexitall <nl|us> <manual|quota|health> -> {exit,changed,changed_clients,source_counts}
   setexitpolicy <0|1 auto> <nl-gib> <us-gib> <0|1 failover> -> {auto_switch,health_failover,quotas_gib}
   delete <pubkey>              -> {}
   getconf <pubkey>             -> {name,ip,conf,qr,exit}
@@ -549,13 +549,37 @@ def setexitall_data(target, reason):
         source_counts[old] += 1
         if old == target:
             continue
-        changed.append(client)
-        if target == "nl":
-            client.pop("exit", None)
-        else:
-            client["exit"] = "us"
+        changed.append((client, old))
+        _assign_exit(client, target)
     if not changed:
         return {"exit": target, "changed": 0, "source_counts": source_counts}
+    warning = _commit_exit_moves(clients, original_bytes, [c for c, _ in changed])
+    direction = "%s -> %s" % (
+        "mixed" if source_counts[target] else ("us" if target == "nl" else "nl"),
+        target,
+    )
+    audit("setexitall", "%s %s %d client(s)" % (reason, direction, len(changed)))
+    result = {"exit": target, "changed": len(changed), "source_counts": source_counts,
+              "changed_clients": _moved(changed)}
+    if warning:
+        result["cleanup_warning"] = warning
+    return result
+
+def _assign_exit(client, target):
+    if target == "nl":
+        client.pop("exit", None)   # absence == nl (keep JSON lean)
+    else:
+        client["exit"] = target
+
+def _moved(changed):
+    """Who moved, as the server journals it: [{pubkey, name, from}]."""
+    return [{"pubkey": c.get("pubkey", ""), "name": c.get("name", ""), "from": old} for c, old in changed]
+
+def _commit_exit_moves(clients, original_bytes, changed):
+    """Commit a registry with re-assigned exits: write + verified route sync as
+    one unit (rollback to original_bytes on failure), then one best-effort
+    conntrack batch. Returns the cleanup warning (or None); raises RuntimeError
+    (rolled back) or RollbackFailed (state unknown)."""
     try:
         with reserved(ROLLBACK_RESERVE):
             save_clients(clients)
@@ -572,18 +596,9 @@ def setexitall_data(target, reason):
     # Registry and verified routes are committed. Conntrack cleanup is one
     # best-effort batch; a shortfall is reported, never turned into a failure.
     try:
-        warning = flush_exit_conntrack([c.get("ip") for c in changed if c.get("enabled", True)])
+        return flush_exit_conntrack([c.get("ip") for c in changed if c.get("enabled", True)])
     except Exception as e:
-        warning = "conntrack cleanup skipped: %s" % e
-    direction = "%s -> %s" % (
-        "mixed" if source_counts[target] else ("us" if target == "nl" else "nl"),
-        target,
-    )
-    audit("setexitall", "%s %s %d client(s)" % (reason, direction, len(changed)))
-    result = {"exit": target, "changed": len(changed), "source_counts": source_counts}
-    if warning:
-        result["cleanup_warning"] = warning
-    return result
+        return "conntrack cleanup skipped: %s" % e
 
 class RollbackFailed(RuntimeError):
     pass
