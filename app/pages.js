@@ -25,7 +25,8 @@ WG.addStrings('ru',{
  '{u} / {q} {unit} in {month}':'{u} / {q} {unit} за {month}','{u} / {q} {unit} · {p}%':'{u} / {q} {unit} · {p}%',
  'Directly':'Напрямую','RU sites':'Сайты РФ','RU':'РФ','split on':'сплит вкл','split off':'сплит выкл','RU IP':'RU IP',
  'split: RU straight from a RU IP':'сплит: РФ сразу с RU IP','split off: RU sites go through the exits too':'сплит выкл: сайты РФ тоже через выходы',
- 'Internet':'Интернет','ok':'ок','{n} cl':'{n} кл','no connection':'нет связи','collection stuck':'сбор завис','waiting…':'ждём…',
+ 'Internet':'Интернет',
+ 'Line thickness — how many clients use the exit. Dashed — traffic to RU sites leaves straight from the entry.':'Толщина линии — сколько клиентов на выходе. Пунктир — трафик на сайты РФ уходит прямо со входа.','ok':'ок','{n} cl':'{n} кл','no connection':'нет связи','collection stuck':'сбор завис','waiting…':'ждём…',
  'Now':'Сейчас','Exit settings':'Настройки выходов','Move {n} back to {exit}':'Вернуть {n} на {exit}',
  'Waiting for the first data…':'Ждём первые данные…',
  'No connection with the panel: the scheme shows {t}; actions are off.':'Нет связи с панелью: схема на {t}, действия недоступны.',
@@ -34,6 +35,7 @@ WG.addStrings('ru',{
  'Both exits do not answer since {t}: clients reach the entry but not the internet':'Оба выхода не отвечают с {t}: клиенты подключаются ко входу, но не выходят в интернет',
  ' — only RU sites work (split).':' — работают только сайты РФ (сплит).',
  '{exit} does not answer since {t}: {n} without an exit.':'{exit} не отвечает с {t}: без выхода {n}.',
+ '{exit} does not answer since {t}; no enabled clients are on it.':'{exit} не отвечает с {t}; включённых клиентов на нём нет.',
  'Automatic failover is off — move the clients by hand.':'Автопереключение по сбою выключено — переведите клиентов вручную.',
  'Automatic switch did not run: {r}':'Автопереключение не сработало: {r}',
  '{dist}: at {at} {from} failed its checks, {n} moved automatically.':'{dist}: в {at} {from} не прошёл проверки, {n} переведены автоматически.',
@@ -230,10 +232,11 @@ function quotaLine(e,s,u){
 }
 function speedText(md,unit){
  if(md.u||!md.thr)return'';
- return'↓'+WG.mbit(md.thr.down)+' ↑'+WG.mbit(md.thr.up)+(unit?' '+tr('Mbit/s'):'');
+ const f=bps=>{const v=+WG.mbit(bps);return v>=10||v===0?String(Math.round(v)):v.toFixed(1)};
+ return'↓'+f(md.thr.down)+' ↑'+f(md.thr.up)+(unit?' '+tr('Mbit/s'):'');
 }
 function entryState(md){
- if(md.m==='offline')return{tone:'bad',text:'× '+tr('no connection')};
+ if(md.m==='offline')return{tone:'u',text:'× '+tr('no connection')};
  if(md.m==='stale')return{tone:'u',text:'? '+tr('collection stuck')};
  if(md.m==='loading')return{tone:'u',text:tr('waiting…')};
  return{tone:'ok',text:'● '+tr('OK')};
@@ -311,7 +314,8 @@ function diagramVertical(md,s){
  });
  h+='<div class="xv-end is-ru'+(md.rud?'':' is-off')+'"><div class="xv-k">'+esc(tr('RU'))+'</div><div class="xv-city">'+esc(tr('Directly'))+'</div>'
   +'<div class="xv-st">'+esc(tr(md.rud?'split on':'split off'))+'</div>'+(md.rud?'<div class="xv-q">'+esc(tr('RU IP'))+'</div>':'')+'</div>';
- h+='</div><div class="xv-net"><span>'+icon('internet',18)+esc(tr('Internet'))+'</span></div></div>';
+ h+='</div><div class="xv-net"><span>'+icon('internet',18)+esc(tr('Internet'))+'</span></div>'
+  +'<p class="xv-note">'+esc(tr('Line thickness — how many clients use the exit. Dashed — traffic to RU sites leaves straight from the entry.'))+'</p></div>';
  return h;
 }
 function legendHTML(){
@@ -340,6 +344,7 @@ function situation(s){
  const down=xs.filter(x=>x.health==='down');
  if(down.length){
   const x=down[0],since=+(x.t&&x.t.health_since)||0,n=+(x.t&&x.t.affected_clients)||0;
+  if(!n)return{tone:'warn',text:tr('{exit} does not answer since {t}; no enabled clients are on it.',{exit:XL(x.key),t:since?WG.fmtTime(since):'—'})};
   let text=tr('{exit} does not answer since {t}: {n} without an exit.',{exit:XL(x.key),t:since?WG.fmtTime(since):'—',n:WG.count(n,'client')});
   if(n&&pol.health_failover===false)text+=' '+tr('Automatic failover is off — move the clients by hand.');
   else if(n&&pol.health_blocked)text+=' '+tr('Automatic switch did not run: {r}',{r:WG.reasonText(pol.health_blocked.code||pol.health_blocked)});
@@ -492,6 +497,8 @@ function monthInfo(key,now){
   elapsed:current?Math.max((now-start)/DAY,1/24):now>=end?days:0,today:current?new Date(now*1000).getDate():0};
 }
 function monthTitle(info){return MONTH_NOM[LANG()][info.m-1]+' '+info.y}
+/* inside a sentence: «за октябрь 2026» */
+function monthPhrase(info){const n=MONTH_NOM[LANG()][info.m-1];return(LANG()==='ru'?n.toLowerCase():n)+' '+info.y}
 function dayOfMonth(s,info){
  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s||''));
  return m&&+m[1]===info.y&&+m[2]===info.m?+m[3]:0;
@@ -638,7 +645,7 @@ function chartHTML(data,info){
   +'<li><button type="button" class="linkbtn uc-csv" data-act="us-day-csv" aria-label="'+esc(tr('Download the daily table as CSV'))+'">↓ CSV</button></li></ul></div>'
   +'<div class="uc"><svg class="uc-svg" viewBox="0 0 '+N*10+' '+H+'" preserveAspectRatio="none" aria-hidden="true" focusable="false">'+svg+'</svg>'
   +'<div class="uc-x" aria-hidden="true" style="grid-template-columns:repeat('+N+',minmax(0,1fr))">'+labels+'</div>'
-  +'<table class="sr-only"><caption>'+esc(tr('Usage by day through the exits, {month}',{month:monthTitle(info)}))+'</caption>'
+  +'<table class="sr-only"><caption>'+esc(tr('Usage by day through the exits, {month}',{month:monthPhrase(info)}))+'</caption>'
   +'<thead><tr><th scope="col">'+esc(tr('Day'))+'</th><th scope="col">NL</th><th scope="col">US</th><th scope="col">'+esc(tr('Total'))+'</th></tr></thead>'
   +'<tbody>'+rows+'</tbody></table></div>';
 }
@@ -673,7 +680,7 @@ function usageBodyHTML(entry,info,s){
  const anyExit=series.some(d=>d.has)||WG.EXITS.some(k=>(+(em[k]&&em[k].rx)||0)+(+(em[k]&&em[k].tx)||0)>0);
  const clients=Array.isArray(data.clients)&&data.clients.length;
  let h=entry.err?'<p class="pg-warn">'+esc(tr('Showing the data loaded at {t}.',{t:WG.fmtTime(Math.round(entry.at/1000))}))+'</p>':'';
- if(!anyExit&&!clients)return h+msgHTML(tr('No traffic in {month}.',{month:monthTitle(info)}),null,
+ if(!anyExit&&!clients)return h+msgHTML(tr('No traffic in {month}.',{month:monthPhrase(info)}),null,
   info.current?'':tr('The panel keeps daily usage for a limited time; older months may be empty.'));
  h+='<section class="us-cards">'+cardsHTML(data,info,s)+'</section>';
  h+='<section class="us-chart">'+chartHTML(data,info)+'</section>';

@@ -101,6 +101,7 @@
 .xv-st,.xv-q{font-family:var(--font-mono);font-size:var(--text-meta);line-height:16px;color:var(--color-muted)}
 .xv-q.is-warn{color:var(--color-amber-text)}
 .xv-net{display:flex;justify-content:center;padding-top:16px}
+.xv-note{margin-top:16px;font-family:var(--font-sans);font-size:var(--text-body);line-height:22px;color:var(--color-ink-2)}
 .xv-net span{display:inline-flex;align-items:center;gap:10px;padding:10px 20px;border:1px solid var(--color-line-strong);border-radius:var(--radius-pill);
  background:var(--color-bg);font-family:var(--font-mono);font-size:var(--text-data);font-weight:700}
 
@@ -251,10 +252,12 @@
  .xs-how-l{grid-template-columns:repeat(2,minmax(0,1fr))}
  .ut-row{grid-template-columns:minmax(120px,200px) minmax(0,1fr) 100px 100px 100px;gap:12px}
 }
-@media (max-width:1000px){
+@media (max-width:1240px){
  .d-dia{display:none}
- .m-dia{display:block}
- .xs-legend{display:none}
+ .m-dia{display:block;max-width:760px;margin:0 auto}
+ .xs-legend,.xs .pg-tools{display:none}
+}
+@media (max-width:1000px){
  .xs-panel{padding:0;border:0;background:none}
  .jr-row{grid-template-columns:56px 140px minmax(0,1fr);}
  .jr-side{grid-column:3;align-items:flex-start;text-align:left;flex-direction:row;flex-wrap:wrap;gap:4px 16px}
