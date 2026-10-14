@@ -1,0 +1,10 @@
+# /etc/sudoers.d/wg-ui — installed by deploy.sh (after `visudo -cf`), mode 0440.
+# The web service runs as `wgui` and may only read the tunnel dumps and invoke
+# the root helper. Exact commands only — never widen to `wg *` / `awg *`.
+# Exit tunnels may run plain WireGuard (wg) or AmneziaWG (awg); see docs/TUNNELS.md.
+wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-cl dump
+wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-do dump
+wgui ALL=(root) NOPASSWD: /usr/bin/wg show wg-us dump
+wgui ALL=(root) NOPASSWD: /usr/bin/awg show wg-do dump
+wgui ALL=(root) NOPASSWD: /usr/bin/awg show wg-us dump
+wgui ALL=(root) NOPASSWD: /usr/bin/python3 /opt/wg-ui/wg-admin.py *

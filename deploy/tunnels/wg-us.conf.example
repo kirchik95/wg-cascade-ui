@@ -1,0 +1,28 @@
+# Entry node: /etc/amnezia/amneziawg/wg-us.conf — entry → US exit (AmneziaWG).
+# Template only: deploy.sh never installs it. Placeholders throughout; Jc..H4
+# MUST match the US exit's awg0.conf (use a different set than wg-do).
+# Brought up by `awg-quick@wg-us`. No routing hooks here: exit-route.sh owns
+# table 65 / fwmark 0x65 — run `systemctl restart wg-exit-route` after this
+# interface is recreated so the table-65 default route comes back.
+[Interface]
+Address = 10.31.0.2/24
+PrivateKey = <entry-us-private-key>
+Table = off
+Jc = 6
+Jmin = 40
+Jmax = 70
+S1 = <15..150>
+S2 = <15..150, and S1 + 56 != S2>
+H1 = <random uint32 > 4>
+H2 = <random uint32 > 4, distinct>
+H3 = <random uint32 > 4, distinct>
+H4 = <random uint32 > 4, distinct>
+
+[Peer]
+# US exit node (AmneziaWG). Endpoint = the exit's Reserved IP, not its own
+# public IP: if that address gets blocked on the path from the entry, assign a
+# fresh Reserved IP and change only this line.
+PublicKey = <us-exit-public-key>
+Endpoint = 198.51.100.20:<exit-listen-port>
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25

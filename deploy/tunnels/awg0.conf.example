@@ -1,0 +1,28 @@
+# Exit node (NL or US): /etc/amnezia/amneziawg/awg0.conf — the exit side of the
+# entry's wg-do / wg-us tunnel. Template only. Use 10.21.0.0/24 for NL and
+# 10.31.0.0/24 for US. Jc..H4 MUST equal the entry-side values.
+# systemctl enable --now awg-quick@awg0
+[Interface]
+Address = 10.21.0.1/24
+ListenPort = <random 40000..60000>
+PrivateKey = <exit-private-key>
+Jc = 5
+Jmin = 40
+Jmax = 70
+S1 = <same as entry>
+S2 = <same as entry>
+H1 = <same as entry>
+H2 = <same as entry>
+H3 = <same as entry>
+H4 = <same as entry>
+PostUp = iptables -A FORWARD -i awg0 -o eth0 -j ACCEPT
+PostUp = iptables -A FORWARD -i eth0 -o awg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s 10.21.0.0/24 -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i awg0 -o eth0 -j ACCEPT
+PostDown = iptables -D FORWARD -i eth0 -o awg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s 10.21.0.0/24 -o eth0 -j MASQUERADE
+
+[Peer]
+# Entry node
+PublicKey = <entry-public-key-for-this-tunnel>
+AllowedIPs = 10.21.0.2/32
