@@ -149,6 +149,20 @@ const POLICY_EN={
  no_clients_to_switch:'All clients already use this exit.',
  failed:'Exit switching is blocked.'
 };
+/* add/setexit: the server refuses a confirmed-down or exhausted target (409 + code)
+   and only warns (ok + warning) when the target's health is not verified yet. */
+const TARGET_TEXT={
+ en:{target_unhealthy:'The target exit is down: it failed several health checks in a row.',
+  target_exhausted:'The target exit monthly quota is exhausted.',
+  target_stale:'The exit health is not verified yet — check that the client connects.',
+  target_unverified:'The last health check of this exit failed — check that the client connects.'},
+ ru:{target_unhealthy:'Выход недоступен: несколько проверок подряд не прошли.',
+  target_exhausted:'Месячная квота этого выхода исчерпана.',
+  target_stale:'Состояние выхода ещё не проверено — убедитесь, что клиент подключается.',
+  target_unverified:'Последняя проверка выхода не прошла — убедитесь, что клиент подключается.'}
+};
+function targetText(code){return (TARGET_TEXT[LANG==='ru'?'ru':'en'][code])||''}
+function adminError(r){return (r&&targetText(r.code))||tr((r&&r.error)||'failed')}
 function policyReason(code){
  code=String(code==null?'failed':code);
  if(LANG==='ru')return RU[code]||RU['Exit switching is blocked.'];
@@ -869,8 +883,8 @@ async function doAdd(){const n=document.getElementById('cn').value.trim();const 
  const idle=b.innerHTML;b.disabled=true;b.textContent=tr('Creating…');
  try{
   const r=await admin({op:'add',name:n,expires:expires,exit:exit});
-  if(!r||!r.ok){me.textContent=tr((r&&r.error)||'failed');b.disabled=false;b.innerHTML=idle;return}
-  showResult(r);tick();
+  if(!r||!r.ok){me.textContent=adminError(r);b.disabled=false;b.innerHTML=idle;return}
+  showResult(r);if(r.warning)toast(targetText(r.warning));tick();
  }catch(e){me.textContent=tr('failed');b.disabled=false;b.innerHTML=idle;}
 }
 function cfgExtraHTML(r){
@@ -1065,7 +1079,8 @@ async function doEdit(){
  }
  if(exit!==window.__ex){
   const r=await admin({op:'setexit',pubkey:_act,exit:exit});
-  if(!r||!r.ok){me.textContent=tr((r&&r.error)||'failed');return}
+  if(!r||!r.ok){me.textContent=adminError(r);return}
+  if(r.warning)toast(targetText(r.warning));
  }
  if(x!=='keep'){
   const expires=+x>0?((Date.now()/1000|0)+(+x)*86400):0;

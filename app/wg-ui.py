@@ -286,6 +286,41 @@ def policy_inputs(tunnel_data=None, peers=None):
     return policy, usage, assignment_counts(peers), health, warning
 
 
+_TARGET_MESSAGES = {
+    "target_unhealthy": "The target exit is down: it failed several health checks in a row.",
+    "target_exhausted": "The target exit monthly quota is exhausted.",
+}
+
+def assign_target_check(target, now=None):
+    """Server-side guard for putting clients on `target` (add / setexit).
+
+    Returns (block, warning). block = {"code", "error"} only for a confirmed-down
+    (debounced health "down") or quota-exhausted target. Missing or old health
+    evidence, or a single failed probe without a confirmed down, is a warning —
+    right after a restart health is unknown and adding clients must keep working.
+    """
+    policy, _ = load_exit_policy()
+    stamp = int(time.time()) if now is None else int(now)
+    with _lock:
+        u = _exit_month_usage.get(target) or {}
+        usage = {target: int(u.get("rx", 0)) + int(u.get("tx", 0))}
+        eg = dict(_egress.get(target) or {})
+        state = (_health.get(target) or {}).get("state")
+    age = stamp - int(eg["at"]) if eg.get("at") else -1
+    found = exit_policy.target_block(target, policy, usage,
+                                     {target: {"ok": bool(eg.get("ok")), "checked_age": age}})
+    code = (found or {}).get("code")
+    if code == "target_exhausted":
+        return {"code": code, "error": _TARGET_MESSAGES[code]}, None
+    if state == "down":
+        return {"code": "target_unhealthy", "error": _TARGET_MESSAGES["target_unhealthy"]}, None
+    if code == "target_stale":
+        return None, "target_stale"
+    if code == "target_unhealthy":
+        return None, "target_unverified"
+    return None, None
+
+
 def exit_policy_status(tunnel_data=None, peers=None):
     policy, usage, assignments, health, warning = policy_inputs(tunnel_data, peers)
     with _lock:
@@ -1686,6 +1721,7 @@ class H(BaseHTTPRequestHandler):
             op = b.get("op")
             pub = str(b.get("pubkey", ""))
             name = str(b.get("name", ""))
+            target_warning = None
             if op == "add":
                 try: exp = max(0, int(b.get("expires") or 0))
                 except Exception: exp = 0
@@ -1694,6 +1730,11 @@ class H(BaseHTTPRequestHandler):
                     exit_ = normalize_exit(exit_)
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
+                blocked, target_warning = assign_target_check(exit_)
+                if blocked:
+                    log_event("admin", op=op, ok=False, user=user, ip=self.client_address[0],
+                              reason=blocked["code"])
+                    return self._json(409, dict(blocked, ok=False, target=exit_))
                 argv = ["add", name, str(exp), exit_]
             elif op == "setexpiry":
                 try: exp = max(0, int(b.get("expires") or 0))
@@ -1705,6 +1746,11 @@ class H(BaseHTTPRequestHandler):
                     exit_ = normalize_exit(exit_)
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
+                blocked, target_warning = assign_target_check(exit_)
+                if blocked:
+                    log_event("admin", op=op, ok=False, user=user, ip=self.client_address[0],
+                              reason=blocked["code"])
+                    return self._json(409, dict(blocked, ok=False, target=exit_))
                 argv = ["setexit", pub, exit_]
             elif op == "setexitall":
                 raw_target = b.get("exit")
@@ -1782,6 +1828,8 @@ class H(BaseHTTPRequestHandler):
                 res = save_exit_policy(argv)
             else:
                 res = call_admin(argv)
+            if target_warning and res.get("ok"):
+                res["warning"] = target_warning
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)
