@@ -4,6 +4,7 @@ usage forecast / day series / CSV, journal texts for every event kind, login fol
 day grouping, filters, and the routes with their loading, empty and error states.
 Runs app/icons.js, core.js, dashboard.js and pages.js in node on the fake DOM of
 test_frontend_monthly."""
+import json
 import os
 import shutil
 import subprocess
@@ -40,10 +41,12 @@ const settle=()=>flush(40);
 """
 
 
-def run_pages(test, body, lang="en", timeout=30):
+def run_pages(test, body, lang="en", timeout=30, tz=None):
     test.assertNotEqual(PAGES_SETUP, NODE_SETUP, "the node setup no longer lists dashboard.js the expected way")
     script = textwrap.dedent(PAGES_SETUP + "\n" + HELPERS + "\n" + body)
     env = dict(os.environ, WGUI_TEST_LANG=lang)
+    if tz:
+        env["TZ"] = tz
     result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=timeout, env=env)
     test.assertEqual(result.returncode, 0, result.stderr + result.stdout)
     test.assertIn("__OK__", result.stdout, "the test body did not run to the end:\n" + result.stderr)
@@ -55,21 +58,35 @@ def wrap(js):
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestUsageHelpers(unittest.TestCase):
+    def test_report_forecast_uses_server_dates_including_partial_last_day(self):
+        run_pages(self, wrap(r"""
+          const data={daily:[{day:'2026-09-30',rx:1,tx:0},{day:'2026-10-14',rx:1,tx:0}],
+            exits_daily:{nl:[{day:'2026-10-10',rx:96*GiB,tx:0}],us:[]}};
+          const info=P.monthInfo('2026-10','2026-10',data);
+          const f=P.forecast({used:96*GiB,quota:1000*GiB,info,series:[]});
+          if(f.kind!=='projection'||Math.abs(f.projected/GiB-212.5714285714)>0.01)
+            throw new Error('forecast must average 14 server days, including idle days: '+JSON.stringify(f));
+          const text=P.forecastText(f,{key:'nl',used:96*GiB,clients:2,info});
+          if(!text.includes('Oct 14')||!text.includes('incomplete last day'))throw new Error('missing dated method: '+text);
+          const noDates=P.monthInfo('2026-10','2026-10',{daily:[{day:'2026-09-30',rx:1,tx:0}],exits_daily:{}});
+          if(P.forecast({used:96*GiB,quota:1000*GiB,info:noDates}).kind!=='none')throw new Error('do not invent a reporting day');
+        """))
+
     def test_month_info_and_shift_roll_over_years_and_leap_days(self):
         run_pages(self, wrap(r"""
           if(P.shiftMonth('2026-12',1)!=='2027-01'||P.shiftMonth('2026-01',-1)!=='2025-12')throw new Error('month shift');
-          if(P.monthInfo('2028-02',local(2028,2,10)).days!==29)throw new Error('leap February');
-          const cur=P.monthInfo('2026-10',local(2026,10,14,12));
+          if(P.monthInfo('2028-02','2028-02').days!==29)throw new Error('leap February');
+          const cur=P.monthInfo('2026-10','2026-10',{daily:[{day:'2026-10-14'}]});
           if(!cur.current||cur.today!==14||cur.days!==31)throw new Error('current month: '+JSON.stringify(cur));
-          if(Math.abs(cur.elapsed-13.5)>0.05)throw new Error('elapsed days must count the part of today: '+cur.elapsed);
-          const past=P.monthInfo('2026-09',local(2026,10,14));
+          if(cur.elapsed!==14)throw new Error('daily average includes the latest reported day: '+cur.elapsed);
+          const past=P.monthInfo('2026-09','2026-10');
           if(!past.past||past.current||past.elapsed!==30)throw new Error('past month');
-          if(!P.monthInfo('2026-11',local(2026,10,14)).future)throw new Error('future month');
+          if(!P.monthInfo('2026-11','2026-10').future)throw new Error('future month');
         """))
 
     def test_day_series_sums_rx_tx_per_exit_and_ignores_other_months(self):
         run_pages(self, wrap(r"""
-          const info=P.monthInfo('2026-10',local(2026,10,14));
+          const info=P.monthInfo('2026-10','2026-10');
           const s=P.daySeries({nl:[{day:'2026-10-01',rx:3*GiB,tx:GiB},{day:'2026-09-30',rx:9*GiB,tx:0}],
                                us:[{day:'2026-10-01',rx:GiB,tx:0},{day:'2026-10-03',rx:2*GiB,tx:GiB}]},info);
           if(s.length!==31)throw new Error('one row per day');
@@ -80,12 +97,12 @@ class TestUsageHelpers(unittest.TestCase):
 
     def test_forecast_projection_runs_out_exhausted_and_final(self):
         run_pages(self, wrap(r"""
-          const info=P.monthInfo('2026-10',local(2026,10,14,12));
+          const info=P.monthInfo('2026-10','2026-10',{daily:[{day:'2026-10-14'}]});
           const proj=P.forecast({used:96*GiB,quota:1000*GiB,info,series:[]});
           if(proj.kind!=='projection')throw new Error('NL stays under quota: '+proj.kind);
-          if(Math.abs(proj.projected/GiB-96/13.5*31)>1)throw new Error('projection = average so far × days: '+proj.projected/GiB);
+          if(Math.abs(proj.projected/GiB-212.5714285714)>0.01)throw new Error('projection = daily average × days: '+proj.projected/GiB);
           const txt=P.forecastText(proj,{key:'nl',used:96*GiB,clients:17,info});
-          if(!txt.includes('average over 1–Oct 14')||!txt.includes('by Oct 31 ~220 GiB'))throw new Error('method must be named: '+txt);
+          if(!txt.includes('average over 1–Oct 14')||!txt.includes('by Oct 31 ~213 GiB'))throw new Error('method must be named: '+txt);
           const us=P.forecast({used:371*GiB,quota:500*GiB,info,series:[]});
           if(us.kind!=='runs-out'||us.day!==19)throw new Error('US runs out on the 19th: '+JSON.stringify(us));
           const idle=P.forecastText(us,{key:'us',used:371*GiB,clients:0,info});
@@ -96,11 +113,11 @@ class TestUsageHelpers(unittest.TestCase):
           const ex=P.forecast({used:550*GiB,quota:500*GiB,info,series});
           if(ex.kind!=='exhausted'||ex.day!==3)throw new Error('exhausted on day 3: '+JSON.stringify(ex));
           if(P.forecastText(ex,{key:'us',info})!=='quota used up on Oct 3')throw new Error('exhausted text');
-          const past=P.monthInfo('2026-09',local(2026,10,14));
+          const past=P.monthInfo('2026-09','2026-10');
           const fin=P.forecast({used:300*GiB,quota:1000*GiB,info:past,series:[]});
           if(fin.kind!=='final'||Math.round(fin.rate/GiB)!==10)throw new Error('past month is a total');
           if(!P.forecastText(fin,{key:'nl',info:past}).startsWith('month total · 10 GiB/day'))throw new Error('final text');
-          if(P.forecast({used:0,quota:500*GiB,info:P.monthInfo('2026-11',local(2026,10,14)),series:[]}).kind!=='none')throw new Error('future');
+          if(P.forecast({used:0,quota:500*GiB,info:P.monthInfo('2026-11','2026-10'),series:[]}).kind!=='none')throw new Error('future');
         """))
 
     def test_client_rows_direction_names_and_csv_escaping(self):
@@ -123,6 +140,32 @@ class TestUsageHelpers(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestJournalHelpers(unittest.TestCase):
+    def test_cleanup_warnings_survive_single_and_bulk_event_rendering(self):
+        for lang, warning in (
+            ('en', 'The change was applied, but some existing connections could not be cleared. Check that clients reconnect.'),
+            ('ru', 'Изменение применено, но очистка прежних соединений завершилась не полностью. Проверьте, что клиенты переподключились.'),
+        ):
+            with self.subTest(lang=lang):
+                run_pages(self, wrap("""
+                  const warning=%s;
+                  const event=(op,extra)=>({id:3,ts:1790000000,kind:'admin',actor:'admin',data:Object.assign({op,ok:true,committed:true,
+                    pubkey:'pk-a',exit:'nl',cleanup_warning:'conntrack cleanup incomplete: <img src=x onerror=alert(1)>'},extra)});
+                  const events=[event('setexit'),event('setexitall',{event_id:8,changed:2}),event('revertswitch',{event_id:9,changed:2,revert_of:1})];
+                  const views=P.journalViews(events,'all',{});
+                  if(views.length!==3||views.some(v=>v.hide||v.tone!=='warn'||!v.detail.includes(warning)))
+                    throw new Error('cleanup warning disappeared: '+JSON.stringify(views));
+                  if(views[2].title.includes('Nobody')||views[2].title.includes('некого'))throw new Error('successful return called a no-op');
+                  if(JSON.stringify(views).includes('conntrack')||JSON.stringify(views).includes('<img'))throw new Error('raw backend cleanup detail leaked');
+                  const normal=event('setexitall',{event_id:8,cleanup_warning:null});
+                  if(P.journalViews([normal],'all',{}).length)throw new Error('normal switch duplicate became visible');
+                  if(!P.toCSV(views.map(v=>[v.title,v.detail])).includes(warning))throw new Error('export lost warning');
+                  await feed(snapshot());serve({'/api/events':{events,next_before:null}});
+                  WG.router.go('journal');await settle();
+                  if(!viewText().includes(warning))throw new Error('journal did not render warning');
+                  WG.emit('status');
+                  if(!viewText().includes(warning))throw new Error('status refresh erased warning');
+                """ % json.dumps(warning)), lang=lang)
+
     def test_every_admin_op_reads_as_a_sentence(self):
         run_pages(self, wrap(r"""
           const names={'pk-a':'kirill-iphone','pk-g':'guest-1'};
@@ -313,6 +356,111 @@ class TestExitsHelpers(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestPagesRender(unittest.TestCase):
+    def test_empty_journal_polls_new_events_for_each_filter(self):
+        for filter_index, kind, data, title in (
+            (0, 'login', {'ok': True}, 'Signed in to the panel'),
+            (1, 'health', {'exit': 'nl', 'from': 'down', 'to': 'up'}, 'NL passes its checks again'),
+            (2, 'admin', {'op': 'add', 'ok': True, 'name': 'new-client'}, 'Client new-client created'),
+        ):
+            with self.subTest(filter_index=filter_index):
+                run_pages(self, wrap("""
+                  await feed(snapshot());
+                  let available=false;
+                  const event={id:7,ts:WG.state.now,kind:%s,actor:'admin',data:%s};
+                  serve({'/api/events':()=>response({events:available?[event]:[],next_before:null})});
+                  WG.router.go('journal');await settle();
+                  if(%d){element('view').querySelectorAll('[data-act="jr-filter"]')[%d].click();await settle();}
+                  available=true;
+                  for(let i=0;i<30;i++)WG.emit('second');await settle();
+                  if(!viewText().includes(%s))throw new Error('new event did not reach the empty journal: '+viewText());
+                  if(viewText().includes('No events'))throw new Error('empty-state message survived');
+                """ % (json.dumps(kind), json.dumps(data), filter_index, filter_index, json.dumps(title))))
+
+    def test_journal_poll_recovers_an_initial_error(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());let failed=true;
+          serve({'/api/events':()=>failed?response({error:'events unavailable'},503):response({events:[],next_before:null})});
+          WG.router.go('journal');await settle();
+          if(!viewText().includes('The journal is unavailable.'))throw new Error('missing initial error');
+          failed=false;for(let i=0;i<30;i++)WG.emit('second');await settle();
+          if(!viewText().includes('No events yet.')||viewText().includes('unavailable'))throw new Error('successful empty refresh did not clear error');
+        """))
+
+    def test_server_month_controls_initial_selection_and_rollover(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot({now:Date.parse('2026-11-01T00:30:00Z')/1000}));
+          let current='2026-11';
+          const history=month=>({month,daily:[{day:month+'-01',rx:1,tx:0}],clients:[{name:'month-'+month,rx:1,tx:0}],
+            exits_daily:{nl:[{day:month+'-01',rx:GiB,tx:0}],us:[]},exits_month:{nl:{rx:GiB,tx:0},us:{rx:0,tx:0}}});
+          serve({'/api/history':url=>response(history(url.includes('?month=')?url.split('=')[1]:current)),
+            '/api/events':{events:[],next_before:null}});
+          WG.router.go('usage');await settle();
+          if(!urls.includes('/api/history')||urls.includes('/api/history?month=2026-10')||!viewText().includes('November 2026'))
+            throw new Error('initial month must come from the server: '+urls+' / '+viewText());
+          current='2026-12';for(let i=0;i<60;i++)WG.emit('second');await settle();
+          if(!viewText().includes('December 2026')||!viewText().includes('month-2026-12'))throw new Error('latest view did not roll over');
+          q('[data-act="us-month"]').click();await settle();
+          if(!viewText().includes('November 2026')||!viewText().includes('month-2026-11'))throw new Error('explicit history month lost');
+          current='2027-01';for(let i=0;i<60;i++)WG.emit('second');await settle();
+          if(!viewText().includes('November 2026'))throw new Error('rollover overwrote explicitly selected history');
+          let next=element('view').querySelectorAll('[data-act="us-month"]').pop();next.click();await settle();
+          next=element('view').querySelectorAll('[data-act="us-month"]').pop();next.click();await settle();
+          if(!viewText().includes('January 2027')||!viewText().includes('month-2027-01'))throw new Error('return to latest failed');
+          if(!element('view').querySelectorAll('[data-act="us-month"]').pop().disabled)throw new Error('future server month became selectable');
+        """), tz='America/Los_Angeles')
+
+    def test_server_month_wins_when_browser_has_already_entered_next_month(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot({now:Date.parse('2026-10-31T12:30:00Z')/1000}));
+          serve({'/api/history':{month:'2026-10',daily:[{day:'2026-10-14',rx:1,tx:0}],clients:[],
+            exits_daily:{nl:[{day:'2026-10-10',rx:96*GiB,tx:0}],us:[]},exits_month:{nl:{rx:96*GiB,tx:0},us:{rx:0,tx:0}}},
+            '/api/events':{events:[],next_before:null}});
+          WG.router.go('usage');await settle();
+          if(!viewText().includes('October 2026')||!viewText().includes('by Oct 31 ~213 GiB'))throw new Error('browser timezone changed the report: '+viewText());
+          if(!element('view').querySelectorAll('[data-act="us-month"]').pop().disabled)throw new Error('browser month enabled future navigation');
+        """), tz='Pacific/Kiritimati')
+
+    def test_late_history_response_keeps_the_new_selection(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());let pending;
+          const history=month=>({month,daily:[],clients:[{name:'data-'+month,rx:GiB,tx:0}],exits_daily:{nl:[],us:[]},
+            exits_month:{nl:{rx:0,tx:0},us:{rx:0,tx:0}}});
+          context.fetch=url=>{
+            if(url==='/api/history?month=2026-09')return new Promise(resolve=>{pending=resolve});
+            return Promise.resolve(response(String(url).startsWith('/api/history')?history(url.includes('2026-08')?'2026-08':'2026-10'):{events:[],next_before:null}));
+          };
+          WG.router.go('usage');await settle();
+          q('[data-act="us-month"]').click();await settle();
+          q('[data-act="us-month"]').click();await settle();
+          pending(response(history('2026-09')));await settle();
+          if(!viewText().includes('August 2026')||!viewText().includes('data-2026-08')||viewText().includes('data-2026-09'))
+            throw new Error('late response overwrote selected month: '+viewText());
+        """))
+
+    def test_empty_journal_refresh_ignores_response_for_old_filter(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());let pending;
+          serve({'/api/events':{events:[],next_before:null}});
+          WG.router.go('journal');await settle();
+          context.fetch=url=>url==='/api/events?limit=50'?new Promise(resolve=>{pending=resolve}):Promise.resolve(response({events:[],next_before:null}));
+          for(let i=0;i<30;i++)WG.emit('second');await settle();
+          element('view').querySelectorAll('[data-act="jr-filter"]')[2].click();await settle();
+          pending(response({events:[{id:3,ts:WG.state.now,kind:'login',actor:'admin',data:{ok:true}}],next_before:null}));await settle();
+          if(viewText().includes('Signed in')||!viewText().includes('No events of this type.'))throw new Error('late refresh crossed filter boundary');
+        """))
+
+    def test_invalid_current_month_is_an_error_and_can_be_retried(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());
+          let month='invalid';
+          serve({'/api/history':()=>response({month,daily:[],clients:[],exits_daily:{},exits_month:{}}),
+            '/api/events':{events:[],next_before:null}});
+          WG.router.go('usage');await settle();
+          if(!viewText().includes('Could not load the usage.')||!q('[data-act="us-retry"]'))throw new Error('invalid month became invented data');
+          month='2026-10';q('[data-act="us-retry"]').click();await settle();
+          if(!viewText().includes('October 2026')||!viewText().includes('No traffic'))throw new Error('current month retry failed');
+        """))
+
     def test_exits_page_scheme_history_and_actions(self):
         run_pages(self, wrap(r"""
           const snap=snapshot();
@@ -349,7 +497,7 @@ class TestPagesRender(unittest.TestCase):
               exits_daily:{nl:[{day,rx:20*GiB,tx:GiB}],us:[{day,rx:5*GiB,tx:0}]},exits_month:{nl:{rx:20*GiB,tx:GiB},us:{rx:5*GiB,tx:0}}}),
             '/api/events':{events:[],next_before:null},'/api/status':WG.state});
           WG.router.go('usage');await settle();
-          if(!urls.some(u=>u==='/api/history?month='+key))throw new Error('the month is asked explicitly: '+urls.join(' '));
+          if(!urls.includes('/api/history'))throw new Error('current month comes from the server: '+urls.join(' '));
           const text=viewText();
           for(const s of ['Traffic usage','By day','By client','kirill-iphone','gone-device','deleted','quota 1000 GiB','Through the exits this month'])
             if(!text.includes(s))throw new Error('missing «'+s+'»: '+text.slice(0,500));
@@ -369,7 +517,7 @@ class TestPagesRender(unittest.TestCase):
     def test_usage_empty_month_says_so(self):
         run_pages(self, wrap(r"""
           await feed(snapshot());
-          serve({'/api/history':{month:'x',daily:[],clients:[],exits_daily:{nl:[],us:[]},exits_month:{nl:{rx:0,tx:0},us:{rx:0,tx:0}}},
+          serve({'/api/history':{month:'2026-10',daily:[],clients:[],exits_daily:{nl:[],us:[]},exits_month:{nl:{rx:0,tx:0},us:{rx:0,tx:0}}},
                  '/api/events':{events:[],next_before:null},'/api/status':WG.state});
           WG.router.go('usage');await settle();
           if(!/No traffic in \w+ \d{4}\./.test(viewText()))throw new Error('empty month: '+viewText().slice(0,300));
@@ -423,9 +571,10 @@ class TestPagesRender(unittest.TestCase):
           if(P.journalViews(ev,'all',ctx).length!==1||P.journalViews(ev,'all',ctx)[0].title!=='5 неудачных попыток входа в панель')throw new Error('login plural');
           const g=P.groupByDay([{ts:local(2026,10,14,10)},{ts:local(2026,10,13,10)}],local(2026,10,14,20));
           if(g[0].label!=='Сегодня · 14 октября'||g[1].label!=='Вчера · 13 октября')throw new Error(g.map(x=>x.label).join(' | '));
-          const info=P.monthInfo('2026-10',local(2026,10,14,12));
+          const info=P.monthInfo('2026-10','2026-10',{daily:[{day:'2026-10-14'}]});
           const t=P.forecastText(P.forecast({used:371*GiB,quota:500*GiB,info,series:[]}),{key:'us',used:371*GiB,clients:0,info});
-          if(t!=='при темпе 1–14 окт (27 ГиБ/день) кончилась бы ~19 окт · сейчас на US 0 клиентов')throw new Error(t);
+          if(!t.startsWith('при темпе 1–14 окт (27 ГиБ/день) кончилась бы ~19 окт · сейчас на US 0 клиентов')
+            ||!t.includes('данные по 14 окт')||!t.includes('неполный последний день'))throw new Error(t);
         """), lang="ru")
 
 

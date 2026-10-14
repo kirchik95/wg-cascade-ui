@@ -80,6 +80,7 @@ WG.addStrings('ru',{
  'No traffic in {month}.':'За {month} трафика нет.','The panel keeps daily usage for a limited time; older months may be empty.':'Панель хранит расход по дням ограниченное время, старые месяцы могут быть пустыми.',
  'Could not load the usage.':'Не удалось загрузить расход.','The usage database is unavailable.':'База расхода недоступна.',
  'Showing the data loaded at {t}.':'Показаны данные, загруженные в {t}.',
+ 'data through {d}, including the possibly incomplete last day':'данные по {d}, включая возможно неполный последний день',
  /* journal */
  'Event journal':'Журнал событий','What happened':'Что происходило','All':'Всё','Exits':'Выходы','Clients':'Клиенты','Access':'Доступ',
  'Event type':'Тип событий','Export':'Экспорт','Download the loaded events as CSV':'Скачать загруженные события в CSV',
@@ -95,6 +96,8 @@ WG.addStrings('ru',{
  '{name}: access until {d}':'{name}: доступ до {d}','{name}: no expiry now':'{name}: теперь бессрочно',
  '{name} moved to {exit}':'{name} переведён на {exit}','Everyone is already on {exit}':'Все клиенты уже на {exit}',
  'Everyone moved to {exit}':'Все клиенты переведены на {exit}','Nobody left to move back':'Возвращать было некого',
+ 'Clients moved back to {exit}':'Клиенты возвращены на {exit}',
+ 'The change was applied, but some existing connections could not be cleared. Check that clients reconnect.':'Изменение применено, но очистка прежних соединений завершилась не полностью. Проверьте, что клиенты переподключились.',
  'the clients were deleted or moved by hand':'клиенты удалены или переведены вручную',
  'Exit settings changed':'Изменены настройки выходов','quotas and automatic switching':'квоты и автопереключение',
  'Split tunnel list saved':'Сохранён список сплит-туннеля','RU subnets refreshed':'подсети РФ обновлены',
@@ -494,19 +497,22 @@ function shiftMonth(key,delta){
  while(m<1){m+=12;y--}while(m>12){m-=12;y++}
  return y+'-'+pad(m);
 }
-function monthInfo(key,now){
+const validMonth=key=>typeof key==='string'&&/^\d{4}-(0[1-9]|1[0-2])$/.test(key);
+function monthInfo(key,currentKey,data){
  const y=+key.slice(0,4),m=+key.slice(5,7);
  const start=new Date(y,m-1,1).getTime()/1000,end=new Date(y,m,1).getTime()/1000,days=new Date(y,m,0).getDate();
- const current=now>=start&&now<end;
- return{key,y,m,days,start,end,current,past:now>=end,future:now<start,
-  elapsed:current?Math.max((now-start)/DAY,1/24):now>=end?days:0,today:current?new Date(now*1000).getDate():0};
+ const current=key===currentKey,info={key,y,m,days,start,end,current,past:key<currentKey,future:key>currentKey};
+ let last=0;
+ const rows=[data&&data.daily].concat(WG.EXITS.map(k=>data&&data.exits_daily&&data.exits_daily[k]));
+ rows.forEach(list=>(Array.isArray(list)?list:[]).forEach(row=>{last=Math.max(last,dayOfMonth(row&&row.day,info))}));
+ return Object.assign(info,{elapsed:current?last:info.past?days:0,today:current?last:0});
 }
 function monthTitle(info){return MONTH_NOM[LANG()][info.m-1]+' '+info.y}
 /* inside a sentence: «за октябрь 2026» */
 function monthPhrase(info){const n=MONTH_NOM[LANG()][info.m-1];return(LANG()==='ru'?n.toLowerCase():n)+' '+info.y}
 function dayOfMonth(s,info){
  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s||''));
- return m&&+m[1]===info.y&&+m[2]===info.m?+m[3]:0;
+ return m&&+m[1]===info.y&&+m[2]===info.m&&+m[3]>=1&&+m[3]<=info.days?+m[3]:0;
 }
 /* exits_daily {nl:[{day, rx, tx}], us:[…]} → one row per day of the month (bytes, rx+tx) */
 function daySeries(exitsDaily,info){
@@ -521,8 +527,8 @@ function daySeries(exitsDaily,info){
  });
  return out;
 }
-/* Quota forecast, method «average so far»: rate = used / elapsed days of the month;
-   the month ends at rate × days; the quota runs out on the day the same rate crosses it. */
+/* Dates belong to the server's reporting calendar. Include its latest daily bucket
+   (which may still be partial); do not infer the server timezone from the browser. */
 function forecast(o){
  const info=o.info,used=+o.used||0,quota=+o.quota||0;
  const f={kind:'none',rate:0,projected:used,day:0};
@@ -534,6 +540,7 @@ function forecast(o){
   for(let i=0;i<s.length;i++){acc+=+s[i]||0;if(acc>=quota){f.day=i+1;break}}
   f.kind='exhausted';return f;
  }
+ if(info.current&&!span)return f;
  if(!info.current){f.kind='final';return f}
  f.projected=Math.round(f.rate*info.days);
  if(quota>0&&f.rate>0&&f.projected>quota){
@@ -547,11 +554,12 @@ function forecastText(f,o){
  const info=o.info,E=XL(o.key);
  const span=info.today>1?'1–'+dayMon(info.today,info.m):dayMon(1,info.m);
  const idle=o.clients===0&&(+o.used||0)>0?' · '+tr('now {exit} has {n}',{exit:E,n:WG.count(0,'client')}):'';
+ const note=info.today?' · '+tr('data through {d}, including the possibly incomplete last day',{d:dayMon(info.today,info.m)}):'';
  if(f.kind==='exhausted')return f.day?tr('quota used up on {d}',{d:dayMon(f.day,info.m)}):tr('quota used up');
  if(f.kind==='final')return tr('month total · {r} on average',{r:rateText(f.rate)});
  if(f.kind==='runs-out')return tr(o.clients===0?'at the pace of {span} ({r}) it would run out ~{d}':'at the pace of {span} ({r}) runs out ~{d}',
-  {span,r:rateText(f.rate),d:dayMon(f.day,info.m)})+idle;
- if(f.kind==='projection')return tr('average over {span} ({r}): by {end} ~{p} {unit}',{span,r:rateText(f.rate),end:dayMon(info.days,info.m),p:gibs(f.projected),unit:UNIT()})+idle;
+  {span,r:rateText(f.rate),d:dayMon(f.day,info.m)})+idle+note;
+ if(f.kind==='projection')return tr('average over {span} ({r}): by {end} ~{p} {unit}',{span,r:rateText(f.rate),end:dayMon(info.days,info.m),p:gibs(f.projected),unit:UNIT()})+idle+note;
  return'';
 }
 function niceMax(v){
@@ -574,15 +582,33 @@ function exitSwitches(events,info){
   .map(e=>({id:e.id,ts:+e.ts,day:new Date(e.ts*1000).getDate(),from:XL(e.data&&e.data.source),to:XL(e.data&&e.data.target),reason:e.data&&e.data.reason}));
 }
 const USAGE_ROWS=8;
-let _u={month:null,cache:{},switches:null,expanded:false,tok:0};
+let _u={month:null,currentMonth:null,followCurrent:true,latest:{data:null,err:null,at:0,loading:null},cache:{},switches:null,expanded:false};
 let _usageUpd=null;
+function loadCurrent(force){
+ const latest=_u.latest;
+ if(latest.loading)return latest.loading;
+ if(latest.data&&!force&&Date.now()-latest.at<60000)return Promise.resolve();
+ latest.loading=WG.api('/api/history').then(d=>{
+  if(!d||!validMonth(d.month))throw new Error('invalid reporting month');
+  latest.data=d;latest.err=null;latest.at=Date.now();_u.currentMonth=d.month;
+  const entry=_u.cache[d.month]||(_u.cache[d.month]={});
+  Object.assign(entry,{data:d,err:null,at:latest.at});
+  if(_u.followCurrent){if(_u.month!==d.month)_u.expanded=false;_u.month=d.month}
+ }).catch(e=>{
+  latest.err=e||new Error('failed');
+  if(_u.currentMonth&&_u.cache[_u.currentMonth])_u.cache[_u.currentMonth].err=latest.err;
+ }).then(()=>{latest.loading=null});
+ return latest.loading;
+}
 function loadMonth(key,force){
  const c=_u.cache[key];
  if(c&&c.loading)return c.loading;
  if(c&&c.data&&!force&&Date.now()-c.at<60000)return Promise.resolve();
  const entry=_u.cache[key]=Object.assign({data:null,err:null,at:0},c||{});
- entry.loading=WG.api('/api/history?month='+encodeURIComponent(key)).then(d=>{entry.data=d&&typeof d==='object'?d:{};entry.err=null;entry.at=Date.now()},
-  e=>{entry.err=e||new Error('failed')}).then(()=>{entry.loading=null});
+ entry.loading=WG.api('/api/history?month='+encodeURIComponent(key)).then(d=>{
+  if(!d||d.month!==key)throw new Error('invalid reporting month');
+  entry.data=d;entry.err=null;entry.at=Date.now();
+ }).catch(e=>{entry.err=e||new Error('failed')}).then(()=>{entry.loading=null});
  return entry.loading;
 }
 function loadSwitches(){
@@ -693,30 +719,30 @@ function usageBodyHTML(entry,info,s){
  return h;
 }
 function renderUsage(el,ctx){
- const cur=monthKey(nowTs());
- if(!_u.month||_u.month>cur)_u.month=cur;
  el.innerHTML='<div class="pg us"><div class="us-head"></div><div class="us-body"></div></div>';
  const set=patcher(),head=el.querySelector('.us-head'),body=el.querySelector('.us-body');
  const upd=()=>{
   if(el.isConnected===false)return;
-  const now=nowTs(),info=monthInfo(_u.month,now);
-  set('h',head,pageHead(tr('Traffic usage'),monthTitle(info),monthNav(info,monthKey(now))));
-  set('b',body,usageBodyHTML(_u.cache[_u.month],info,WG.state));
+  const entry=_u.month?_u.cache[_u.month]:_u.latest;
+  const info=_u.month?monthInfo(_u.month,_u.currentMonth,entry&&entry.data):null;
+  set('h',head,pageHead(tr('Traffic usage'),info?monthTitle(info):tr('Traffic usage'),info?monthNav(info,_u.currentMonth):''));
+  set('b',body,usageBodyHTML(entry,info,WG.state));
  };
  _usageUpd=upd;
- const load=force=>{const p=loadMonth(_u.month,force);upd();return p.then(upd)};
+ const load=force=>{const p=_u.followCurrent?loadCurrent(force):loadMonth(_u.month,force);upd();return p.then(upd)};
  _u.load=load;
  ctx.on('status',upd);
  let sec=0;
- ctx.on('second',()=>{if(++sec%60===0&&_u.month===monthKey(nowTs()))load(true)});
+ ctx.on('second',()=>{if(++sec%60===0)loadCurrent(true).then(upd)});
  _u.switches=null;
  loadSwitches().then(upd);
  load(false);
+ if(!_u.followCurrent)loadCurrent(false).then(upd);
 }
 WG.delegate('us-month',el=>{
- const m=el.getAttribute('data-m'),cur=monthKey(nowTs());
- if(!/^\d{4}-\d{2}$/.test(m||'')||m>cur||m===_u.month)return;
- _u.month=m;_u.expanded=false;
+ const m=el.getAttribute('data-m'),cur=_u.currentMonth;
+ if(!validMonth(m)||!cur||m>cur||m===_u.month)return;
+ _u.month=m;_u.followCurrent=m===cur;_u.expanded=false;
  if(_u.load)_u.load(false);
 });
 WG.delegate('us-retry',()=>{if(_u.load)_u.load(true)});
@@ -729,7 +755,7 @@ WG.delegate('us-csv',()=>{
 });
 WG.delegate('us-day-csv',()=>{
  const e=_u.cache[_u.month];if(!e||!e.data)return;
- const info=monthInfo(_u.month,nowTs());
+ const info=monthInfo(_u.month,_u.currentMonth,e.data);
  const rows=daySeries(e.data.exits_daily,info).filter(d=>d.has);
  download('wg-usage-days-'+_u.month+'.csv',toCSV([['day','nl_bytes','us_bytes','total_bytes']].concat(rows.map(d=>[_u.month+'-'+pad(d.day),d.nl,d.us,d.nl+d.us]))));
 });
@@ -805,10 +831,11 @@ function eventView(ev,ctx){
    case'setexpiry':v.title=+d.expires?tr('{name}: access until {d}',{name,d:WG.fmtDate(+d.expires)}):tr('{name}: no expiry now',{name});break;
    case'setexit':v.title=tr('{name} moved to {exit}',{name,exit:E});break;
    case'setexitall':
-    if(+d.event_id>0){v.hide=true;break}       /* the exit_switch row tells who moved */
+    if(+d.event_id>0&&!d.cleanup_warning){v.hide=true;break}       /* the exit_switch row tells who moved */
     v.title=tr(+d.changed>0?'Everyone moved to {exit}':'Everyone is already on {exit}',{exit:E});break;
    case'revertswitch':
-    if(+d.event_id>0){v.hide=true;break}
+    if(+d.event_id>0&&!d.cleanup_warning){v.hide=true;break}
+    if(+d.changed>0||+d.event_id>0){v.title=tr('Clients moved back to {exit}',{exit:E});break}
     v.title=tr('Nobody left to move back');v.detail=tr('the clients were deleted or moved by hand');break;
    case'setexitpolicy':v.title=tr('Exit settings changed');v.detail=tr('quotas and automatic switching');break;
    case'splitsave':v.title=tr('Split tunnel list saved');
@@ -816,6 +843,10 @@ function eventView(ev,ctx){
    case'splitserver':v.title=tr(d.split?'Split tunnel turned on':'Split tunnel turned off');v.detail=tr(d.split?'RU sites go straight from the entry':'all traffic goes through the exits');break;
    case'export':v.title=tr('Config backup downloaded');v.detail=tr('the archive holds every private key');v.tone='warn';break;
    default:v.title=tr('Operation {op}',{op});
+  }
+  if(d.cleanup_warning){
+   v.tone='warn';
+   v.detail=[v.detail,tr('The change was applied, but some existing connections could not be cleared. Check that clients reconnect.')].filter(Boolean).join(' · ');
   }
   return v;
  }
@@ -926,16 +957,15 @@ function jLoad(more){
 }
 /* New events since the last load are merged on top (every 30 s while the page is open). */
 function jRefreshTop(){
- if(_j.loading||!_j.events.length)return Promise.resolve();
- const f=_j.filter,kinds=J_KINDS[f],tok=_j.tok,maxId=Math.max.apply(null,_j.events.map(e=>+e.id||0));
+ if(_j.loading)return Promise.resolve();
+ const f=_j.filter,kinds=J_KINDS[f],tok=_j.tok,maxId=Math.max.apply(null,[0].concat(_j.events.map(e=>+e.id||0)));
  return WG.api('/api/events?limit=50'+(kinds?'&kind='+kinds:'')).then(d=>{
   if(tok!==_j.tok||f!==_j.filter)return;
   const evs=Array.isArray(d&&d.events)?d.events:[];
   const fresh=evs.filter(e=>+e.id>maxId);
-  if(!fresh.length)return;
-  if(evs.length&&Math.min.apply(null,evs.map(e=>+e.id))>maxId){_j.events=evs;_j.next=d.next_before||null}
-  else _j.events=fresh.concat(_j.events);
-  _j.at=Date.now();
+  if(maxId===0||(evs.length&&Math.min.apply(null,evs.map(e=>+e.id))>maxId)){_j.events=evs;_j.next=d.next_before||null}
+  else if(fresh.length)_j.events=fresh.concat(_j.events);
+  _j.err=null;_j.at=Date.now();
   if(_journalUpd)_journalUpd();
  },()=>{});
 }
