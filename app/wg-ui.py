@@ -838,6 +838,10 @@ def health_tick():
     res = _probe_egress()
     now = int(time.time())
     _record_probe(res, now)
+    try:
+        record_probe_history(res, now)
+    except sqlite3.Error as exc:
+        log_event("health_history", ok=False, error=str(exc)[:200])
     with _lock:
         _health_runtime["loop_at"] = now
     return evaluate_health_failover()
@@ -900,6 +904,8 @@ def _exit_status(key, iface, expect_ip, peer):
         "ok": ok,
         "health": hl.get("state", "unknown"),
         "health_since": hl.get("since", 0),
+        "fails": int(hl.get("fails", 0)),    # consecutive failed probes (debounce progress)
+        "oks": int(hl.get("oks", 0)),        # consecutive passed probes
         "checked_age": age,
     }
 
@@ -1084,6 +1090,8 @@ def db_init():
         # Month/daily aggregates filter on day across all clients; the (pubkey, day)
         # PK cannot serve that, so without this index they scan the whole history.
         c.execute("CREATE INDEX IF NOT EXISTS ix_usage_day ON usage(day)")
+        c.execute("CREATE TABLE IF NOT EXISTS health_hourly(exit TEXT, hour_ts INTEGER, "
+                  "ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, PRIMARY KEY(exit, hour_ts))")
         c.commit()
         c.execute("PRAGMA optimize")
         c.close()
@@ -1128,6 +1136,38 @@ def log_connections(eps):
         return
     for pub in event_pubs:
         _conn_prev[pub] = nxt[pub]
+
+HEALTH_HISTORY_DAYS = 7
+
+def record_probe_history(res, now):
+    """Fold one probe round into hourly per-exit ok/fail counters (one upsert per exit)."""
+    hour = int(now) - int(now) % 3600
+    with _db(write=True) as c:
+        for key in exit_policy.EXITS:
+            if key not in res:
+                continue
+            ok_ = bool(res[key][0])
+            c.execute("INSERT INTO health_hourly(exit,hour_ts,ok,fail) VALUES(?,?,?,?) "
+                      "ON CONFLICT(exit,hour_ts) DO UPDATE SET ok=ok+?,fail=fail+?",
+                      (key, hour, int(ok_), int(not ok_), int(ok_), int(not ok_)))
+
+def health_history(hours=24, now=None):
+    """{exit: [{ts, ok, fail}] * hours}, oldest first; the last bucket is the current
+    hour. Hours without probes stay ok=0/fail=0 so gaps are not painted as healthy.
+    Raises sqlite3.Error (callers answer 503)."""
+    stamp = int(time.time() if now is None else now)
+    last = stamp - stamp % 3600
+    first = last - (hours - 1) * 3600
+    out = {key: [{"ts": first + i * 3600, "ok": 0, "fail": 0} for i in range(hours)]
+           for key in exit_policy.EXITS}
+    with _db() as c:
+        rows = c.execute("SELECT exit, hour_ts, ok, fail FROM health_hourly "
+                         "WHERE hour_ts>=? AND hour_ts<=?", (first, last)).fetchall()
+    for r in rows:
+        if r["exit"] in out:
+            slot = out[r["exit"]][(r["hour_ts"] - first) // 3600]
+            slot["ok"], slot["fail"] = r["ok"] or 0, r["fail"] or 0
+    return out
 
 def connections_for(pub, limit=20):
     """Raises sqlite3.Error on failure — callers report 'unavailable', not 'no data'."""
@@ -1367,6 +1407,8 @@ def db_maintenance(registry=None, now=None):
     with _db(write=True) as c:
         c.execute("DELETE FROM usage WHERE day<?", (cutoff,))
         c.execute("DELETE FROM exit_usage WHERE day<?", (cutoff,))
+        c.execute("DELETE FROM health_hourly WHERE hour_ts<?",
+                  (int(stamp) - HEALTH_HISTORY_DAYS * 86400,))
         if keep:
             marks = ",".join("?" * len(keep))
             c.execute("DELETE FROM counters WHERE pubkey NOT IN (%s)" % marks, keep)
@@ -1558,6 +1600,11 @@ class H(BaseHTTPRequestHandler):
                     if pub:   # per-client daily series (config modal chart)
                         return self._json(200, {"daily": usage_daily_for(pub, 30)})
                     return self._json(200, history_payload(month=month))
+                except sqlite3.Error as e:
+                    return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
+            if path.startswith("/api/health-history"):
+                try:
+                    return self._json(200, {"probe_s": PROBE_S, "exits": health_history(24)})
                 except sqlite3.Error as e:
                     return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
             if path.startswith("/api/audit"):
