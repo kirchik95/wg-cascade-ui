@@ -90,7 +90,7 @@ class TestBulkAdmin(unittest.TestCase):
                 mock.patch.object(wgadmin.os, "geteuid", return_value=501), \
                 mock.patch.object(wgadmin.os, "getegid", return_value=20), \
                 mock.patch.object(wgadmin.os, "fchown"):
-            result = wgadmin.setexitpolicy_data("1", "250", "750")
+            result = wgadmin.setexitpolicy_data("1", "250", "750", "1")
         policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
         saved = json.loads(policy_path.read_text())
         self.assertTrue(saved["auto_switch"])
@@ -203,7 +203,8 @@ class TestBulkAdmin(unittest.TestCase):
     def test_policy_validation_does_not_replace_existing_file(self):
         policy_path = pathlib.Path(wgadmin.EXIT_POLICY)
         policy_path.write_text("keep-me\n")
-        for values in (("2", "250", "750"), ("1", "0", "750"), ("1", "250", "1000001"), ("1", "2.5", "750")):
+        for values in (("2", "250", "750", "1"), ("1", "0", "750", "1"), ("1", "250", "1000001", "1"),
+                       ("1", "2.5", "750", "1"), ("1", "250", "750", "yes")):
             with self.subTest(values=values):
                 with self.assertRaises(ValueError):
                     wgadmin.setexitpolicy_data(*values)
@@ -216,7 +217,7 @@ class TestBulkAdmin(unittest.TestCase):
         with mock.patch.object(wgadmin.grp, "getgrnam", side_effect=KeyError), \
                 mock.patch.object(wgadmin.os, "geteuid", return_value=0):
             with self.assertRaisesRegex(RuntimeError, "wgui group not found"):
-                wgadmin.setexitpolicy_data("1", "250", "750")
+                wgadmin.setexitpolicy_data("1", "250", "750", "1")
         self.assertEqual(policy_path.read_bytes(), original)
         self.assertEqual({path.name for path in policy_path.parent.iterdir()}, {policy_path.name})
 
@@ -230,7 +231,7 @@ class TestBulkAdmin(unittest.TestCase):
                 mock.patch.object(wgadmin.os, "chown", side_effect=fail), \
                 mock.patch.object(wgadmin.os, "fchown", side_effect=fail):
             with self.assertRaisesRegex(PermissionError, "fchown denied"):
-                wgadmin.setexitpolicy_data("1", "250", "750")
+                wgadmin.setexitpolicy_data("1", "250", "750", "1")
         self.assertEqual(policy_path.read_bytes(), original)
         self.assertEqual({path.name for path in policy_path.parent.iterdir()}, {policy_path.name})
 
@@ -259,7 +260,7 @@ class TestBulkAdmin(unittest.TestCase):
                 mock.patch.object(wgadmin.os, "fchown", side_effect=lambda fd, uid, gid: events.append("fchown")), \
                 mock.patch.object(wgadmin.os, "replace", side_effect=replace), \
                 mock.patch.object(wgadmin.os, "chown", side_effect=lambda path, uid, gid: events.append("chown")):
-            wgadmin.setexitpolicy_data("1", "250", "750")
+            wgadmin.setexitpolicy_data("1", "250", "750", "1")
         self.assertEqual(events, ["group", "mkstemp", "fsync", "fchmod", "fchown", "replace"])
 
     def test_missing_policy_group_uses_current_owner_for_non_root_tests(self):
@@ -268,7 +269,7 @@ class TestBulkAdmin(unittest.TestCase):
                 mock.patch.object(wgadmin.os, "geteuid", return_value=501), \
                 mock.patch.object(wgadmin.os, "getegid", return_value=20), \
                 mock.patch.object(wgadmin.os, "fchown", side_effect=lambda fd, uid, gid: owners.append((uid, gid))):
-            result = wgadmin.setexitpolicy_data("0", "250", "750")
+            result = wgadmin.setexitpolicy_data("0", "250", "750", "1")
         self.assertFalse(result["auto_switch"])
         self.assertEqual(owners, [(501, 20)])
 
@@ -305,16 +306,16 @@ class TestBulkAdmin(unittest.TestCase):
         sys.argv = ["wg-admin.py", "setexitall", "us", "manual"]
         with self.assertRaises(SystemExit):
             call_main()
-        sys.argv = ["wg-admin.py", "setexitpolicy", "1", "250", "750"]
+        sys.argv = ["wg-admin.py", "setexitpolicy", "1", "250", "750", "1"]
         with self.assertRaises(SystemExit):
             call_main()
-        self.assertEqual(calls, [("all", ("us", "manual")), ("policy", ("1", "250", "750"))])
+        self.assertEqual(calls, [("all", ("us", "manual")), ("policy", ("1", "250", "750", "1"))])
 
         for argv in (
             ["wg-admin.py", "setexitall", "us"],
             ["wg-admin.py", "setexitall", "us", "manual", "force"],
-            ["wg-admin.py", "setexitpolicy", "1", "250"],
-            ["wg-admin.py", "setexitpolicy", "1", "250", "750", "extra"],
+            ["wg-admin.py", "setexitpolicy", "1", "250", "750"],
+            ["wg-admin.py", "setexitpolicy", "1", "250", "750", "1", "extra"],
         ):
             with self.subTest(argv=argv):
                 sys.argv = argv
@@ -859,7 +860,7 @@ class TestServerPolicy(unittest.TestCase):
         })
         self.assertEqual(code, 200)
         self.assertEqual(response, shared)
-        self.assertEqual(calls, [(["setexitpolicy", "1", "250", "750"], 30)])
+        self.assertEqual(calls, [(["setexitpolicy", "1", "250", "750", "1"], 30)])
         self.assertEqual(refreshes, [True])
 
     def test_policy_save_serializes_with_switch_and_switch_uses_committed_policy(self):
@@ -924,7 +925,7 @@ class TestServerPolicy(unittest.TestCase):
         self.assertFalse(switch_escaped, "switch escaped while policy save was in flight")
         self.assertEqual(save_result[0], (200, {"ok": True, "saved": True}))
         self.assertEqual(switch_result[0]["code"], "target_exhausted")
-        self.assertEqual(calls, [["setexitpolicy", "0", "2", "1"]])
+        self.assertEqual(calls, [["setexitpolicy", "0", "2", "1", "1"]])
 
     def test_policy_save_serializes_with_auto_runtime_reconciliation(self):
         committed = [exit_policy.policy_from_gib(True, 1, 1)]
@@ -1051,7 +1052,7 @@ class TestServerPolicy(unittest.TestCase):
         })
         self.assertEqual((code, response), (200, {"ok": True, "saved": True}))
         self.assertEqual(calls, [
-            ["setexitpolicy", "1", "1", "1"],
+            ["setexitpolicy", "1", "1", "1", "1"],
             ["setexitall", "us", "quota"],
         ])
         with wgui._lock:

@@ -11,8 +11,8 @@ Usage: wg-admin.py <op> [args]
   rename <pubkey> <newname>    -> {}
   setenabled <pubkey> <0|1>    -> {}
   setexit <pubkey> <nl|us>     -> {name,exit}
-  setexitall <nl|us> <manual|quota> -> {exit,changed,source_counts}
-  setexitpolicy <0|1> <nl-gib> <us-gib> -> {auto_switch,quotas_gib}
+  setexitall <nl|us> <manual|quota|health> -> {exit,changed,source_counts}
+  setexitpolicy <0|1 auto> <nl-gib> <us-gib> <0|1 failover> -> {auto_switch,health_failover,quotas_gib}
   delete <pubkey>              -> {}
   getconf <pubkey>             -> {name,ip,conf,qr,exit}
   regenerate                   -> {}   (rewrite conf from clients.json, no change)
@@ -361,14 +361,17 @@ def policy_owner_ids():
         return euid, os.getegid()
     return 0, gid
 
-def setexitpolicy_data(enabled, nl_gib, us_gib):
+def setexitpolicy_data(enabled, nl_gib, us_gib, failover):
     if enabled not in ("0", "1"):
         raise ValueError("auto switch must be 0 or 1")
-    policy = exit_policy.policy_from_gib(enabled == "1", nl_gib, us_gib)
+    if failover not in ("0", "1"):
+        raise ValueError("health failover must be 0 or 1")
+    policy = exit_policy.policy_from_gib(enabled == "1", nl_gib, us_gib, failover == "1")
     owner = policy_owner_ids()
     write_atomic(EXIT_POLICY, json.dumps(policy, indent=1) + "\n", 0o640, owner=owner)
     return {
         "auto_switch": policy["auto_switch"],
+        "health_failover": policy["health_failover"],
         "quotas_gib": {
             key: policy["quota_bytes"][key] // exit_policy.GIB
             for key in exit_policy.EXITS
@@ -377,7 +380,7 @@ def setexitpolicy_data(enabled, nl_gib, us_gib):
 
 def setexitall_data(target, reason):
     target = _normalize_exit(target)
-    if reason not in ("manual", "quota"):
+    if reason not in ("manual", "quota", "health"):
         raise ValueError("invalid switch reason")
     with open(CLIENTS_JSON, "rb") as f:
         original_bytes = f.read()
@@ -529,8 +532,8 @@ def op_setexit(pub, exit_):
 def op_setexitall(target, reason):
     ok(setexitall_data(target, reason))
 
-def op_setexitpolicy(enabled, nl_gib, us_gib):
-    ok(setexitpolicy_data(enabled, nl_gib, us_gib))
+def op_setexitpolicy(enabled, nl_gib, us_gib, failover):
+    ok(setexitpolicy_data(enabled, nl_gib, us_gib, failover))
 
 def op_getconf(pub):
     if not PUB_RE.match(pub):
@@ -664,7 +667,7 @@ def main():
     elif op == "setexpiry"  and len(a) >= 2: op_setexpiry(a[0], a[1])
     elif op == "setexit"    and len(a) >= 2: op_setexit(a[0], a[1])
     elif op == "setexitall" and len(a) == 2: op_setexitall(a[0], a[1])
-    elif op == "setexitpolicy" and len(a) == 3: op_setexitpolicy(a[0], a[1], a[2])
+    elif op == "setexitpolicy" and len(a) == 4: op_setexitpolicy(a[0], a[1], a[2], a[3])
     elif op == "expire":                  op_expire()
     elif op == "export":                  op_export()
     elif op == "rename"     and len(a) >= 2: op_rename(a[0], a[1])

@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys
+import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -46,6 +46,7 @@ US_EXIT_IP  = os.environ.get("WGUI_US_EXIT_IP", "")                 # expected U
 SRC_IP      = os.environ.get("WGUI_SRC_IP", "10.10.0.1")            # source for NL egress probe
 ONLINE_S    = int(os.environ.get("WGUI_ONLINE_SECS", "180"))
 SAMPLE_S    = int(os.environ.get("WGUI_SAMPLE_SECS", "5"))
+PROBE_S     = int(os.environ.get("WGUI_PROBE_SECS", "10"))         # exit health probe interval
 ADMIN       = ["sudo", "-n", "/usr/bin/python3", "/opt/wg-ui/wg-admin.py"]
 DB          = os.environ.get("WGUI_DB", "/var/lib/wg-ui/history.db")
 EXIT_POLICY = os.environ.get("WGUI_EXIT_POLICY", "/etc/wg-ui/exit-policy.json")
@@ -72,6 +73,32 @@ def healthz():
         "sampler": sampler_info(),
         "threads": {"max_conn": MAX_CONN},
     }
+
+def readyz():
+    """Readiness of the panel itself (not of the exits): the deploy gate.
+
+    Exit outages must not fail this check, or every deploy during an exit outage
+    would roll back. Ready = sampler collecting, persistence healthy, health loop
+    alive, status snapshot built. A just-started process gets a grace period.
+    """
+    now = int(time.time())
+    up = now - int(_STARTED_AT)
+    grace = up < 3 * max(SAMPLE_S, PROBE_S) + 15
+    with _lock:
+        collection = dict(_sampler_meta["collection"])
+        persistence = dict(_sampler_meta["persistence"])
+        loop_at = _health_runtime["loop_at"]
+        snap_ok = _status_snap is not None
+    sampler_age = now - collection["ok_at"] if collection.get("ok_at") else -1
+    checks = {
+        "sampler": 0 <= sampler_age <= 3 * SAMPLE_S + 10,
+        "persistence": not persistence.get("err"),
+        "health_loop": bool(loop_at) and now - loop_at <= 3 * PROBE_S + 30,
+        "status": snap_ok,
+    }
+    ready = all(checks.values())
+    return {"ready": ready or (grace and checks["persistence"]), "starting": grace and not ready,
+            "checks": checks, "sampler_age": sampler_age, "uptime_s": up}
 
 
 # ------------------------------------------------------------- data collection
@@ -198,6 +225,9 @@ _sampler_meta = {
 _lock = threading.Lock()
 _policy_lock = threading.Lock()
 _policy_runtime = {"blocked": None, "last_switch": None}
+_health = {key: {"state": "unknown", "fails": 0, "oks": 0, "since": 0, "at": 0}
+           for key in exit_policy.EXITS}  # debounced per-exit health (exit_policy.next_health_state)
+_health_runtime = {"blocked": None, "last_switch_at": 0, "loop_at": 0}
 
 
 def load_exit_policy():
@@ -259,10 +289,14 @@ def exit_policy_status(tunnel_data=None, peers=None):
             "checked_age": age,
             "exhausted": usage[key] >= policy["quota_bytes"][key],
         }
+    with _lock:
+        health_blocked = _health_runtime["blocked"]
     return {
         "auto_switch": policy["auto_switch"],
+        "health_failover": policy.get("health_failover", True),
         "exits": exits,
         "blocked": runtime["blocked"],
+        "health_blocked": health_blocked,
         "last_switch": runtime["last_switch"],
         "warning": warning,
     }
@@ -276,6 +310,8 @@ _BLOCK_MESSAGES = {
     "both_exhausted": "Both exit monthly quotas are exhausted.",
     "counter_unavailable": "Current exit counter data is incomplete.",
     "helper_failed": "The exit switch helper failed.",
+    "both_unhealthy": "Both exits are failing health checks.",
+    "failover_cooldown": "A health failover ran recently; waiting before switching again.",
 }
 
 
@@ -374,7 +410,13 @@ def _guarded_exit_switch_locked(target, reason, inputs=None):
     if assignments.get(target, 0) == sum(assignments.values()):
         _clear_policy_block()
         return {"ok": True, "exit": target, "changed": 0}
-    incomplete = _counter_block(source, target, availability)
+    if reason == "quota":
+        incomplete = _counter_block(source, target, availability)
+    else:
+        # Leaving a broken exit must not depend on that exit's counters (its iface
+        # may be gone); only the target's accounting has to be live.
+        incomplete = _counter_block(source, target, {key: (availability.get(key) or key != target)
+                                                     for key in exit_policy.EXITS})
     if incomplete:
         if reason == "quota":
             incomplete = _set_incomplete_policy_block(incomplete, assignments)
@@ -447,6 +489,48 @@ def evaluate_auto_switch():
     with _policy_lock:
         return _evaluate_auto_switch_locked()
 
+
+def health_states():
+    with _lock:
+        return {key: dict(value) for key, value in _health.items()}
+
+
+def _set_health_block(blocked):
+    value = _with_block_message(blocked) if blocked else None
+    with _lock:
+        _health_runtime["blocked"] = value
+    return value
+
+
+def evaluate_health_failover():
+    """Move clients off a confirmed-down exit (no automatic failback)."""
+    with _policy_lock:
+        inputs = policy_inputs()
+        policy, usage, assignments, health, warning = inputs
+        with _lock:
+            last = _health_runtime["last_switch_at"]
+        now = int(time.time())
+        decision = exit_policy.evaluate_health(policy, usage, assignments, health_states(), now, last)
+        if decision["blocked"]:
+            blocked = _set_health_block(decision["blocked"])
+            return {"ok": False, **blocked}
+        if not decision["action"]:
+            _set_health_block(None)
+            return {"ok": True, "changed": 0}
+        action = decision["action"]
+        result = _guarded_exit_switch_locked(action["target"], "health", inputs)
+        if result.get("ok"):
+            with _lock:
+                _health_runtime["last_switch_at"] = now
+            _set_health_block(None)
+            log_event("exit_failover", source=action["source"], target=action["target"],
+                      changed=result.get("changed", 0))
+        else:
+            _set_health_block({"code": result.get("code") or "helper_failed",
+                               "source": action["source"], "target": action["target"],
+                               "error": result.get("error")})
+        return result
+
 def clients_status():
     """Assemble peer rows from sampler caches — no wg dump on the request path."""
     reg = load_registry()
@@ -500,32 +584,61 @@ def host():
 
 EGRESS_URLS = ["https://api.ipify.org", "https://icanhazip.com"]
 
+def _parse_ip(text):
+    """The probe body must be exactly one IP address — an HTML error page is not."""
+    try:
+        return str(ipaddress.ip_address(text.strip()))
+    except ValueError:
+        return None
+
 def _probe_via(iface_or_ip, expect_ip):
-    """curl through iface_or_ip; ok if seen == expect_ip (or any IP when expect_ip empty)."""
+    """curl through iface_or_ip; ok only on curl success, HTTP 2xx and a valid IP that
+    matches expect_ip (any valid IP when expect_ip is empty). Tries each URL in turn."""
+    seen = None
     for url in EGRESS_URLS:
         try:
-            r = subprocess.run(["curl", "-s", "--max-time", "8", "--interface", iface_or_ip, url],
-                               capture_output=True, text=True, timeout=10)
-            ip = r.stdout.strip()
-            if ip:
-                if expect_ip:
-                    return (ip == expect_ip), ip
-                return True, ip
+            r = subprocess.run(["curl", "-sf", "--max-time", "6", "--interface", iface_or_ip, url],
+                               capture_output=True, text=True, timeout=8)
         except Exception:
-            pass
-    return False, None
+            continue
+        ip = _parse_ip(r.stdout) if r.returncode == 0 else None
+        if not ip:
+            continue
+        seen = ip
+        if not expect_ip or ip == expect_ip:
+            return True, ip
+    return False, seen
 
-def _probe_egress():
-    """Probe NL (via SRC_IP → default cascade) and US (via wg-us) egress IPs."""
-    nl_ok, nl_ip = _probe_via(SRC_IP, EXIT_IP)
-    us_ok, us_ip = False, None
+def _probe_us():
     # Only probe US when the iface exists; missing iface is not an error for NL-only deploys.
     try:
         subprocess.run(["ip", "link", "show", US_IFACE], capture_output=True, timeout=3, check=True)
-        us_ok, us_ip = _probe_via(US_IFACE, US_EXIT_IP or None)
     except Exception:
-        us_ok, us_ip = False, None
-    return {"nl": (nl_ok, nl_ip), "us": (us_ok, us_ip)}
+        return False, None
+    return _probe_via(US_IFACE, US_EXIT_IP or None)
+
+def _probe_egress():
+    """Probe NL (via SRC_IP → default cascade) and US (via wg-us) egress IPs in parallel."""
+    out = {}
+    def run(key, fn):
+        try:
+            out[key] = fn()
+        except Exception:
+            out[key] = (False, None)
+    threads = [threading.Thread(target=run, args=("nl", lambda: _probe_via(SRC_IP, EXIT_IP)), daemon=True),
+               threading.Thread(target=run, args=("us", _probe_us), daemon=True)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    return {key: out.get(key, (False, None)) for key in ("nl", "us")}
+
+def _record_probe(res, now):
+    with _lock:
+        for key in ("nl", "us"):
+            ok_, ip = res[key]
+            _egress[key].update(ok=ok_, seen=ip, at=now)
+            _health[key] = exit_policy.next_health_state(_health[key], ok_, now)
 
 def _sampler_note(ok=True, err=None):
     with _lock:
@@ -621,22 +734,32 @@ def _sampler():
                 _host["prev"] = (idle, total)
         except Exception:
             pass
-        if i % 5 == 0:                 # egress probe every ~25s
-            try:
-                res = _probe_egress()
-                now = int(time.time())
-                with _lock:
-                    for key in ("nl", "us"):
-                        ok_, ip = res[key]
-                        _egress[key].update(ok=ok_, seen=ip, at=now)
-            except Exception:
-                pass
         try:
             refresh_status_cache()
         except Exception:
             pass
         i += 1
         time.sleep(SAMPLE_S)
+
+def health_tick():
+    """One health round: probe both exits, fold results, then consider a failover."""
+    res = _probe_egress()
+    now = int(time.time())
+    _record_probe(res, now)
+    with _lock:
+        _health_runtime["loop_at"] = now
+    return evaluate_health_failover()
+
+def _health_loop():
+    """Exit probes + health failover run apart from the sampler, so a slow probe
+    (curl timeouts on a dead exit) never stalls throughput sampling or vice versa."""
+    while True:
+        started = time.monotonic()
+        try:
+            health_tick()
+        except Exception as exc:
+            log_event("health_tick", ok=False, error=str(exc)[:200])
+        time.sleep(max(1, PROBE_S - (time.monotonic() - started)))
 
 def throughput():
     with _lock:
@@ -671,8 +794,11 @@ def client_sparks():
 def _exit_status(key, iface, expect_ip, peer):
     with _lock:
         eg = dict(_egress.get(key) or {})
+        hl = dict(_health.get(key) or {})
     wg_up = bool(peer and peer["up"])
-    ok = bool(eg.get("ok"))
+    age = (int(time.time()) - eg["at"]) if eg.get("at") else -1
+    # A success older than HEALTH_MAX_AGE is not evidence the exit works now.
+    ok = bool(eg.get("ok")) and 0 <= age <= exit_policy.HEALTH_MAX_AGE
     return {
         "iface": iface,
         "wg_up": wg_up,
@@ -680,20 +806,49 @@ def _exit_status(key, iface, expect_ip, peer):
         "exit_ip": expect_ip or None,
         "exit_seen": eg.get("seen"),
         "ok": ok,
-        "checked_age": (int(time.time()) - eg["at"]) if eg.get("at") else -1,
+        "health": hl.get("state", "unknown"),
+        "health_since": hl.get("since", 0),
+        "checked_age": age,
     }
 
-def tunnel():
+def _affected_clients(exits, clients):
+    """Enabled clients routed to an exit that is not currently passing probes."""
+    out = {key: 0 for key in exits}
+    for c in clients or []:
+        if c.get("enabled", True):
+            key = client_exit(c)
+            if key in exits and not exits[key]["ok"]:
+                out[key] += 1
+    return out
+
+def tunnel(clients=None):
     with _lock:
         peers = {k: (dict(v) if isinstance(v, dict) else None) for k, v in _exit_peers.items()}
     exits = {
         "nl": _exit_status("nl", DO_IFACE, EXIT_IP, peers.get("nl")),
         "us": _exit_status("us", US_IFACE, US_EXIT_IP or None, peers.get("us")),
     }
+    if clients is None:
+        try:
+            clients = load_registry()
+        except Exception:
+            clients = []
+    affected = _affected_clients(exits, clients)
+    for key, n in affected.items():
+        exits[key]["affected_clients"] = n
+    total_affected = sum(affected.values())
+    enabled = sum(1 for c in clients if c.get("enabled", True))
     any_ok = any(e["ok"] for e in exits.values())
     any_wg = any(e["wg_up"] for e in exits.values())
-    state = "up" if any_ok else ("degraded" if any_wg else "down")
-    return {"state": state, "exits": exits}
+    if not any_ok:
+        state = "degraded" if any_wg else "down"
+    elif total_affected and total_affected >= enabled:
+        state = "down"          # every enabled client sits on a failing exit
+    elif total_affected:
+        state = "degraded"
+    else:
+        state = "up"
+    return {"state": state, "exits": exits, "affected_clients": total_affected}
 
 def rud_on():
     try:
@@ -705,8 +860,8 @@ def rud_on():
 def refresh_status_cache():
     """Build /api/status payload from caches; called by the sampler thread."""
     global _status_snap
-    tunnel_data = tunnel()
     peers = clients_status()
+    tunnel_data = tunnel(peers)
     snap = {"now": int(time.time()), "tunnel": tunnel_data, "host": host(), "rud": rud_on(),
             "peers": peers, "thr": throughput(), "sampler": sampler_info(),
             "exit_policy": exit_policy_status(tunnel_data, peers)}
@@ -714,12 +869,32 @@ def refresh_status_cache():
         _status_snap = snap
     return json.loads(json.dumps(snap))
 
+def _age_snapshot(snap, now):
+    """Advance time-relative fields of a cached snapshot to `now`, so a stalled
+    sampler shows growing ages and expired exit checks instead of frozen 'ok'."""
+    drift = max(0, now - int(snap.get("now", now)))
+    snap["now"] = now
+    snap["sampler"] = sampler_info()
+    if not drift:
+        return snap
+    for e in ((snap.get("tunnel") or {}).get("exits") or {}).values():
+        if isinstance(e, dict) and e.get("checked_age", -1) >= 0:
+            e["checked_age"] += drift
+            if e["checked_age"] > exit_policy.HEALTH_MAX_AGE:
+                e["ok"] = False
+    for e in (((snap.get("exit_policy") or {}).get("exits")) or {}).values():
+        if isinstance(e, dict) and e.get("checked_age", -1) >= 0:
+            e["checked_age"] += drift
+            if e["checked_age"] > exit_policy.HEALTH_MAX_AGE:
+                e["healthy"] = False
+    return snap
+
 def status():
     with _lock:
         snap = _status_snap
     if snap is None:
         return refresh_status_cache()
-    return json.loads(json.dumps(snap))
+    return _age_snapshot(json.loads(json.dumps(snap)), int(time.time()))
 
 def call_admin(argv, timeout=30):
     try:
@@ -1035,6 +1210,9 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in ("/healthz", "/health"):
             return self._json(200, healthz())
+        if path == "/readyz":
+            r = readyz()
+            return self._json(200 if r["ready"] else 503, r)
         # PWA assets — public (no sensitive data), so the install/login page can load them
         _CT = {"/app.css": "text/css",
                "/app.js": "application/javascript",
@@ -1203,14 +1381,16 @@ class H(BaseHTTPRequestHandler):
                 return self._json(http_status, payload)
             elif op == "setexitpolicy":
                 auto_switch = b.get("auto_switch")
+                failover = b.get("health_failover", True)
                 quotas = b.get("quotas_gib")
-                if (not isinstance(auto_switch, bool) or not isinstance(quotas, dict)
+                if (not isinstance(auto_switch, bool) or not isinstance(failover, bool)
+                        or not isinstance(quotas, dict)
                         or set(quotas) != set(exit_policy.EXITS)
                         or any(type(quotas[key]) is not int for key in exit_policy.EXITS)):
                     return self._json(400, {"ok": False, "error": "invalid exit policy"})
                 try:
                     validated = exit_policy.policy_from_gib(
-                        auto_switch, quotas["nl"], quotas["us"])
+                        auto_switch, quotas["nl"], quotas["us"], failover)
                 except (KeyError, TypeError, ValueError) as e:
                     return self._json(400, {"ok": False, "error": str(e)})
                 argv = [
@@ -1218,6 +1398,7 @@ class H(BaseHTTPRequestHandler):
                     "1" if validated["auto_switch"] else "0",
                     str(validated["quota_bytes"]["nl"] // exit_policy.GIB),
                     str(validated["quota_bytes"]["us"] // exit_policy.GIB),
+                    "1" if validated["health_failover"] else "0",
                 ]
             elif op == "export":
                 argv = ["export"]
@@ -1266,6 +1447,7 @@ def main():
     ensure_client_registry()
     seed_exit_usage_from_registry()
     threading.Thread(target=_sampler, daemon=True).start()
+    threading.Thread(target=_health_loop, daemon=True).start()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(CERT, KEY)
