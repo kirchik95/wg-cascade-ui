@@ -4,7 +4,7 @@
 No network, no WireGuard, no root — only validation, token, and set math.
 Run from the repo root:  python3 -m unittest discover -s tests
 """
-import contextlib, importlib.util, io, ipaddress, hashlib, json, os, pathlib, tempfile, time, unittest
+import contextlib, importlib.util, re, io, ipaddress, hashlib, json, os, pathlib, tempfile, time, unittest
 from unittest import mock
 
 APP = pathlib.Path(__file__).resolve().parent.parent / "app"
@@ -50,6 +50,39 @@ def quiet_exit(fn, *a):
         except SystemExit:
             return True
     return False
+
+
+class TestThroughputDirection(unittest.TestCase):
+    def test_down_is_what_clients_receive(self):
+        # samples are (t, total peer rx, total peer tx): peer tx = bytes sent to clients = their download
+        with mock.patch.object(wgui, "_samples", [(0, 0, 0), (10, 100, 5000)]):
+            cur = wgui.throughput()["cur"]
+        self.assertEqual(cur["down"], 500)
+        self.assertEqual(cur["up"], 10)
+
+
+class TestShellAssetVersion(unittest.TestCase):
+    def test_html_and_sw_get_one_content_version(self):
+        with mock.patch.object(wgui, "_asset_v", None):
+            v = wgui.asset_version()
+            self.assertRegex(v, r"^[0-9a-f]{12}$")
+            for name in ("index.html", "login.html", "sw.js"):
+                body = wgui.shell_asset(name)
+                self.assertNotIn(b"__V__", body)
+                self.assertIn(v.encode(), body)
+            html = wgui.shell_asset("index.html").decode()
+            refs = re.findall(r'(?:src|href)="(/[a-z]+\.(?:css|js)[^"]*)"', html)
+            self.assertTrue(refs)
+            for ref in refs:
+                self.assertTrue(ref.endswith("?v=" + v), ref)
+
+    def test_version_follows_content(self):
+        with mock.patch.object(wgui, "_asset_v", None):
+            v1 = wgui.asset_version()
+        real = wgui.asset
+        with mock.patch.object(wgui, "_asset_v", None), \
+                mock.patch.object(wgui, "asset", lambda n: real(n) + (b"/*x*/" if n == "app.css" else b"")):
+            self.assertNotEqual(wgui.asset_version(), v1)
 
 
 class TestAdminValidation(unittest.TestCase):

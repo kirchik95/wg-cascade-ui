@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+"""Front-end dashboard and shell: quota gauges, honest stale/outage/offline states,
+plaque priority, texts for server codes, the client menu and action hooks.
+NODE_SETUP is a small fake DOM that runs app/icons.js, core.js and dashboard.js in node."""
+import os
 import pathlib
+import re
 import shutil
 import subprocess
 import textwrap
@@ -292,20 +297,14 @@ function runTimers(maxDelay=Infinity){
 function visibleText(html){ return String(html).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim(); }
 function response(payload,status=200){ return {status,json:async()=>payload}; }
 
-const mbgNode=mount('div','mbg');
-const modalNode=mount('div','modal',mbgNode);modalNode.setAttribute('tabindex','-1');
-[
- ['button','monthuse-nl'],['button','monthuse-us'],['div','policyalert'],['div','toast'],
- ['div','offline'],['div','upd'],['div','cards'],['div','hostbar'],['svg','spark'],
- ['div','sparkticks'],['div','sparkymax'],['div','viewfilt'],['div','exitfilt'],['div','csum'],
- ['button','lang'],['button','acctbtn'],['button','morebtn'],['input','csearch'],['div','tline'],
- ['div','alert'],['div','cascade'],['div','thr'],['div','chartnow'],['div','charttip']
-].forEach(([tag,id])=>mount(tag,id));
-element('monthuse-nl').setAttribute('data-act','exit-policy');
-element('monthuse-us').setAttribute('data-act','exit-policy');
-
+let narrow=false;
+const store=new Map([['wgui-lang',process.env.WGUI_TEST_LANG||'en']]);
+['top','nav','age','ops','banner','view','tabbar','layer'].forEach(id=>mount('div',id));
+mount('main','main');
+const acct=mount('button','acct');acct.setAttribute('data-act','account');
+const addbtn=mount('button','addbtn');addbtn.setAttribute('data-act','add-client');addbtn.setAttribute('data-live','');
 const fakeWindow={
-  matchMedia(){return{matches:true};},
+  matchMedia(q){return{matches:/max-width/.test(q)?narrow:false};},
   addEventListener(type,listener){
     if(!windowListeners.has(type))windowListeners.set(type,[]);
     windowListeners.get(type).push(listener);
@@ -313,294 +312,380 @@ const fakeWindow={
 };
 const context={
   console,require,document,NodeFilter:{SHOW_TEXT:4},navigator:{},window:fakeWindow,
-  localStorage:{getItem(){return'en';},setItem(){}},
+  localStorage:{getItem(k){return store.has(k)?store.get(k):null;},setItem(k,v){store.set(k,String(v));}},
   requestAnimationFrame(){return 0;},cancelAnimationFrame(){},
   setTimeout(fn,delay=0){const id=nextTimer++;timers.set(id,{fn,delay});return id;},
   clearTimeout(id){timers.delete(id);},setInterval(){return 0;},
   fetch(){return Promise.reject(new Error('network disabled in test'));},
-  location:{href:'',reload(){}},performance:{now(){return 0;}},
+  location:{href:'',hash:'',reload(){}},performance:{now(){return 0;}},
   matchMedia:fakeWindow.matchMedia
 };
 context.globalThis=context;
 vm.createContext(context);
-vm.runInContext(
-  fs.readFileSync('app/app.js','utf8')+
-  fs.readFileSync('app/clients.js','utf8')+
-  '\nglobalThis.__monthlyTest={trafficTotals,peersByExit,clientExit,monthSummaryHTML,renderUsage};'+
-  '\nglobalThis.__policyTest={monthExitHTML,renderExitPolicy,exitPolicyRowHTML,exitSwitchConfirmHTML,policyRequestBody,bulkTargetBlock,saveExitPolicy,doExitAll,openModal,closeModal,openExitRouting,confirmExitAll,policyReason,focusables};'+
-  '\nglobalThis.__setLanguageForTest=function(value){LANG=value;};',
-  context,{filename:'app/app.js'}
-);
-const monthly=context.__monthlyTest;
-const policyHelpers=context.__policyTest;
-function activePolicy(){
-  return {auto_switch:true,exits:{
-    nl:{used:1,quota:500*1024**3,clients:14,healthy:true,checked_age:1,exhausted:false},
-    us:{used:2,quota:750*1024**3,clients:0,healthy:true,checked_age:1,exhausted:false}
-  },blocked:null,last_switch:null,warning:null};
+for(const file of ['app/icons.js','app/core.js','app/dashboard.js'])
+  vm.runInContext(fs.readFileSync(file,'utf8'),context,{filename:file});
+const WG=context.WG;
+runTimers(0);                                   // DOMContentLoaded equivalent: start() + first poll
+const flush=async(n=8)=>{for(let i=0;i<n;i++)await Promise.resolve();};
+const GiB=1024**3;
+function exits(over){
+  const base={nl:{ok:true,health:'up',health_since:1,checked_age:20,fails:0,affected_clients:0},
+              us:{ok:true,health:'up',health_since:1,checked_age:18,fails:0,affected_clients:0}};
+  return Object.assign(base,over||{});
 }
+function snapshot(over){
+  const now=1790000000;
+  const peers=[
+    {name:'kirill-iphone',ip:'10.10.0.2',pubkey:'pk-a',enabled:true,online:true,age:12,endpoint:'198.51.100.10:51820',rx:1,tx:1,mrx:33*GiB,mtx:0,expires:0,exit:'nl',spark:[1,2,525000]},
+    {name:'ipad',ip:'10.10.0.5',pubkey:'pk-b',enabled:true,online:false,age:3*86400,endpoint:'',rx:0,tx:0,mrx:11*GiB,mtx:0,expires:0,exit:'nl',spark:[]},
+    {name:'guest-1',ip:'10.10.0.14',pubkey:'pk-c',enabled:false,online:false,age:-1,endpoint:'',rx:0,tx:0,mrx:0,mtx:0,expires:0,exit:'us',spark:[]}
+  ];
+  return Object.assign({now,snapshot_age:0,stale:false,rud:true,peers,
+    host:{cpu:8,mem_used:0.6*GiB,mem_total:1.9*GiB,uptime:5*3600},
+    thr:{series:[{t:now-5,down:100,up:10},{t:now,down:4500000,up:200000}],cur:{down:4500000,up:200000}},
+    tunnel:{state:'up',affected_clients:0,exits:exits()},
+    exit_policy:{auto_switch:true,health_failover:true,blocked:null,health_blocked:null,warning:null,last_switch:null,
+      exits:{nl:{used:96*GiB,quota:1000*GiB,clients:2,healthy:true,checked_age:20,exhausted:false},
+             us:{used:371*GiB,quota:500*GiB,clients:1,healthy:true,checked_age:18,exhausted:false}}}},over||{});
+}
+async function feed(snap){
+  timers.clear();
+  context.fetch=()=>Promise.resolve(response(snap));
+  await WG._poll.tick();
+  await flush();
+}
+function bannerText(){return visibleText(element('banner').innerHTML);}
+function rowsHTML(body){return body.children.map(r=>r.children.map(c=>c.innerHTML).join('')).join('');}
 """
 
 
-class TestFrontendMonthlyTraffic(unittest.TestCase):
-    def run_node(self, body):
-        script = textwrap.dedent(NODE_SETUP + "\n" + body)
-        result = subprocess.run(
-            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=10
-        )
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+def run_node(test, body, lang="en", timeout=20):
+    script = textwrap.dedent(NODE_SETUP + "\n" + body)
+    env = dict(os.environ, WGUI_TEST_LANG=lang)
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=timeout, env=env)
+    test.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+    test.assertIn("__OK__", result.stdout, "the test body did not run to the end:\n" + result.stderr)
 
-    def test_header_has_accessible_exit_policy_controls(self):
+
+class TestFrontendShell(unittest.TestCase):
+    def test_shell_has_accessible_navigation_and_live_regions(self):
         html = (ROOT / "app" / "index.html").read_text()
-        self.assertIn('<header class="topnav">', html)
-        self.assertIn('<section class="status-strip">', html)
-        self.assertIn('id="monthuse"', html)
-        self.assertIn('button class="pill monthpill" id="monthuse-nl"', html)
-        self.assertIn('button class="pill monthpill" id="monthuse-us"', html)
-        self.assertIn('data-act="exit-policy"', html)
-        self.assertIn('aria-label="NL exit routing settings"', html)
-        self.assertIn('aria-label="US exit routing settings"', html)
-        self.assertIn('id="policyalert" style="display:none" role="alert"', html)
+        self.assertIn('<header class="top" id="top">', html)
+        self.assertIn('<nav class="nav" id="nav" aria-label="Sections">', html)
+        self.assertIn('<nav class="tabbar" id="tabbar" aria-label="Sections">', html)
+        self.assertIn('aria-haspopup="menu"', html)
+        self.assertIn('id="ops" role="status" aria-live="polite"', html)
+        self.assertIn('class="banners" id="banner"', html)
+        self.assertIn('<main class="main" id="main" tabindex="-1">', html)
+        self.assertIn('class="skip" href="#main"', html)
+        self.assertNotRegex(html, r"\son[a-z]+=")           # CSP: no inline handlers
+        self.assertNotIn("<script>", html)                 # CSP: no inline scripts
+        scripts = [u.replace("?v=__V__", "") for u in re.findall(r'<script src="([^"]+)"', html)]
+        self.assertEqual(scripts[0], "/boot.js")
+        self.assertEqual(scripts[1:], ["/icons.js", "/core.js", "/dashboard.js", "/modals.js", "/pages.js"])
 
-    def test_policy_alert_css_uses_explicit_aa_text_without_nested_opacity(self):
+    def test_design_system_css_tokens_themes_and_motion(self):
         css = (ROOT / "app" / "app.css").read_text()
-        self.assertRegex(css, r"\.policyalert\{[^}]*color:var\(--txt\)")
-        self.assertRegex(css, r"\.policyalert span\{[^}]*opacity:1")
-        self.assertNotRegex(css, r"\.policyalert(?:-detail|>span)[^{]*\{[^}]*opacity:\s*\.(?:[0-9]+)")
+        for token in ("--color-bg:#FFFFFF", "--color-ink:#15140F", "--color-amber:#FFB020",
+                      "--color-amber-text:#A35F00", "--color-ok-text:#157A40", "--color-danger:#C2321B",
+                      "--color-stale:#4A463A", "--radius-sheet:12px", "--spacing-touch:44px"):
+            self.assertIn(token, css)
+        self.assertIn(':root[data-theme="dark"]{', css)
+        self.assertIn('@media (prefers-color-scheme: dark){\n :root[data-theme="auto"]{', css)
         self.assertIn("@media (prefers-reduced-motion:reduce)", css)
-        self.assertIn("@media(max-width:560px)", css)
+        self.assertIn("@media (max-width:600px)", css)
+        self.assertNotRegex(css, r"font:\s*[0-9]{3}\s+[0-9.]+px\s+inherit")   # 'font: 600 13px inherit' is invalid CSS
 
     def test_service_worker_cache_is_bumped(self):
-        self.assertIn("wgui-shell-v27", (ROOT / "app" / "sw.js").read_text())
-        self.assertIn("cacheablePath", (ROOT / "app" / "sw.js").read_text())
+        sw = (ROOT / "app" / "sw.js").read_text()
+        self.assertIn("wgui-shell-v29", sw)
+        self.assertIn("cacheablePath", sw)
+        for asset in ("/core.js", "/dashboard.js", "/icons.js", "/app.css"):
+            self.assertIn("'%s?v='+V" % asset, sw)       # versioned URL, see asset_version() in wg-ui.py
+        self.assertIn("SHELL.indexOf(p+u.search)", sw)
+        for gone in ("/app.js", "/clients.js", "/cascade.js", "/inter.woff2"):
+            self.assertNotIn("'%s'" % gone, sw)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_monthly_helpers_still_render_usage_history(self):
-        self.run_node(
-            r"""
-            const totals=monthly.trafficTotals([{mrx:1024,mtx:2048},{mrx:512,mtx:0},{mrx:null,mtx:256}],'mrx','mtx');
-            if(totals.rx!==1536||totals.tx!==2304)throw new Error('unexpected totals '+JSON.stringify(totals));
-            const peers=[{exit:'nl'},{exit:'us'},{exit:null}];
-            if(monthly.peersByExit(peers,'nl').length!==2||monthly.peersByExit(peers,'us').length!==1)throw new Error('unexpected exit partition');
-            element('ubody');monthly.renderUsage({daily:[],clients:[]});
-            const html=element('ubody').innerHTML;
-            if(!html.includes('Month')||!html.includes('0.0 B'))throw new Error('empty usage modal missing totals: '+html);
-            """
-        )
+    def test_core_header_documents_the_stage_contract(self):
+        src = (ROOT / "app" / "core.js").read_text()
+        head = src[:src.index("(function(){")]
+        for name in ("WG.tr(", "WG.plural(", "WG.fmtBytes(", "WG.fmtMbit(", "WG.fmtAgo(", "WG.fmtDate(", "WG.esc(",
+                     "WG.icon(", "WG.state", "WG.on('status'", "WG.api(", "WG.admin(", "WG.ops.run(",
+                     "WG.modal.open(", "WG.modal.close()", "WG.confirm(", "WG.menu.open(", "WG.router.register(",
+                     "WG.banner.set(", "WG.actions"):
+            self.assertIn(name, head)
+        for action in ("addClient()", "showConfig(pubkey", "editClient(pubkey)", "toggleEnabled(pubkey)",
+                       "deleteClient(pubkey)", "switchExit(pubkey, exit)", "exitsSettings()", "revertSwitch(eventId)",
+                       "splitSettings()", "backup()", "logoutAll()"):
+            self.assertIn(action, head)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_server_policy_renders_thresholds_progress_and_guarded_actions(self):
-        self.run_node(
-            r"""
-            const policy=activePolicy();
-            policy.exits.nl.used=495*1024**3;
-            policy.exits.us.healthy=false;
-            policy.blocked={code:'target_unhealthy',source:'nl',target:'us'};
-            policyHelpers.renderExitPolicy(policy);
-            if(!element('monthuse-nl').innerHTML.includes('495.0 GiB')||!element('monthuse-nl').classList.contains('warn'))throw new Error('NL warning missing');
-            if(element('monthuse-nl').classList.contains('critical'))throw new Error('warning cannot be critical');
-            if(!element('policyalert').classList.contains('show'))throw new Error('blocked banner missing');
-            if(policyHelpers.bulkTargetBlock(policy,'us')!=='target_unhealthy')throw new Error('unhealthy target allowed');
-            const requestBody=policyHelpers.policyRequestBody(true,'500','750');
-            if(JSON.stringify(requestBody)!==JSON.stringify({op:'setexitpolicy',auto_switch:true,quotas_gib:{nl:500,us:750}}))throw new Error('bad payload');
-            const failBody=policyHelpers.policyRequestBody(true,'500','750',false);
-            if(failBody.health_failover!==false)throw new Error('failover flag not sent');
-            for(const code of ['both_unhealthy','failover_cooldown']){
-              if(/^[_a-z]+$/.test(policyHelpers.policyReason(code)))throw new Error('raw failover code: '+code);
+
+@unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
+class TestFrontendDashboard(unittest.TestCase):
+    def test_monthly_quota_gauges_follow_thresholds(self):
+        run_node(self, r"""
+        (async()=>{
+          await feed(snapshot());
+          const g=element('view').querySelector('.gauges').innerHTML;
+          const us=g.slice(g.indexOf('data-exit="us"'));
+          if(!/g-num is-warn">371</.test(us))throw new Error('74% must be amber: '+us.slice(0,300));
+          const nl=g.slice(g.indexOf('data-exit="nl"'),g.indexOf('data-exit="us"'));
+          if(!/g-num ">96</.test(nl)||nl.includes('is-warn">'))throw new Error('10% must stay ink');
+          const bar=us.slice(us.indexOf('<span class="bar"'));
+          if((bar.slice(0,bar.indexOf('</span>')).match(/class="is-warn/g)||[]).length!==15)throw new Error('74% fills 15 of 20 segments');
+          const s=snapshot();s.exit_policy.exits.us.used=500*GiB;s.exit_policy.exits.us.exhausted=true;
+          await feed(s);
+          const full=element('view').querySelector('.gauges').innerHTML;
+          if(!/g-num is-bad">500</.test(full))throw new Error('used-up quota must be red');
+          if(!visibleText(full).includes('NL 2 · US 1'))throw new Error('cascade summary missing: '+visibleText(full));
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_stale_snapshot_is_grey_and_never_green_or_red(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot({stale:true,snapshot_age:372});
+          s.tunnel.state='unknown';
+          await feed(s);
+          const view=element('view');
+          const gauges=view.querySelector('.gauges').innerHTML,rows=rowsHTML(view.querySelector('.ct-body'));
+          if(!visibleText(gauges).includes('Unknown'))throw new Error('stale must read Unknown');
+          for(const bad of ['is-ok','is-bad','is-on"','dot is-warn'])
+            if(gauges.includes(bad)||rows.includes(bad))throw new Error('stale data painted '+bad);
+          if(!rows.includes('dot is-u'))throw new Error('was-online client must be grey');
+          if(!/at \d\d:\d\d/.test(visibleText(rows)))throw new Error('handshake must read as a clock time: '+visibleText(rows));
+          if(!bannerText().includes('Data is stale')||!bannerText().includes('6 min'))throw new Error('stale plaque missing: '+bannerText());
+          if(!element('age').innerHTML.includes('ago'))throw new Error('top bar must show the data age');
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_outage_marks_clients_entry_ok_no_exit_and_wins_priority(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot();
+          s.tunnel={state:'down',affected_clients:2,exits:exits({
+            nl:{ok:false,health:'down',health_since:s.now-480,checked_age:20,fails:9,affected_clients:2},
+            us:{ok:false,health:'down',health_since:s.now-480,checked_age:20,fails:9,affected_clients:0}})};
+          s.exit_policy.exits.us.used=480*GiB;
+          s.exit_policy.last_switch={ts:s.now-600,source:'us',target:'nl',reason:'health',changed:true,event_id:7,members_count:1,revert_of:null};
+          await feed(s);
+          const view=element('view');
+          if(!visibleText(view.querySelector('.gauges').innerHTML).includes('Outage'))throw new Error('cascade must read Outage');
+          const row=rowsHTML({children:[view.querySelector('.ct-body').children[0]]});
+          if(!visibleText(row).includes('entry ok · no exit')||!row.includes('dot is-warn')||!row.includes('NL ×'))throw new Error('outage row wrong: '+visibleText(row));
+          const html=element('banner').innerHTML;
+          if(!/bn bn-crash/.test(html.slice(0,60)))throw new Error('outage plaque must be first: '+html.slice(0,120));
+          if(!bannerText().includes('and 2 more'))throw new Error('failover and quota plaques must fold: '+bannerText());
+          if(!bannerText().includes('Affected: 2 enabled, 1 of them connected'))throw new Error('affected counts missing: '+bannerText());
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_failover_plaque_offers_revert_only_when_the_source_is_healthy(self):
+        run_node(self, r"""
+        (async()=>{
+          const calls=[];WG.actions.revertSwitch=id=>calls.push(id);
+          const s=snapshot();
+          s.exit_policy.last_switch={ts:s.now-1700,source:'us',target:'nl',reason:'health',changed:true,event_id:42,members_count:5,revert_of:null};
+          await feed(s);
+          if(!bannerText().includes('Move 5 back to US'))throw new Error('revert action missing: '+bannerText());
+          element('banner').querySelector('[data-act="banner-act"]').click();
+          if(calls.join()!=='42')throw new Error('revert must pass the event id: '+calls);
+          const down=snapshot();down.exit_policy.last_switch=s.exit_policy.last_switch;
+          down.tunnel.exits.us={ok:false,health:'down',health_since:down.now-60,checked_age:20,fails:4,affected_clients:0};
+          await feed(down);
+          if(bannerText().includes('Move 5 back')||!bannerText().includes('US does not answer')||!bannerText().includes('NL is available'))throw new Error('no revert onto a down exit: '+bannerText());
+          const reverted=snapshot();reverted.exit_policy.last_switch=Object.assign({},s.exit_policy.last_switch,{event_id:43,revert_of:42});
+          await feed(reverted);
+          if(bannerText())throw new Error('a revert is not a failover: '+bannerText());
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_single_exit_failure_keeps_the_healthy_exit_available(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const failed of ['nl','us']){
+            const healthy=failed==='nl'?'us':'nl',s=snapshot();
+            s.peers.forEach(p=>{p.exit=failed});
+            s.exit_policy.exits[failed].clients=3;s.exit_policy.exits[healthy].clients=0;
+            s.tunnel.state='down';s.tunnel.affected_clients=2;
+            s.tunnel.exits[failed]={ok:false,health:'down',health_since:s.now-300,checked_age:2,fails:3,affected_clients:2};
+            await feed(s);
+            const gauges=visibleText(element('view').querySelector('.gauges').innerHTML),banner=bannerText();
+            for(const text of [gauges,banner]){
+              if(/both exits|Outage/.test(text))throw new Error('a single exit failure became a total outage: '+text);
+              if(!text.includes(failed.toUpperCase())||!text.includes(healthy.toUpperCase()+' is available'))throw new Error('healthy alternative is missing: '+text);
             }
-            const row=policyHelpers.exitPolicyRowHTML('us',policy.exits.us),rowText=visibleText(row);
-            if(!row.includes('disabled')||!row.includes('role="progressbar"'))throw new Error('blocked target row missing');
-            if(rowText.includes('target_unhealthy'))throw new Error('raw reason visible: '+rowText);
-            const confirm=policyHelpers.exitSwitchConfirmHTML('us',14);
-            if(!confirm.includes('14')||!confirm.includes('including disabled')||!confirm.includes('briefly reconnect'))throw new Error('confirmation copy missing');
-            policy.exits.nl.used=policy.exits.nl.quota;
-            policyHelpers.renderExitPolicy(policy);
-            if(!element('monthuse-nl').classList.contains('critical')||element('monthuse-nl').classList.contains('warn'))throw new Error('critical state missing');
-            const noChange=activePolicy();noChange.exits.nl.clients=0;noChange.exits.us.clients=14;
-            policyHelpers.renderExitPolicy(noChange);
-            const noChangeText=visibleText(policyHelpers.exitPolicyRowHTML('us',noChange.exits.us));
-            if(noChangeText.includes('no_clients_to_switch')||!noChangeText.includes('already'))throw new Error('no-op copy invalid: '+noChangeText);
-            """
-        )
+          }
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_policy_reason_copy_is_localized_and_never_exposes_server_codes(self):
-        self.run_node(
-            r"""
-            const codes=['invalid_target','target_unhealthy','target_stale','target_exhausted','both_exhausted','counter_unavailable','helper_failed','missing_policy','invalid_policy','no_clients_to_switch'];
-            for(const code of codes){
-              const message=policyHelpers.policyReason(code);
-              if(message.includes(code)||/^[_a-z]+$/.test(message))throw new Error('raw English policy code: '+code+' => '+message);
-            }
-            const counter=policyHelpers.policyReason('counter_unavailable');
-            if(!/current.*target.*counter/i.test(counter))throw new Error('counter copy is not actionable: '+counter);
-            const unknown=policyHelpers.policyReason('future_server_identifier');
-            if(unknown.includes('future_server_identifier')||!unknown.includes('blocked'))throw new Error('unknown code fallback leaked: '+unknown);
-            policyHelpers.renderExitPolicy({...activePolicy(),blocked:{code:'future_server_identifier'}});
-            if(visibleText(element('policyalert').innerHTML).includes('future_server_identifier'))throw new Error('alert leaked unknown code');
-            context.__setLanguageForTest('ru');
-            for(const code of codes){
-              const message=policyHelpers.policyReason(code);
-              if(message.includes(code)||/^[_a-z]+$/.test(message))throw new Error('raw Russian policy code: '+code+' => '+message);
-            }
-            if(!/сч[её]тчик|данн/i.test(policyHelpers.policyReason('counter_unavailable')))throw new Error('Russian counter copy missing');
-            if(policyHelpers.policyReason('future_server_identifier').includes('future_server_identifier'))throw new Error('Russian fallback leaked code');
-            """
-        )
+    def test_two_failed_exit_checks_are_an_outage_even_with_live_tunnels(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot();s.tunnel.state='degraded';
+          for(const key of ['nl','us'])s.tunnel.exits[key]={ok:false,health:'down',wg_up:true,health_since:s.now-300,checked_age:2,fails:3,affected_clients:key==='nl'?2:0};
+          await feed(s);
+          if(WG.dashboard.mode(WG.state)!=='crash'||!bannerText().includes('Both exits are down'))throw new Error('both failed probes must mean outage: '+bannerText());
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_policy_alert_only_mutates_when_signature_changes_or_clears(self):
-        self.run_node(
-            r"""
-            const alert=element('policyalert'),base=activePolicy();
-            const blocked={...base,blocked:{code:'target_stale'}};
-            const before=alert.innerHTMLWrites;
-            policyHelpers.renderExitPolicy(blocked);
-            const shown=alert.innerHTMLWrites;
-            policyHelpers.renderExitPolicy(blocked);
-            if(alert.innerHTMLWrites!==shown||shown!==before+1)throw new Error('unchanged alert retriggered');
-            policyHelpers.renderExitPolicy({...base,blocked:{code:'counter_unavailable'}});
-            if(alert.innerHTMLWrites!==shown+1)throw new Error('changed alert was not announced');
-            const changed=alert.innerHTMLWrites;
-            policyHelpers.renderExitPolicy(base);
-            if(alert.innerHTMLWrites!==changed+1||alert.style.display!=='none')throw new Error('clear mutation missing');
-            policyHelpers.renderExitPolicy(base);
-            if(alert.innerHTMLWrites!==changed+1)throw new Error('unchanged clear retriggered');
-            policyHelpers.renderExitPolicy(undefined);
-            const unavailable=alert.innerHTMLWrites;
-            policyHelpers.renderExitPolicy({});
-            if(alert.innerHTMLWrites!==unavailable)throw new Error('unchanged unavailable alert retriggered');
-            """
-        )
+    def test_pending_and_unknown_exit_checks_never_claim_success(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const health of ['warn','unknown']){
+            const s=snapshot();s.tunnel.state='up';s.exit_policy.exits.us.clients=0;
+            s.tunnel.exits.us={ok:false,health:health==='warn'?'up':'unknown',checked_age:health==='warn'?1:-1,fails:health==='warn'?1:0,affected_clients:0};
+            await feed(s);
+            const gauges=element('view').querySelector('.gauges').innerHTML,scheme=visibleText(element('view').querySelector('.scheme').innerHTML);
+            if(gauges.includes('g-state is-ok'))throw new Error('unverified checks claim Working');
+            if(/US[^·]*·[^·]*· ok/.test(scheme))throw new Error('unverified scheme branch claims ok: '+scheme);
+            if(!bannerText().includes(health==='warn'?'check 1/3':'status unknown'))throw new Error('check state absent from plaque: '+bannerText());
+          }
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_policy_baseline_malformed_status_and_integer_validation_are_safe(self):
-        self.run_node(
-            r"""
-            const base=activePolicy();base.last_switch={ts:100,reason:'quota',target:'us'};
-            policyHelpers.renderExitPolicy(base);
-            if(element('toast').textContent||visibleText(element('toast').innerHTML))throw new Error('initial last_switch must be silent');
-            policyHelpers.renderExitPolicy({...base,last_switch:{ts:101,reason:'quota',target:'nl'}});
-            if(!(element('toast').textContent+visibleText(element('toast').innerHTML)).includes('NL'))throw new Error('new quota switch should toast');
-            policyHelpers.renderExitPolicy(undefined);policyHelpers.renderExitPolicy({});policyHelpers.renderExitPolicy({exits:{nl:null}});
-            const malicious={...base,blocked:{code:'<img src=x onerror=alert(1)>'},last_switch:null};
-            policyHelpers.renderExitPolicy(malicious);
-            if(element('policyalert').innerHTML.includes('<img')||visibleText(element('policyalert').innerHTML).includes('onerror'))throw new Error('blocked content was not sanitized');
-            if(policyHelpers.policyRequestBody(true,'','750')!==null)throw new Error('empty quota accepted');
-            if(policyHelpers.policyRequestBody(true,'500.5','750')!==null)throw new Error('fractional quota accepted');
-            if(policyHelpers.policyRequestBody(true,'1000001','750')!==null)throw new Error('oversized quota accepted');
-            if(policyHelpers.policyRequestBody(true,'500','750').quotas_gib.nl!==500)throw new Error('integer quota rejected');
-            """
-        )
+    def test_unknown_snapshot_disables_every_client_action(self):
+        run_node(self, r"""
+        (async()=>{
+          for(const state of [{loaded:false},{stale:true},{offline:true}]){
+            const s=Object.assign(snapshot(),{loaded:true},state),p=s.peers[0];p.expires=s.now+3600;
+            WG.state=s;
+            const row=new FakeElement();row.innerHTML=WG.dashboard.rowHTML(s,WG.dashboard.mode(s),p);
+            if(row.querySelectorAll('[data-live]').some(b=>!b.disabled))throw new Error('unknown row contains an active server action');
+            if(WG.dashboard.clientMenu(p).some(it=>it.act&&!it.disabled))throw new Error('unknown client menu contains an active action');
+          }
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_real_delegation_keyboard_focus_trap_and_focus_return(self):
-        self.run_node(
-            r"""
-            policyHelpers.renderExitPolicy(activePolicy());
-            const trigger=element('monthuse-nl');trigger.focus();
-            const nested=trigger.querySelector('.msum');
-            if(!nested||nested.closest('[data-act]')!==trigger)throw new Error('realistic closest tree missing');
-            nested.dispatchEvent(makeEvent('click',nested));
-            if(!element('mbg').classList.contains('show')||!element('modal').innerHTML.includes('Exit routing'))throw new Error('nested delegated action did not open modal');
-            runTimers(30);
-            if(document.activeElement.id!=='xpq-nl')throw new Error('initial modal focus missing: '+(document.activeElement&&document.activeElement.id));
-            const focusable=policyHelpers.focusables(element('modal'));
-            const first=focusable[0],last=focusable[focusable.length-1];
-            last.focus();const tab=makeEvent('keydown',last,{key:'Tab',shiftKey:false});document.dispatchEvent(tab);
-            if(!tab.defaultPrevented||document.activeElement!==first)throw new Error('forward Tab trap failed');
-            first.focus();const shiftTab=makeEvent('keydown',first,{key:'Tab',shiftKey:true});document.dispatchEvent(shiftTab);
-            if(!shiftTab.defaultPrevented||document.activeElement!==last)throw new Error('reverse Tab trap failed');
-            const escape=makeEvent('keydown',last,{key:'Escape'});document.dispatchEvent(escape);
-            if(element('mbg').classList.contains('show')||document.activeElement!==trigger)throw new Error('Escape close/focus return failed');
-            nested.dispatchEvent(makeEvent('click',nested));
-            const close=element('modal').querySelector('[data-act="close"]'),closeChild=new FakeElement('span');close.appendChild(closeChild);
-            closeChild.dispatchEvent(makeEvent('click',closeChild));
-            if(element('mbg').classList.contains('show'))throw new Error('nested close action delegation failed');
-            """
-        )
+    def test_plaques_rerender_only_when_their_content_changes_and_escape_text(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot();s.exit_policy.exits.us.used=470*GiB;
+          await feed(s);
+          const box=element('banner'),before=box.innerHTMLWrites;
+          await feed(s);await feed(s);
+          if(box.innerHTMLWrites!==before)throw new Error('unchanged plaque re-rendered');
+          if(!bannerText().includes('US used 94% of its monthly quota'))throw new Error('quota plaque: '+bannerText());
+          const evil=snapshot();evil.exit_policy.blocked={code:'<img src=x onerror=alert(1)>'};
+          await feed(evil);
+          if(box.innerHTML.includes('<img')||bannerText().includes('onerror'))throw new Error('server code leaked into HTML');
+          if(!bannerText().includes('Exit switching is blocked.'))throw new Error('unknown code needs the generic text: '+bannerText());
+          await feed(snapshot());
+          if(bannerText()||!box.hidden)throw new Error('plaques must clear');
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_policy_mutations_prevent_duplicates_and_restore_live_controls(self):
-        self.run_node(
-            r"""
-            (async()=>{
-              policyHelpers.renderExitPolicy(activePolicy());
-              policyHelpers.openExitRouting();
-              let resolveSave;const calls=[];
-              context.fetch=(url,options)=>{calls.push(JSON.parse(options.body));return new Promise(resolve=>{resolveSave=resolve;});};
-              const first=policyHelpers.saveExitPolicy(),duplicate=policyHelpers.saveExitPolicy();
-              const saveButton=element('xpsave');
-              if(calls.length!==1||!saveButton.disabled||!saveButton.textContent.includes('Saving'))throw new Error('save duplicate/loading guard missing');
-              resolveSave(response({ok:false,error:'recoverable'},400));await Promise.all([first,duplicate]);
-              if(saveButton.disabled||!element('xperr').textContent.includes('blocked'))throw new Error('save control did not recover safely');
-              policyHelpers.confirmExitAll('us');
-              let resolveBulk;
-              context.fetch=(url,options)=>{calls.push(JSON.parse(options.body));return new Promise(resolve=>{resolveBulk=resolve;});};
-              const bulk=policyHelpers.doExitAll('us'),bulkDuplicate=policyHelpers.doExitAll('us');
-              const bulkButton=element('xpswitch');
-              if(calls.length!==2||!bulkButton.disabled||!bulkButton.textContent.includes('Switching'))throw new Error('bulk duplicate/loading guard missing');
-              if(JSON.stringify(calls[1])!==JSON.stringify({op:'setexitall',exit:'us'})||'force' in calls[1])throw new Error('bad bulk payload');
-              resolveBulk(response({ok:false,code:'target_stale'},400));await Promise.all([bulk,bulkDuplicate]);
-              if(bulkButton.disabled||!element('xperr').textContent.includes('stale')||element('xperr').textContent.includes('target_stale'))throw new Error('bulk control did not recover safely');
-            })().catch(error=>{console.error(error);process.exitCode=1;});
-            """
-        )
+    def test_reason_and_target_texts_never_expose_server_codes(self):
+        body = r"""
+        const codes=['invalid_target','target_unhealthy','target_stale','target_exhausted','both_exhausted','both_unhealthy',
+          'failover_cooldown','counter_unavailable','helper_failed','missing_policy','invalid_policy','no_clients_to_switch'];
+        for(const code of codes){
+          const m=WG.reasonText(code);
+          if(!m||m.includes(code)||/^[_a-z]+$/.test(m))throw new Error('raw code: '+code+' => '+m);
+        }
+        for(const code of ['target_unhealthy','target_exhausted','target_stale','target_unverified'])
+          if(!WG.targetText(code)||WG.targetText(code).includes(code))throw new Error('target text: '+code);
+        if(WG.reasonText('future_server_identifier').includes('future'))throw new Error('unknown code leaked');
+        if(WG.lang==='ru'&&!/[а-я]/.test(WG.reasonText('counter_unavailable')))throw new Error('Russian text missing');
+        console.log('__OK__');
+        """
+        run_node(self, body)
+        run_node(self, body, lang="ru")
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_save_and_bulk_ignore_closed_or_replaced_modal_on_success_and_failure(self):
-        self.run_node(
-            r"""
-            (async()=>{
-              policyHelpers.renderExitPolicy(activePolicy());
-              for(const kind of ['save','bulk'])for(const outcome of ['failure','success'])for(const transition of ['close','replace']){
-                policyHelpers.openExitRouting();
-                if(kind==='bulk')policyHelpers.confirmExitAll('us');
-                const button=element(kind==='save'?'xpsave':'xpswitch'),error=element('xperr');
-                let resolveAdmin,adminCalls=0;
-                context.fetch=(url,options)=>{
-                  if(url==='/api/admin'){adminCalls++;return new Promise(resolve=>{resolveAdmin=resolve;});}
-                  return Promise.reject(new Error('status offline'));
-                };
-                const pending=kind==='save'?policyHelpers.saveExitPolicy():policyHelpers.doExitAll('us');
-                if(adminCalls!==1||!button.disabled)throw new Error(kind+' request did not start');
-                let newer='';
-                if(transition==='close')policyHelpers.closeModal();
-                else{policyHelpers.openModal('<div class="mtitle">Newer modal</div><button id="newer">Keep open</button>');newer=element('modal').innerHTML;}
-                resolveAdmin(response(outcome==='success'?{ok:true}:{ok:false,code:'target_stale'},outcome==='success'?200:400));
-                await pending;
-                if(error.textContent)throw new Error(kind+' '+outcome+' wrote stale error after '+transition+': '+error.textContent);
-                if(!button.disabled)throw new Error(kind+' restored a non-live originating button');
-                if(transition==='replace'&&(!element('mbg').classList.contains('show')||element('modal').innerHTML!==newer))throw new Error(kind+' '+outcome+' closed/replaced newer modal');
-                if(transition==='close'&&element('mbg').classList.contains('show'))throw new Error(kind+' '+outcome+' reopened closed modal');
-              }
-            })().catch(error=>{console.error(error);process.exitCode=1;});
-            """
-        )
+    def test_russian_plurals_units_and_ages(self):
+        run_node(self, r"""
+        const c=n=>WG.count(n,'client');
+        if([c(1),c(2),c(5),c(11),c(21),c(22)].join('|')!=='1 клиент|2 клиента|5 клиентов|11 клиентов|21 клиент|22 клиента')
+          throw new Error('plural forms: '+[c(1),c(2),c(5),c(11),c(21),c(22)]);
+        if(WG.plural(3,{one:'{n} попытка',few:'{n} попытки',many:'{n} попыток'})!=='3 попытки')throw new Error('plural()');
+        if(WG.fmtBytes(33*1024**3)!=='33.0 ГиБ'||WG.fmtBytes(0)!=='0 Б')throw new Error('bytes: '+WG.fmtBytes(33*1024**3));
+        if(WG.fmtMbit(525000)!=='4.2 Мбит/с')throw new Error('Mbit/s is bytes/s × 8 / 1e6: '+WG.fmtMbit(525000));
+        if(WG.fmtAgo(12)!=='12 с назад'||WG.fmtAgo(360)!=='6 мин назад'||WG.fmtAgo(3*86400)!=='3 дня назад')throw new Error('ages: '+WG.fmtAgo(3*86400));
+        if(WG.fmtAgo(4,{suffix:false})!=='4 с')throw new Error('short age');
+        if(WG.fmtClock(150)!=='2:30')throw new Error('clock');
+        if(!/^\d{1,2} [а-я]{3}/.test(WG.fmtDate(Date.now()/1000)))throw new Error('date: '+WG.fmtDate(Date.now()/1000));
+        if(WG.tr('Clients')!=='Клиенты')throw new Error('catalog');
+        console.log('__OK__');
+        """, lang="ru")
 
-    @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
-    def test_success_unlocks_before_hanging_background_refresh(self):
-        self.run_node(
-            r"""
-            (async()=>{
-              policyHelpers.renderExitPolicy(activePolicy());policyHelpers.openExitRouting();
-              let resolveAdmin,statusCalls=0;
-              context.fetch=(url,options)=>{
-                if(url==='/api/admin')return new Promise(resolve=>{resolveAdmin=resolve;});
-                statusCalls++;return new Promise(()=>{});
-              };
-              let settled=false;const first=policyHelpers.saveExitPolicy().then(()=>{settled=true;});
-              resolveAdmin(response({ok:true}));
-              for(let i=0;i<12;i++)await Promise.resolve();
-              if(!settled||statusCalls!==1)throw new Error('successful save stayed busy on hanging tick: settled='+settled+', statusCalls='+statusCalls);
-              policyHelpers.openExitRouting();let secondCalls=0;
-              context.fetch=(url,options)=>{if(url==='/api/admin'){secondCalls++;return Promise.resolve(response({ok:false,error:'failed'},400));}return Promise.reject(new Error('offline'));};
-              await policyHelpers.saveExitPolicy();
-              if(secondCalls!==1)throw new Error('global save busy state was not reset before refresh');
-              await first;
-            })().catch(error=>{console.error(error);process.exitCode=1;});
-            """
-        )
+    def test_client_menu_blocks_a_down_or_used_up_exit_with_a_reason(self):
+        run_node(self, r"""
+        (async()=>{
+          const s=snapshot();s.tunnel.exits.us={ok:false,health:'down',health_since:s.now-60,checked_age:20,fails:5,affected_clients:0};
+          await feed(s);
+          const items=WG.dashboard.clientMenu(WG.peer('pk-a'));
+          const move=items.find(i=>i.icon==='switch-exit');
+          if(!move.disabled||move.hint!=='US is down')throw new Error('down target must be blocked: '+JSON.stringify(move));
+          const q=snapshot();q.exit_policy.exits.us.exhausted=true;await feed(q);
+          const m2=WG.dashboard.clientMenu(WG.peer('pk-a')).find(i=>i.icon==='switch-exit');
+          if(!m2.disabled||!/quota/.test(m2.hint))throw new Error('used-up target must be blocked: '+m2.hint);
+          const ok=snapshot();await feed(ok);
+          const m3=WG.dashboard.clientMenu(WG.peer('pk-a')).find(i=>i.icon==='switch-exit');
+          if(m3.disabled||m3.hint!=='US ok · 74%'||m3.hintTone!=='warn')throw new Error('healthy target: '+JSON.stringify(m3));
+          const off=WG.dashboard.clientMenu(WG.peer('pk-c'));
+          if(!off.some(i=>i.label==='Turn on'))throw new Error('disabled client offers Turn on');
+          if(!items.some(i=>i.danger&&i.icon==='delete'))throw new Error('delete must be the danger item');
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_actions_go_through_hooks_and_offline_disables_live_buttons(self):
+        run_node(self, r"""
+        (async()=>{
+          const seen=[];
+          Object.assign(WG.actions,{showConfig:pk=>seen.push('qr:'+pk),toggleEnabled:pk=>seen.push('on:'+pk),addClient:()=>seen.push('add')});
+          await feed(snapshot());
+          const rows=element('view').querySelector('.ct-body').children;
+          rows[0].querySelector('[data-act="cl-qr"]').click();
+          rows[2].querySelector('[data-act="cl-enable"]').click();
+          element('addbtn').click();
+          if(seen.join()!=='qr:pk-a,on:pk-c,add')throw new Error('hooks: '+seen);
+          const qrBefore=rows[0].querySelector('[data-act="cl-qr"]'),later=snapshot();later.peers[0].age=19;
+          await feed(later);
+          if(element('view').querySelector('.ct-body').children[0].querySelector('[data-act="cl-qr"]')!==qrBefore||!qrBefore.isConnected)
+            throw new Error('a poll that only ages the handshake must keep the row buttons (keyboard focus)');
+          timers.clear();
+          context.fetch=()=>Promise.reject(new Error('offline'));
+          await WG._poll.tick();await flush();
+          if(!WG.state.offline||!element('addbtn').disabled)throw new Error('offline must disable live actions');
+          const qr=element('view').querySelector('.ct-body').children[0].querySelector('[data-act="cl-qr"]');
+          if(!qr.disabled)throw new Error('row actions must be off without a connection');
+          if(!bannerText().includes('No connection')||!bannerText().includes('Retry now'))throw new Error('offline plaque: '+bannerText());
+          if(element('banner').querySelector('[data-act="banner-act"]').disabled)throw new Error('«Retry now» must work offline');
+          const rowsText=visibleText(rowsHTML(element('view').querySelector('.ct-body')));
+          if(!rowsText.includes('kirill-iphone'))throw new Error('offline keeps the last data');
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_search_and_filters_narrow_the_rows(self):
+        run_node(self, r"""
+        (async()=>{
+          await feed(snapshot());
+          const body=element('view').querySelector('.ct-body'),names=()=>body.children.map(r=>r.getAttribute('data-pk')).join();
+          element('view').querySelector('.cl-filter').querySelector('[data-f="us"]').click();
+          if(names()!=='pk-c')throw new Error('US filter: '+names());
+          if(store.get('wgui-clients-filter')!=='us')throw new Error('filter must persist');
+          element('view').querySelector('.cl-filter').querySelector('[data-f="offline"]').click();
+          if(names()!=='pk-b,pk-c')throw new Error('offline filter: '+names());
+          element('view').querySelector('.cl-filter').querySelector('[data-f="all"]').click();
+          const input=element('view').querySelector('.search-in');
+          input.value='198.51.100.10';input.dispatchEvent(makeEvent('input',input));
+          if(names()!=='pk-a')throw new Error('search by endpoint IP: '+names());
+          input.value='zzz';input.dispatchEvent(makeEvent('input',input));
+          if(names()!==''||element('view').querySelector('.ct-empty').hidden)throw new Error('empty result needs a message');
+          console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
 
 
 if __name__ == "__main__":

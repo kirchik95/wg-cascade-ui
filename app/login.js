@@ -1,15 +1,22 @@
+/* Sign-in page (E1). No inline handlers (CSP). Theme and language come from boot.js. */
+function loginLang(){var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(e){L='ru'}return L==='en'?'en':'ru'}
 (function(){
- var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(e){L='ru'}
- document.documentElement.lang=L==='ru'?'ru':'en';
- var langBtn=document.getElementById('lang');
- if(langBtn)langBtn.textContent=L==='ru'?'EN':'RU';
- if(L==='ru'){
-  var R={"sign in to manage the cascade":"войдите для управления каскадом","Invalid username or password":"Неверный логин или пароль","Username":"Логин","Password":"Пароль","Sign in":"Войти","Show password":"Показать пароль","Hide password":"Скрыть пароль","Toggle theme":"Сменить тему","Language / Язык":"Язык / Language","Too many attempts — try again in a few minutes":"Слишком много попыток — подождите несколько минут"};
+ if(typeof document==='undefined')return;
+ var ru=loginLang()==='ru';
+ document.documentElement.lang=ru?'ru':'en';
+ if(ru){
+  var R={"Sign in to the panel":"Вход в панель","after 5 failed attempts sign-in is blocked for a while":"после 5 неудачных попыток вход временно блокируется",
+   "Username":"Логин","Password":"Пароль","Show":"Показать","Sign in":"Войти","Show password":"Показать пароль"};
   var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),ns=[],n;while(n=w.nextNode())ns.push(n);
   ns.forEach(function(t){var k=t.nodeValue.trim();if(k&&R[k])t.nodeValue=t.nodeValue.replace(k,R[k])});
-  document.querySelectorAll('[aria-label]').forEach(function(e){var k=e.getAttribute('aria-label');if(R[k])e.setAttribute('aria-label',R[k]);});
-  document.querySelectorAll('[data-tip]').forEach(function(e){var k=e.getAttribute('data-tip');if(R[k])e.setAttribute('data-tip',R[k]);});
+  document.querySelectorAll('[aria-label]').forEach(function(e){var k=e.getAttribute('aria-label');if(R[k])e.setAttribute('aria-label',R[k])});
+  document.title='Вход · WG Cascade';
  }
+ document.querySelectorAll('[data-act="lang"]').forEach(function(b){b.setAttribute('aria-pressed',String(b.getAttribute('data-l')===(ru?'ru':'en')))});
+ /* the status bar follows the theme boot.js applied (light by default) */
+ var t=document.documentElement.getAttribute('data-theme'),dark=t==='dark';
+ if(t==='auto'){try{dark=matchMedia('(prefers-color-scheme: dark)').matches}catch(e){}}
+ document.querySelectorAll('meta[name=theme-color]').forEach(function(m){m.content=dark?'#121210':'#FFFFFF'});
 })();
 function plural(n,one,few,many){var a=Math.abs(n)%100,b=a%10;
  if(a>10&&a<20)return many;if(b===1)return one;if(b>=2&&b<=4)return few;return many}
@@ -33,33 +40,39 @@ function loginMessage(search,ru){
  return '';
 }
 if(typeof module!=='undefined')module.exports={loginMessage:loginMessage,plural:plural};
-(function(){if(typeof document==='undefined')return;var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
+/* the error sits under the password field (E1); a wrong password marks the field */
+(function(){
+ if(typeof document==='undefined')return;
+ var e=document.getElementById('err'),pw=document.getElementById('pw'),ru=loginLang()==='ru';
  var m=loginMessage(location.search,ru);
- if(m){e.textContent=m;e.style.display='block';e.setAttribute('role','alert')}
+ if(!m||!e)return;
+ e.textContent=m;e.hidden=false;e.setAttribute('role','alert');
+ if(/[?&]e=1(&|$)/.test(location.search)&&pw){
+  pw.setAttribute('aria-invalid','true');
+  var u=document.getElementById('user');
+  if(u&&u.value)pw.focus();
+ }
 })();
 (function(){
+ if(typeof document==='undefined')return;
  var btn=document.getElementById('pwtoggle'),inp=document.getElementById('pw');
  if(!btn||!inp)return;
- var eye='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
- var eyeOff='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.9 17.9A10.9 10.9 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 5.2-5.7"/><path d="M9.9 4.2A10.3 10.3 0 0 1 12 4c7 0 11 7 11 7a18.7 18.7 0 0 1-2.7 3.5"/><path d="M14.1 14.1a3 3 0 1 1-4.2-4.2M1 1l22 22"/></svg>';
- var ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
+ var ru=loginLang()==='ru';
  btn.addEventListener('click',function(){
   var show=inp.type==='password';
   inp.type=show?'text':'password';
   btn.setAttribute('aria-pressed',show?'true':'false');
+  btn.textContent=show?(ru?'Скрыть':'Hide'):(ru?'Показать':'Show');
   btn.setAttribute('aria-label',show?(ru?'Скрыть пароль':'Hide password'):(ru?'Показать пароль':'Show password'));
-  btn.innerHTML=show?eyeOff:eye;
+  inp.focus();
  });
+ inp.addEventListener('input',function(){if(inp.getAttribute('aria-invalid')==='true')inp.removeAttribute('aria-invalid')});
 })();
-document.addEventListener('click',function(e){
- var t=e.target&&e.target.closest&&e.target.closest('[data-act]');
+if(typeof document!=='undefined')document.addEventListener('click',function(e){
+ var t=e.target&&e.target.closest&&e.target.closest('[data-act="lang"]');
  if(!t)return;
- var a=t.getAttribute('data-act');
- if(a==='theme'&&typeof toggleTheme==='function')toggleTheme();
- if(a==='lang'){
-  var L;try{L=localStorage.getItem('wgui-lang')||'ru'}catch(x){L='ru'}
-  L=L==='ru'?'en':'ru';
-  try{localStorage.setItem('wgui-lang',L)}catch(x){}
-  location.reload();
- }
+ var L=t.getAttribute('data-l')==='en'?'en':'ru';
+ if(L===loginLang())return;
+ try{localStorage.setItem('wgui-lang',L)}catch(x){}
+ location.reload();
 });

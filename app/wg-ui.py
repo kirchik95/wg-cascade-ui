@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, re, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
+import os, re, ssl, json, time, hmac, hashlib, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
 import http.client
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1053,9 +1053,10 @@ def throughput():
         dt = b[0] - a[0]
         if dt <= 0:
             continue
+        # Client point of view: what the entry sends to clients (peer tx) is their download.
         series.append({"t": b[0],
-                       "down": max(0, b[1] - a[1]) // dt,
-                       "up": max(0, b[2] - a[2]) // dt})
+                       "down": max(0, b[2] - a[2]) // dt,
+                       "up": max(0, b[1] - a[1]) // dt})
     cur = series[-1] if series else {"down": 0, "up": 0}
     return {"series": series[-60:], "cur": cur}
 
@@ -1736,6 +1737,34 @@ def asset(name):
         return f.read()
 
 
+# Shell CSS/JS are referenced as /x.css?v=__V__ from the HTML and sw.js. The version is a content
+# hash, so a deploy changes every URL and new HTML never meets a copy still fresh in the HTTP cache.
+SHELL_ASSETS = ("app.css", "modals.css", "pages.css", "icons.js", "core.js", "dashboard.js",
+                "modals.js", "pages.js", "boot.js", "login.js")
+_asset_v = None
+
+
+def asset_version():
+    global _asset_v
+    if _asset_v is None:
+        h = hashlib.sha256()
+        for name in SHELL_ASSETS:
+            try:
+                h.update(asset(name))
+            except OSError:
+                pass
+        _asset_v = h.hexdigest()[:12]
+    return _asset_v
+
+
+def shell_asset(name):
+    return asset(name).replace(b"__V__", asset_version().encode())
+
+
+# Self-hosted fonts (app/fonts, OFL): an explicit list, so no path ever reaches the disk.
+FONTS = frozenset("/fonts/%s-%s.woff2" % (family, subset)
+                  for family in ("jetbrains-mono", "inter-tight") for subset in ("latin", "cyrillic"))
+
 CSP = ("default-src 'self'; script-src 'self'; "
        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; "
        "connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; "
@@ -1813,7 +1842,8 @@ class H(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             # Skip noisy public assets + high-frequency status polls
             if path not in ("/api/status", "/healthz") and not path.startswith(
-                    ("/app.", "/icon", "/inter.", "/sw.js", "/manifest", "/cascade.", "/clients.")):
+                    ("/app.", "/core.", "/dashboard.", "/modals.", "/pages.", "/boot.", "/theme.",
+                     "/login.js", "/icon", "/fonts/", "/sw.js", "/manifest")):
                 ms = int((time.time() - t0) * 1000) if t0 else None
                 log_event("http", method=self.command, path=path, status=code,
                           ms=ms, ip=self.client_address[0])
@@ -1852,12 +1882,15 @@ class H(BaseHTTPRequestHandler):
             return self._json(200 if r["ready"] else 503, r)
         # PWA assets — public (no sensitive data), so the install/login page can load them
         _CT = {"/app.css": "text/css",
-               "/app.js": "application/javascript",
+               "/modals.css": "text/css",
+               "/pages.css": "text/css",
+               "/core.js": "application/javascript",
+               "/dashboard.js": "application/javascript",
+               "/icons.js": "application/javascript",
+               "/modals.js": "application/javascript",
+               "/pages.js": "application/javascript",
                "/boot.js": "application/javascript",
-               "/theme.js": "application/javascript",
                "/login.js": "application/javascript",
-               "/cascade.js": "application/javascript",
-               "/clients.js": "application/javascript",
                "/icon.svg": "image/svg+xml",
                "/manifest.webmanifest": "application/manifest+json"}
         if path in _CT:
@@ -1867,7 +1900,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, b"")
         if path == "/sw.js":
             try:
-                return self._send(200, asset("sw.js"), "application/javascript", {"Cache-Control": "no-cache"})
+                return self._send(200, shell_asset("sw.js"), "application/javascript", {"Cache-Control": "no-cache"})
             except Exception:
                 return self._send(404, b"")
         if path in ("/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"):
@@ -1877,14 +1910,14 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), "image/png", {"Cache-Control": "max-age=86400"})
             except Exception:
                 return self._send(404, b"")
-        if path == "/inter.woff2":
+        if path in FONTS:
             try:
-                with open("/opt/wg-ui/inter.woff2", "rb") as f:
-                    return self._send(200, f.read(), "font/woff2", {"Cache-Control": "max-age=604800"})
+                return self._send(200, asset("fonts/" + path[len("/fonts/"):]), "font/woff2",
+                                  {"Cache-Control": "max-age=604800"})
             except Exception:
                 return self._send(404, b"")
         if path == "/login":
-            return self._send(200, asset("login.html").replace(b"__CSRF__", b""), "text/html; charset=utf-8")
+            return self._send(200, shell_asset("login.html").replace(b"__CSRF__", b""), "text/html; charset=utf-8")
         if path == "/logout":
             dead = "wgui_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
             return self._send(303, b"", None, {"Location": "/login", "Set-Cookie": dead})
@@ -1945,7 +1978,7 @@ class H(BaseHTTPRequestHandler):
         if not user:
             return self._send(303, b"", None, {"Location": "/login"})
         if path == "/":
-            self._send(200, asset("index.html").replace(b"__CSRF__", csrf_for(user).encode()), "text/html; charset=utf-8")
+            self._send(200, shell_asset("index.html").replace(b"__CSRF__", csrf_for(user).encode()), "text/html; charset=utf-8")
         else:
             self._send(404, b"not found")
 

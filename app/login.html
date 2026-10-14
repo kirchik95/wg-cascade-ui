@@ -1,23 +1,21 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="csrf" content="__CSRF__"><link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#101010" media="(prefers-color-scheme: dark)"><meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="WG Cascade"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/svg+xml" href="/icon.svg"><title>Sign in · WG Cascade</title><script src="/boot.js"></script><link rel="stylesheet" href="/app.css"></head><body>
-<div class="login-tools">
-<button class="nav-text" id="lang" type="button" data-act="lang" data-tip="Language / Язык" aria-label="Language / Язык">RU</button>
-<button class="iconbtn" id="theme" data-act="theme" data-tip="Toggle theme" aria-label="Toggle theme" type="button"></button>
+<!doctype html><html lang="ru" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="csrf" content="__CSRF__"><link rel="preload" href="/fonts/jetbrains-mono-cyrillic.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/fonts/inter-tight-cyrillic.woff2" as="font" type="font/woff2" crossorigin><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#FFFFFF"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="apple-mobile-web-app-title" content="WG Cascade"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/svg+xml" href="/icon.svg"><title>Sign in · WG Cascade</title><script src="/boot.js?v=__V__"></script><link rel="stylesheet" href="/app.css?v=__V__"></head><body class="lg-body">
+<main class="lg">
+<form class="lg-form" method="post" action="/login">
+<div class="lg-brand"><span class="logo-sq" aria-hidden="true"></span><span class="lg-brand-t">WG/CASCADE</span></div>
+<h1 class="lg-title">Sign in to the panel</h1>
+<p class="lg-sub">after 5 failed attempts sign-in is blocked for a while</p>
+<div class="lg-fields">
+<div class="field"><label class="field-l" for="user">Username</label>
+<input class="input" id="user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" autofocus required></div>
+<div class="field"><label class="field-l" for="pw">Password</label>
+<span class="lg-pw"><input class="input" id="pw" name="password" type="password" autocomplete="current-password" required aria-describedby="err">
+<button type="button" class="lg-show" id="pwtoggle" aria-controls="pw" aria-pressed="false" aria-label="Show password">Show</button></span>
+<p class="lg-err" id="err" hidden></p></div>
 </div>
-<div class="loginwrap"><form class="logincard" method="post" action="/login">
-<div class="login-brand"><span class="brand-mark" aria-hidden="true">WG</span><span class="brand-name">WG Cascade</span></div>
-<h1 class="login-title">Sign in</h1>
-<p class="login-sub">sign in to manage the cascade</p>
-<div class="loginerr" id="err" aria-live="polite">Invalid username or password</div>
-<label>Username<input name="username" autocomplete="username" autofocus required></label>
-<label>Password
-<span class="pwwrap">
-<input name="password" id="pw" type="password" autocomplete="current-password" required>
-<button type="button" class="pwtoggle" id="pwtoggle" aria-label="Show password" aria-controls="pw" aria-pressed="false">
-<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
-</button>
-</span>
-</label>
-<button type="submit">Sign in</button>
-</form></div>
-<script src="/theme.js"></script>
-<script src="/login.js"></script></body></html>
+<div class="lg-foot">
+<button class="btn btn-primary lg-go" type="submit">Sign in</button>
+<div class="lg-lang" role="group" aria-label="Language / Язык"><button type="button" data-act="lang" data-l="ru" lang="ru">RU</button><span aria-hidden="true">/</span><button type="button" data-act="lang" data-l="en" lang="en">EN</button></div>
+</div>
+</form>
+</main>
+<script src="/login.js?v=__V__"></script></body></html>
