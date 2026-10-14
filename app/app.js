@@ -308,7 +308,7 @@ const RU={
  "Admin tools":"Админ-инструменты","Language / Язык":"Язык / Language",
  "Creates a peer via the secure helper (sudo).":"Создаёт peer через защищённый хелпер (sudo).",
  "This permanently revokes this client’s access to the cascade. The device will no longer be able to connect.":"Доступ клиента к каскаду будет отозван навсегда. Устройство больше не сможет подключиться.",
- "loading…":"загрузка…","failed to load":"не удалось загрузить","export failed":"экспорт не удался",
+ "Download backup":"Скачать резервную копию","The backup contains every private key of the cascade. Confirm your password to download it.":"В резервной копии все приватные ключи каскада. Подтвердите пароль, чтобы скачать её.","Password":"Пароль","Download":"Скачать","Enter your password":"Введите пароль","password required":"нужен пароль","wrong password":"неверный пароль","loading…":"загрузка…","failed to load":"не удалось загрузить","export failed":"экспорт не удался",
  "e.g. iphone, laptop":"напр. iphone, laptop",
  "VDSina entry node — the cascade performance ceiling (1 vCPU, double crypto)":"Входная нода VDSina — потолок производительности каскада (1 vCPU, двойное шифрование)",
  "Sampler error":"Ошибка сэмплера","live peer data may lag":"данные по пирам могут отставать",
@@ -815,10 +815,23 @@ async function showCfg(pub){const r=await admin({op:'getconf',pubkey:pub});if(!r
    fetch('/api/history'+q,{cache:'no-store'}).then(x=>x.json())]);
   r.conns=h.connections||[];r.daily=u.daily||[]}catch(e){}
  showResult(r)}
-async function doExport(){
+function openExport(){
  closeMenus();
- toast('Preparing backup…');const r=await admin({op:'export'});
- if(!r||!r.ok){toast(tr((r&&r.error)||'export failed'));return}
+ openModal(mTitle('dl',tr('Download backup'))
+  +'<p class="mtext">'+tr('The backup contains every private key of the cascade. Confirm your password to download it.')+'</p>'
+  +'<label class="fl">'+tr('Password')+'<input id="xpw" type="password" autocomplete="current-password"></label>'
+  +'<div class="merr" id="xpe" role="alert"></div>'
+  +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Cancel')+'</button><button class="primary" id="xpb" type="button" data-act="do-export">'+tr('Download')+'</button></div>');
+ setTimeout(()=>{const i=document.getElementById('xpw');if(!i)return;i.focus();i.onkeydown=e=>{if(e.key==="Enter")doExport()}},30);
+}
+async function doExport(){
+ const pw=document.getElementById('xpw'),err=document.getElementById('xpe'),btn=document.getElementById('xpb');
+ if(!pw||!pw.value){if(err)err.textContent=tr('Enter your password');return}
+ if(btn)btn.disabled=true;
+ const r=await admin({op:'export',password:pw.value});
+ if(btn)btn.disabled=false;
+ if(!r||!r.ok){const e=tr((r&&r.error)||'export failed');if(err)err.textContent=e;else toast(e);return}
+ closeModal();
  const bin=atob(r.archive),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([arr],{type:'application/gzip'}));
  a.download=r.name||'wg-cascade-backup.tar.gz';a.click();URL.revokeObjectURL(a.href);
@@ -1065,7 +1078,8 @@ function bindActions(){
   if(a==='split'){openSplitSettings();closeMenus();return;}
   if(a==='usage'){openUsage();closeMenus();return;}
   if(a==='audit'){openAudit();closeMenus();return;}
-  if(a==='export'){doExport();closeMenus();return;}
+  if(a==='export'){openExport();return;}
+  if(a==='do-export'){doExport();return;}
   if(a==='modal-bg'){if(e.target===t)closeModal();return;}
  });
 }

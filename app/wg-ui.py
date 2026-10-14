@@ -1401,6 +1401,19 @@ class H(BaseHTTPRequestHandler):
                     "1" if validated["health_failover"] else "0",
                 ]
             elif op == "export":
+                # The bundle holds every private key: a stolen session alone must not be
+                # enough, so re-check the password (with the login throttle).
+                ip = self.client_address[0]
+                if login_blocked(ip):
+                    return self._json(429, {"ok": False, "error": "too many attempts"})
+                pw = b.get("password")
+                if not isinstance(pw, str) or not pw:
+                    return self._json(403, {"ok": False, "error": "password required"})
+                if not creds_ok(user, pw):
+                    login_failed(ip)
+                    log_event("admin", op=op, ok=False, user=user, ip=ip, reason="bad_password")
+                    return self._json(403, {"ok": False, "error": "wrong password"})
+                login_ok(ip)
                 argv = ["export"]
             elif op == "rename":
                 argv = ["rename", pub, name]

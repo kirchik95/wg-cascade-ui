@@ -1059,6 +1059,21 @@ class TestServerPolicy(unittest.TestCase):
             self.assertEqual(wgui._policy_runtime["blocked"]["code"], "helper_failed")
         self.assertEqual(refreshed[-1]["blocked"]["code"], "helper_failed")
 
+    def test_export_requires_password_reconfirmation(self):
+        calls = []
+        self.patch("call_admin", lambda argv, timeout=30: calls.append(argv) or {"ok": True, "archive": ""})
+        self.patch("creds_ok", lambda user, pw: pw == "right")
+        self.patch("login_failed", lambda ip: None)
+        self.patch("login_blocked", lambda ip: False)
+        code, body = self.request({"op": "export"})
+        self.assertEqual((code, body["error"]), (403, "password required"))
+        code, body = self.request({"op": "export", "password": "wrong"})
+        self.assertEqual((code, body["error"]), (403, "wrong password"))
+        self.assertEqual(calls, [])
+        code, body = self.request({"op": "export", "password": "right"})
+        self.assertEqual(code, 200)
+        self.assertEqual(calls, [["export"]])
+
     def test_admin_bulk_uses_409_without_mutating_guard_result(self):
         shared = {"ok": False, "code": "target_stale", "error": "target_stale", "http_status": 409}
         self.patch("guarded_exit_switch", lambda target, reason: shared)
