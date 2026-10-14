@@ -130,7 +130,7 @@ class TestAdminConfParsing(unittest.TestCase):
 class TestTokens(unittest.TestCase):
     def setUp(self):
         try:
-            os.unlink(GEN)
+            os.unlink(wgui.auth.GEN_FILE)
         except OSError:
             pass
 
@@ -164,6 +164,26 @@ class TestTokens(unittest.TestCase):
         self.assertNotEqual(csrf_before, wgui.csrf_for("admin"))
         tok2 = wgui.make_token("admin", int(time.time()) + 60)
         self.assertEqual(wgui.check_token(tok2), "admin")
+
+    def test_lost_gen_file_does_not_revive_revoked_tokens(self):
+        tok = wgui.make_token("admin", int(time.time()) + 60)
+        wgui.bump_session_gen()
+        os.unlink(wgui.auth.GEN_FILE)
+        self.assertIsNone(wgui.check_token(tok))
+        self.assertEqual(wgui.check_token(wgui.make_token("admin", int(time.time()) + 60)), "admin")
+
+    def test_legacy_counter_gen_still_valid(self):
+        with open(wgui.auth.GEN_FILE, "w") as f:
+            f.write("3\n")
+        self.assertEqual(wgui.check_token(wgui.make_token("admin", int(time.time()) + 60)), "admin")
+
+    def test_corrupt_gen_file_rejects_sessions(self):
+        tok = wgui.make_token("admin", int(time.time()) + 60)
+        with open(wgui.auth.GEN_FILE, "w") as f:
+            f.write("not a generation")
+        self.assertIsNone(wgui.check_token(tok))
+        with self.assertRaises(RuntimeError):
+            wgui.make_token("admin", int(time.time()) + 60)
 
 
 class TestCreds(unittest.TestCase):

@@ -40,23 +40,63 @@ def _b64d(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+_GEN_CHARS = frozenset("0123456789abcdef")
+_gen_lock = threading.Lock()
+
+
+def _write_gen(value, exclusive=False):
+    """Atomically publish a generation; exclusive=True only creates a missing file."""
+    if exclusive:
+        fd = os.open(GEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(value)
+        return
+    tmp = "%s.tmp.%d" % (GEN_FILE, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, GEN_FILE)
+
+
 def session_gen():
+    """Current session generation, or None when it cannot be trusted.
+
+    A missing file gets a fresh random epoch, so deleting the file never revives
+    sessions revoked earlier (a counter would restart at a reused value).
+    """
     try:
         with open(GEN_FILE) as f:
-            return int(f.read().strip() or 0)
-    except Exception:
-        return 0
+            g = f.read().strip()
+    except FileNotFoundError:
+        with _gen_lock:
+            try:
+                _write_gen(os.urandom(8).hex(), exclusive=True)
+            except FileExistsError:
+                pass
+            except OSError:
+                return None
+        return session_gen()
+    except OSError:
+        return None
+    if not g or len(g) > 32 or not set(g) <= _GEN_CHARS:
+        return None
+    return g
 
 
 def bump_session_gen():
-    g = session_gen() + 1
-    with open(GEN_FILE, "w") as f:
-        f.write(str(g))
+    with _gen_lock:
+        g = os.urandom(8).hex()
+        _write_gen(g)
     return g
 
 
 def make_token(user, exp):
-    msg = ("%s|%d|%d" % (user, exp, session_gen())).encode()
+    gen = session_gen()
+    if gen is None:
+        raise RuntimeError("session generation unavailable")
+    msg = ("%s|%d|%s" % (user, exp, gen)).encode()
     return _b64e(msg) + "." + _b64e(hmac.new(SECRET, msg, hashlib.sha256).digest())
 
 
@@ -67,7 +107,8 @@ def check_token(tok):
         if not hmac.compare_digest(_b64d(s), hmac.new(SECRET, msg, hashlib.sha256).digest()):
             return None
         user, exp, gen = msg.decode().split("|")
-        if int(gen) != session_gen():
+        current = session_gen()
+        if current is None or not hmac.compare_digest(gen, current):
             return None
         return user if int(exp) > int(time.time()) else None
     except Exception:
@@ -75,7 +116,7 @@ def check_token(tok):
 
 
 def csrf_for(user):
-    msg = "csrf|%s|%d" % (user, session_gen())
+    msg = "csrf|%s|%s" % (user, session_gen() or "unavailable")
     return hmac.new(SECRET, msg.encode(), hashlib.sha256).hexdigest()[:32]
 
 

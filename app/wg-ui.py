@@ -1122,7 +1122,11 @@ class H(BaseHTTPRequestHandler):
             p = form.get("password", [""])[0]
             if creds_ok(u, p):
                 login_ok(ip)
-                tok = make_token(u, int(time.time()) + SESSION_TTL)
+                try:
+                    tok = make_token(u, int(time.time()) + SESSION_TTL)
+                except RuntimeError as e:
+                    log_event("login", ok=False, reason="session_gen", ip=ip, error=str(e))
+                    return self._send(503, b"session state unavailable")
                 cookie = ("wgui_session=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d"
                           % (tok, SESSION_TTL))
                 log_event("login", ok=True, user=u, ip=ip)
