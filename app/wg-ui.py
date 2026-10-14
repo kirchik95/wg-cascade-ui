@@ -20,7 +20,7 @@ import auth
 from auth import (
     BODY_ADMIN_MAX, BODY_LOGIN_MAX, LOGIN_MAX, SESSION_TTL,
     bump_session_gen, check_body_length, check_token, creds_ok, csrf_for,
-    login_blocked, login_failed, login_ok, make_token,
+    login_blocked, login_failed, login_ok, login_state, make_token,
 )
 
 # Re-export auth mutables so existing tests can patch wgui.USER / SECRET / …
@@ -1630,7 +1630,8 @@ class H(BaseHTTPRequestHandler):
             ip = self.client_address[0]
             if login_blocked(ip):
                 log_event("login", ok=False, reason="throttled", ip=ip)
-                return self._send(303, b"", None, {"Location": "/login?e=2"})
+                return self._send(303, b"", None,
+                                  {"Location": "/login?e=2&retry=%d" % login_state(ip)[1]})
             try:
                 form = parse_qs(self._body(BODY_LOGIN_MAX).decode("utf-8", "replace"))
             except ValueError:
@@ -1651,7 +1652,9 @@ class H(BaseHTTPRequestHandler):
             login_failed(ip)
             log_event("login", ok=False, reason="bad_creds", ip=ip)
             time.sleep(1.0)
-            return self._send(303, b"", None, {"Location": "/login?e=1"})
+            left, retry = login_state(ip)
+            dest = ("/login?e=2&retry=%d" % retry) if retry else ("/login?e=1&left=%d" % left)
+            return self._send(303, b"", None, {"Location": dest})
         if path == "/logout-all":
             user = self._user()
             if not user:
