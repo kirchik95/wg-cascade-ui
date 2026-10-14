@@ -66,6 +66,7 @@ WG.addStrings('ru',{
  'Daily traffic of {name}: {s}':'Расход {name} по дням: {s}','Part of the history did not load.':'Часть истории не загрузилась.',
  'Edit client':'Изменить клиента','Keep':'Оставить','now: {t}':'сейчас: {t}','will be: {t}':'будет: {t}','no change':'без изменений',
  'until {d} ({n})':'до {d} ({n})','Save':'Сохранить','No changes':'Нет изменений',
+ 'The current term is shown above. Choose a term again to change it.':'Выше показан текущий срок. Для изменения выберите срок ещё раз.',
  'name: {a} → {b}':'имя: {a} → {b}','term: {t}':'срок: {t}','exit: {a} → {b}':'выход: {a} → {b}',
  '{name}: renaming':'{name}: переименовываю','{name}: extending access':'{name}: продлеваю доступ','{name}: changing the term':'{name}: меняю срок',
  '{name}: moving to {exit}':'{name}: перевожу на {exit}','{name}: saving changes':'{name}: сохраняю изменения',
@@ -109,6 +110,8 @@ WG.addStrings('ru',{
  'At the current rate (~{r} GiB/day) the {exit} quota lasts about {d}; switching by quota is off, so they stay on {exit}.':'При текущем расходе (~{r} ГиБ/день) квоты {exit} хватит примерно на {d}; переключение по квоте выключено — клиенты останутся на {exit}.',
  'estimate: traffic of all clients this month ÷ days passed':'оценка: расход всех клиентов за месяц ÷ прошедшие дни',
  'Moving everyone to {exit}':'Перевожу всех на {exit}','{n} moved to {exit}':'{n} — теперь на {exit}',
+ 'All clients are already on {exit}. Nothing changed.':'Все клиенты уже на {exit}. Ничего не изменилось.',
+ 'Switch to {exit} completed':'Переключение на {exit} завершено',
  'Move clients back':'Возврат клиентов','Move clients back to {exit}?':'Вернуть клиентов на {exit}?',
  'After the automatic switch {t}':'После автопереключения {t}','After the switch {t}':'После переключения {t}',
  'Loading the switch from the journal…':'Загружаю переключение из журнала…',
@@ -118,6 +121,8 @@ WG.addStrings('ru',{
  'Devices reconnect — a break of a few seconds.':'Устройства переподключатся — разрыв на несколько секунд.',
  'Move {n} back to {exit}':'Вернуть {n} на {exit}','Nobody to move back':'Возвращать некого',
  'Moving {n} back to {exit}':'Возвращаю {n} на {exit}','{n} back on {exit}':'{n} — снова на {exit}',
+ 'Move back to {exit} completed':'Возврат на {exit} завершён',
+ 'No clients moved back to {exit}. Nothing changed.':'Никто не переведён обратно на {exit}. Ничего не изменилось.',
  'client deleted':'клиент удалён','already on {exit}':'уже на {exit}','moved by hand':'переведён вручную',
  'Nobody to move back: the clients were deleted or moved by hand. Nothing changed.':'Возвращать некого: клиентов удалили или перевели вручную. Ничего не изменилось.',
  'This switch was recorded without its client list — move clients back one by one.':'Это переключение записано без списка клиентов — верните их по одному.',
@@ -362,7 +367,11 @@ function revertOutcome(out,plan){
  if(!out||(out.kind!=='ok'&&out.kind!=='partial'&&out.kind!=='warn'))return out;
  if(d.noop)return{kind:'failed',data:d,message:tr('Nobody to move back: the clients were deleted or moved by hand. Nothing changed.')};
  const skipped=Array.isArray(d.skipped)?d.skipped:[];
- const odd=skipped.filter(x=>!(x&&SKIP_TEXT[x.reason]));
+ const planned=new Map(((plan&&plan.rows)||[]).map(r=>[r.pubkey,r.state]));
+ const odd=skipped.filter(x=>{
+  const state=x&&planned.get(x.pubkey);
+  return !(state==='deleted'&&x.reason==='deleted'||state==='already'&&(x.reason==='already_on_target'||x.reason==='reassigned'));
+ });
  if(!odd.length)return d.cleanup_warning?Object.assign({},out,{kind:'warn',message:out.message||tr('Cleanup after the change did not finish.')})
   :Object.assign({},out,{kind:'ok',message:''});
  const steps=(Array.isArray(d.changed)?d.changed:[]).map(x=>({state:'ok',text:((x&&x.name)||'')+' → '+to}))
@@ -371,6 +380,10 @@ function revertOutcome(out,plan){
    return{state:known?'skipped':'failed',text:((x&&x.name)||'')+': '+(known?tr(known,{exit:to}):WG.reasonText(x&&x.reason))};
   }));
  return Object.assign({},out,{kind:'partial',steps});
+}
+function changedCount(out){
+ const changed=out&&out.data&&out.data.changed;
+ return Array.isArray(changed)?changed.length:Number.isSafeInteger(changed)&&changed>=0?changed:null;
 }
 
 /* ------------------------------------------------------------ outcomes */
@@ -784,11 +797,25 @@ function configWindow(o){
 }
 
 /* ------------------------------------------------------------ edit (C5) */
+const EDIT_REFRESH=new Map();
+function markEditRefresh(pubkey){
+ const s=WG.state;
+ /* A fresh HTTP response can still contain the pre-change sampler snapshot. */
+ const after=(+s.now||+s.dataAt||0)+Math.max(0,(Date.now()-(+s.fetchedAt||Date.now()))/1000);
+ EDIT_REFRESH.set(pubkey,after);
+ return after;
+}
+WG.on('status',()=>{
+ if(!WG.unknown())for(const [pubkey,after] of EDIT_REFRESH)if(+WG.state.dataAt>after)EDIT_REFRESH.delete(pubkey);
+});
 function editClient(pubkey){
  const p=WG.peer(pubkey);
  if(!p)return missing();
  const orig={name:p.name,exp:+p.expires||0,exit:exitOf(p)};
  const st={choice:'keep',exit:orig.exit,busy:false};
+ let ownUnknownTerm=false,termNotice=false;
+ const key='edit:'+pubkey;
+ let priorRunning=WG.ops.running(key),refreshAfter=EDIT_REFRESH.has(pubkey)?EDIT_REFRESH.get(pubkey):null,clientGone=false;
  const now0=nowS(),plus=orig.exp>now0?'+':'';
  const h=win({eyebrow:tr('Edit client'),title:p.name,size:'md',cls:'m-edit',footer:' ',
   body:'<div class="m-form">'
@@ -827,7 +854,8 @@ function editClient(pubkey){
   const cur=!e?tr('no expiry'):e<=now?tr('expired {d}',{d:WG.fmtDate(e)}):tr('until {d} ({n})',{d:WG.fmtDate(e),n:WG.count(left,'day')});
   const nowEl=h.q('.m-now');nowEl.textContent=tr('now: {t}',{t:cur});nowEl.className='m-now'+(e&&(e<=now||left<7)?' is-warn':'');
   const exp=termAfter(st.choice,orig.exp,now);
-  h.q('.m-term-h').textContent=tr('will be: {t}',{t:st.choice==='keep'||exp===orig.exp?tr('no change'):termText(exp,now)});
+  h.q('.m-term-h').textContent=tr('will be: {t}',{t:st.choice==='keep'||exp===orig.exp?tr('no change'):termText(exp,now)})
+   +(termNotice?' '+tr('The current term is shown above. Choose a term again to change it.'):'');
  }
  function paintExit(){
   const items=WG.EXITS.map(k=>{const v=exitView(k);return{m:'exit',k,label:v.short,on:k===st.exit,disabled:!!v.blocked&&k!==orig.exit,title:v.text}});
@@ -838,7 +866,9 @@ function editClient(pubkey){
  function why(){
   const prob=nameProblem(inp.value,peersNow(),pubkey);
   if(mutationBlock())return mutationBlock();
-  if(WG.ops.running('edit:'+pubkey))return tr('Wait for the current change to finish');
+  if(priorRunning||WG.ops.running(key))return tr('Wait for the current change to finish');
+  if(refreshAfter!==null)return tr('Wait for fresh data');
+  if(clientGone)return tr('Client not found');
   if(prob==='empty')return tr('Enter a name');
   if(prob)return tr('Fix the name');
   if(st.exit!==orig.exit&&exitView(st.exit).blocked)return blockedLabel(exitView(st.exit));
@@ -863,11 +893,13 @@ function editClient(pubkey){
   const list=changes(),name=orig.name,next=inp.value.trim()||name;
   st.busy=true;setLocked(h,true);showOut(h,null);
   const one=list.length===1&&list[0].kind==='term';
-  const out=await runInWindow(h,{key:'edit:'+pubkey,label:label(list,name),busy:tr('Saving…'),
+  const out=await runInWindow(h,{key,label:label(list,name),busy:tr('Saving…'),
    done:one?tr('{name}: access {t}',{name:next,t:list[0].exp?tr('until {d}',{d:WG.fmtDate(list[0].exp)}):tr('no expiry')}):tr('{name}: saved',{name:next}),
-   call:live(()=>runSteps(list))});
+   call:async()=>{try{return await live(()=>runSteps(list))()}finally{markEditRefresh(pubkey)}}});
   st.busy=false;
   if(!h.alive())return;
+  refreshAfter=EDIT_REFRESH.has(pubkey)?EDIT_REFRESH.get(pubkey):null;
+  if(out.kind==='unknown'&&st.choice!=='keep'&&list.some(c=>c.kind==='term'))ownUnknownTerm=true;
   if(out.kind==='ok'||out.kind==='warn')return h.close();
   setLocked(h,false);
   if(out.kind==='partial'||out.kind==='unknown')h.setTitle(orig.name);
@@ -879,13 +911,38 @@ function editClient(pubkey){
   if(m==='cancel')return h.close();
   if(m==='save')return save();
   if(m==='suggest'){inp.value=b.getAttribute('data-k');paint();try{inp.focus()}catch(e){}return}
-  if(m==='term'){st.choice=b.getAttribute('data-k');checkSeg(h.el,'term',st.choice);paintTerm();paintFoot();return}
+  if(m==='term'){st.choice=b.getAttribute('data-k');ownUnknownTerm=false;termNotice=false;checkSeg(h.el,'term',st.choice);paintTerm();paintFoot();return}
   if(m==='exit'){st.exit=b.getAttribute('data-k')==='us'?'us':'nl';paintExit();paintFoot()}
  });
  h.el.addEventListener('input',e=>{if(e.target===inp){showOut(h,null);paintName();paintFoot()}});
  h.el.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target===inp){e.preventDefault();save()}});
- h.on('status',()=>{if(!st.busy){paintExit();paintFoot()}});
- h.on('ops',paintFoot);
+ h.on('status',()=>{
+  if(st.busy)return;
+  if(refreshAfter!==null&&!WG.ops.running(key)&&!WG.unknown()&&+WG.state.dataAt>refreshAfter){
+   const current=WG.peer(pubkey);
+   clientGone=!current;
+   if(current){
+    const dirtyName=inp.value.trim()!==orig.name,dirtyExit=st.exit!==orig.exit;
+    orig.name=current.name;orig.exp=+current.expires||0;orig.exit=exitOf(current);
+    if(!dirtyName)inp.value=orig.name;
+    if(!dirtyExit)st.exit=orig.exit;
+    if(ownUnknownTerm){st.choice='keep';ownUnknownTerm=false;termNotice=true;checkSeg(h.el,'term','keep')}
+    h.setTitle(orig.name);
+   }
+   refreshAfter=null;
+   paint();
+  }else{paintExit();paintFoot()}
+ });
+ h.on('ops',()=>{
+  if(st.busy)return;
+  if(WG.ops.running(key)){priorRunning=true;refreshAfter=null}
+  else if(priorRunning){
+   priorRunning=false;
+   refreshAfter=EDIT_REFRESH.has(pubkey)?EDIT_REFRESH.get(pubkey):markEditRefresh(pubkey);
+   WG.refresh();
+  }
+  paintFoot();
+ });
  h.on('second',()=>{if(!st.busy)paintTerm()});
  paint();
  setTimeout(()=>{if(h.alive()){try{inp.focus();inp.select()}catch(e){}}},0);
@@ -1148,9 +1205,11 @@ function confirmBulk(target,draft){
  h.click(m=>{
   if(m==='back')return back();
   if(m!=='go')return;
-  const n=moving(WG.state.peers,target).n;
   _exitsDraft=null;h.close();
-  WG.ops.run({key:'exit-all',label:tr('Moving everyone to {exit}',{exit:K}),done:tr('{n} moved to {exit}',{n:WG.count(n,'client'),exit:K}),
+  WG.ops.run({key:'exit-all',label:tr('Moving everyone to {exit}',{exit:K}),done:out=>{
+   const n=changedCount(out);
+   return n===null?tr('Switch to {exit} completed',{exit:K}):n===0?tr('All clients are already on {exit}. Nothing changed.',{exit:K}):tr('{n} moved to {exit}',{n:WG.count(n,'client'),exit:K});
+  },
    call:live(()=>WG.admin({op:'setexitall',exit:target}).then(explain))});
  });
  h.on('status',paint);
@@ -1188,7 +1247,10 @@ function revertSwitch(eventId){
   if(m!=='go'||!ev)return;
   const plan=revertPlan(ev,peersNow()),K=X(plan.to);
   h.close();
-  WG.ops.run({key:'revert:'+eventId,label:tr('Moving {n} back to {exit}',{n:plan.count,exit:K}),done:tr('{n} back on {exit}',{n:WG.count(plan.count,'client'),exit:K}),
+  WG.ops.run({key:'revert:'+eventId,label:tr('Moving {n} back to {exit}',{n:plan.count,exit:K}),done:out=>{
+   const n=changedCount(out);
+   return n===null?tr('Move back to {exit} completed',{exit:K}):n===0?tr('No clients moved back to {exit}. Nothing changed.',{exit:K}):tr('{n} back on {exit}',{n:WG.count(n,'client'),exit:K});
+  },
    call:live(()=>WG.admin({op:'revertswitch',event_id:eventId}).then(o=>revertOutcome(explain(o),plan)))});
  });
  h.on('status',paint);

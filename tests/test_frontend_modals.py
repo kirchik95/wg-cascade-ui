@@ -160,8 +160,11 @@ class TestModalKit(unittest.TestCase):
         const plan=K.revertPlan(ev,[{pubkey:'pk-a',name:'kirill-iphone',exit:'nl'},{pubkey:'pk-c',name:'guest-1',exit:'us'}]);
         eq([plan.from,plan.to,plan.count],['nl','us',1],'plan');
         eq(plan.rows.map(r=>r.state),['move','deleted','already'],'rows');
-        let o=K.revertOutcome({kind:'partial',data:{ok:true,changed:[{name:'kirill-iphone'}],skipped:[{name:'old',reason:'deleted'},{name:'guest-1',reason:'already_on_target'}]},message:'',steps:[]},plan);
+        let o=K.revertOutcome({kind:'partial',data:{ok:true,changed:[{pubkey:'pk-a',name:'kirill-iphone'}],skipped:[{pubkey:'gone',name:'old',reason:'deleted'},{pubkey:'pk-c',name:'guest-1',reason:'already_on_target'}]},message:'',steps:[]},plan);
         eq(o.kind,'ok','skips shown before confirming keep «ok»');
+        o=K.revertOutcome({kind:'partial',data:{ok:true,changed:[{pubkey:'pk-a',name:'kirill-iphone'}],skipped:[{pubkey:'gone',name:'old',reason:'deleted'}],cleanup_warning:'cleanup failed'},message:'',steps:[]},plan);
+        eq(o.kind,'warn','an expected skip must preserve the cleanup warning');
+        eq(o.data.cleanup_warning,'cleanup failed','warning data is retained');
         o=K.revertOutcome({kind:'partial',data:{ok:true,changed:[{name:'kirill-iphone'}],skipped:[{name:'x',reason:'helper_failed'}]},message:''},plan);
         eq([o.kind,o.steps.map(s=>s.state)],['partial',['ok','failed']],'other skips are partial');
         if(o.steps[1].text.includes('helper_failed'))throw new Error('raw code shown');
@@ -169,6 +172,16 @@ class TestModalKit(unittest.TestCase):
         eq(o.kind,'failed','nothing moved is not «applied»');
         o=K.revertOutcome({kind:'unknown',data:null,message:'No answer'},plan);
         eq(o.kind,'unknown','unknown stays unknown');
+        """)
+
+    def test_revert_keeps_newly_skipped_planned_client_partial(self):
+        run(self, r"""
+        const plan={to:'us',count:2,rows:[{pubkey:'a',state:'move'},{pubkey:'b',state:'move'},{pubkey:'old',state:'deleted'}]};
+        const data={ok:true,committed:true,changed:[{pubkey:'a',name:'first'}],skipped:[{pubkey:'b',name:'second',reason:'deleted'},{pubkey:'old',name:'old',reason:'deleted'}],cleanup_warning:'cleanup failed'};
+        const out=K.revertOutcome({kind:'partial',data,steps:[]},plan);
+        eq(out.kind,'partial','a newly skipped planned move remains partial');
+        eq(out.data.cleanup_warning,'cleanup failed','partial result keeps cleanup warning data');
+        if(!out.steps.some(s=>s.text.includes('second')&&s.text.includes('deleted')))throw new Error('the new skip must be visible');
         """)
 
     def test_steps_stop_at_the_first_failure_and_say_what_applied(self):
@@ -247,8 +260,9 @@ class TestModalWindows(unittest.TestCase):
 
     def test_multistep_mutations_stop_when_status_becomes_untrusted(self):
         run(self, r"""
+        let serverNow=1790000000;
         for(const action of ['edit','split'])for(const untrusted of [{loaded:false},{stale:true},{offline:true}]){
-          await feed(snapshot());
+          await feed(snapshot({now:serverNow+=10}));
           let resolve;
           const info={ok:true,extra:[],server:{state:'off',ipset:0},meta:{}};
           const calls=admin(b=>b.op==='splitinfo'?response(info):new Promise(r=>{resolve=r;}));
@@ -270,9 +284,10 @@ class TestModalWindows(unittest.TestCase):
 
     def test_reopened_edit_waits_for_running_operation_before_saving_its_draft(self):
         run(self, r"""
-        await feed(snapshot());
+        const initial=snapshot();await feed(initial);
         let resolve;
         const calls=admin(b=>b.op==='rename'?new Promise(r=>{resolve=r;}):response({ok:true,committed:true}));
+        const request=context.fetch;
         WG.actions.editClient('pk-a');type(q('.m-name'),'renamed');q('[data-m="save"]').click();
         WG.modal.close();
         WG.actions.editClient('pk-a');q('[data-m="exit"][data-k="us"]').click();
@@ -280,10 +295,94 @@ class TestModalWindows(unittest.TestCase):
         q('.m-name').dispatchEvent(makeEvent('keydown',q('.m-name'),{key:'Enter'}));
         resolve(response({ok:true,committed:true}));await flush(60);
         if(!WG.modal.current())throw new Error('the earlier result closed the new draft');
-        if(q('[data-m="save"]').disabled)throw new Error('the operation completion did not unlock saving');
+        if(!q('[data-m="save"]').disabled)throw new Error('saving unlocked before a new status snapshot');
+        const fresh=JSON.parse(JSON.stringify(initial));fresh.now+=5;fresh.peers[0].name='renamed';
+        await feed(fresh);context.fetch=request;
+        eq(q('.m-name').value,'renamed','untouched name follows the new server snapshot');
+        if(q('[data-m="save"]').disabled)throw new Error('fresh status did not unlock saving');
         eq(calls.map(b=>b.op),['rename'],'the blocked draft did not send');
         q('[data-m="save"]').click();await flush(60);
         eq(calls[1],{op:'setexit',pubkey:'pk-a',exit:'us'},'the new draft is applied after its own save');
+        """)
+
+    def test_reopened_edit_waits_for_new_snapshot_and_extends_from_updated_expiry(self):
+        run(self, r"""
+        const start=Math.round(Date.now()/1000),s=snapshot();s.now=start;s.peers[0].expires=start+3*86400;
+        await feed(s);
+        let resolve;
+        let calls=admin(()=>new Promise(r=>{resolve=r;}));
+        WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();q('[data-m="save"]').click();
+        eq(calls[0].expires,start+10*86400,'first extension');
+        WG.modal.close();WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();
+        resolve(response({ok:true,committed:true,expires:start+10*86400}));await flush(60);
+        if(!q('[data-m="save"]').disabled)throw new Error('operation completion alone unlocks the old expiry');
+        await feed(s);
+        if(!q('[data-m="save"]').disabled)throw new Error('a repeated cached snapshot unlocks the old expiry');
+        const fresh=JSON.parse(JSON.stringify(s));fresh.now=start+5;fresh.peers[0].expires=start+10*86400;
+        await feed(fresh);
+        if(q('[data-m="save"]').disabled)throw new Error('a new server snapshot did not unlock the draft');
+        calls=admin(()=>response({ok:true,committed:true}));
+        q('[data-m="save"]').click();await flush(60);
+        eq(calls,[{op:'setexpiry',pubkey:'pk-a',expires:start+17*86400}],'second extension starts at the updated expiry');
+        """)
+
+    def test_reopened_edit_rebases_server_fields_and_preserves_dirty_choices(self):
+        run(self, r"""
+        const start=Math.round(Date.now()/1000),s=snapshot();s.now=start;s.peers[0].expires=start+3*86400;
+        await feed(s);
+        let resolve;admin(()=>new Promise(r=>{resolve=r;}));
+        WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();q('[data-m="save"]').click();
+        WG.modal.close();WG.actions.editClient('pk-a');
+        type(q('.m-name'),'my-draft');q('[data-m="term"][data-k="+30"]').click();q('[data-m="exit"][data-k="us"]').click();
+        resolve(response({ok:true,committed:true}));await flush(60);
+        const fresh=JSON.parse(JSON.stringify(s));fresh.now=start+5;
+        Object.assign(fresh.peers[0],{name:'server-name',expires:start+10*86400,exit:'us'});
+        await feed(fresh);
+        eq(q('.m-name').value,'my-draft','dirty name preserved');
+        eq(q('[data-m="term"][data-k="+30"]').getAttribute('aria-checked'),'true','term choice preserved');
+        eq(q('[data-m="exit"][data-k="us"]').getAttribute('aria-checked'),'true','exit choice preserved');
+        const calls=admin(()=>response({ok:true,committed:true}));
+        q('[data-m="save"]').click();await flush(60);
+        eq(calls,[{op:'rename',pubkey:'pk-a',name:'my-draft'},{op:'setexpiry',pubkey:'pk-a',expires:start+40*86400}],'draft is compared with the new server baseline');
+        """)
+
+    def test_edit_opened_after_completion_waits_for_the_new_snapshot(self):
+        run(self, r"""
+        const start=Math.round(Date.now()/1000),s=snapshot();s.now=start;s.peers[0].expires=start+3*86400;
+        await feed(s);
+        let resolve;admin(()=>new Promise(r=>{resolve=r;}));
+        WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();q('[data-m="save"]').click();
+        WG.modal.close();resolve(response({ok:true,committed:true}));await flush(60);
+        WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();
+        if(!q('[data-m="save"]').disabled)throw new Error('a form opened after completion still uses the old expiry');
+        const fresh=JSON.parse(JSON.stringify(s));fresh.now=start+5;fresh.peers[0].expires=start+10*86400;
+        await feed(fresh);
+        const calls=admin(()=>response({ok:true,committed:true}));q('[data-m="save"]').click();await flush(60);
+        eq(calls,[{op:'setexpiry',pubkey:'pk-a',expires:start+17*86400}],'completed edits also establish the refresh barrier');
+        """)
+
+    def test_own_unknown_expiry_requires_new_choice_after_status_refresh(self):
+        run(self, r"""
+        let start=Math.round(Date.now()/1000);
+        for(const applied of [true,false]){
+          start+=10;
+          const s=snapshot();s.now=start;s.peers[0].expires=start+3*86400;await feed(s);
+          const calls=admin(()=>response({ok:false,committed:'unknown',error:'timeout'},400));
+          const request=context.fetch;
+          WG.actions.editClient('pk-a');q('[data-m="term"][data-k="+7"]').click();q('[data-m="save"]').click();await flush(60);
+          eq(calls[0].expires,start+10*86400,'original absolute expiry');
+          const fresh=JSON.parse(JSON.stringify(s));fresh.now=start+5;
+          fresh.peers[0].expires=applied?start+10*86400:start+3*86400;
+          await feed(fresh);context.fetch=request;
+          if(!q('[data-m="save"]').disabled)throw new Error('own unknown relative term became an implicit new extension');
+          eq(q('[data-m="term"][data-k="keep"]').getAttribute('aria-checked'),'true','own unknown resets the relative choice');
+          if(!text(q('.m-term-h')).includes('Choose a term again'))throw new Error('the reset needs an explanation');
+          q('.m-name').dispatchEvent(makeEvent('keydown',q('.m-name'),{key:'Enter'}));await flush(20);
+          eq(calls.length,1,'Enter must not repeat an unknown relative extension');
+          q('[data-m="term"][data-k="+7"]').click();q('[data-m="save"]').click();await flush(60);
+          eq(calls[1].expires,start+(applied?17:10)*86400,'a new explicit choice extends the refreshed term');
+          WG.modal.close();
+        }
         """)
 
     def test_delete_turn_off_does_not_toggle_an_already_disabled_client_on(self):
@@ -380,6 +479,32 @@ class TestModalWindows(unittest.TestCase):
         if(!b.disabled||!text(b).includes('US quota is used up'))throw new Error('a used-up target is off with a reason: '+text(b));
         """)
 
+    def test_bulk_move_reports_the_server_count_and_zero_as_no_change(self):
+        run(self, r"""
+        for(const changed of [1,0,undefined]){
+          await feed(snapshot());
+          WG.actions.exitsSettings();q('[data-m="bulk"][data-k="us"]').click();
+          admin(()=>response({ok:true,committed:changed>0,exit:'us',changed}));
+          q('[data-m="go"]').click();await flush(40);
+          const out=text(element('ops'));
+          if(out.includes('2 clients moved'))throw new Error('the preview count leaked into the result: '+out);
+          if(changed===1&&!out.includes('1 client moved to US'))throw new Error('actual count missing: '+out);
+          if(changed===0&&!out.includes('Nothing changed'))throw new Error('zero changes were not stated: '+out);
+          if(changed===undefined&&(!out.includes('Switch to US completed')||out.includes('Nothing changed')))throw new Error('missing count must not be presented as zero: '+out);
+        }
+        """)
+
+    def test_revert_result_counts_changed_clients_instead_of_the_preview(self):
+        run(self, r"""
+        await feed(snapshot());
+        const event={id:42,ts:1790000000,kind:'exit_switch',data:{source:'us',target:'nl',reason:'health',members:[{pubkey:'pk-a',name:'first'},{pubkey:'pk-b',name:'second'}]}};
+        const handler=()=>response({ok:true,committed:true,changed:[{pubkey:'pk-a',name:'first'}],skipped:[]});
+        handler.get=()=>response({event});admin(handler);
+        WG.actions.revertSwitch(42);await flush(40);q('[data-m="go"]').click();await flush(40);
+        const out=text(element('ops'));
+        if(!out.includes('1 client back on US')||out.includes('2 clients back on US'))throw new Error('server changed count missing: '+out);
+        """)
+
     def test_delete_needs_the_name_and_turning_off_has_undo(self):
         run(self, r"""
         await feed(snapshot());
@@ -457,6 +582,7 @@ class TestModalWindows(unittest.TestCase):
         save().click();await flush(40);
         eq(calls,[{op:'setexpiry',pubkey:'pk-b',expires:now+33*86400}],'+30 days from the current term');
         if(WG.modal.current())throw new Error('success closes');
+        s.now+=5;s.peers[1].expires=now+33*86400;await feed(s);
         calls=admin(b=>b.op==='setexit'?response({ok:false,code:'target_exhausted'},409):response({ok:true}));
         WG.actions.editClient('pk-b');
         type(q('.m-name'),'ipad-2');
