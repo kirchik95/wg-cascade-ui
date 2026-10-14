@@ -24,11 +24,14 @@
  *           WG.admin(body) → Promise<{kind, data, message, steps?}>,
  *                            kind: 'ok' | 'warn' | 'failed' | 'unknown' | 'busy' | 'partial'
  *           WG.targetText(code), WG.reasonText(code)  human text for server codes
- *  Ops      WG.ops.run({key, label, call, undo?, check?}) → Promise<outcome>. call() returns
- *           WG.admin(…) (or an outcome). A key that is running is not started again — the same
- *           promise comes back. Strip (D1): only elapsed time; 'ok' fades after 5 s, other
- *           outcomes stay until «Понятно»; 'unknown' offers «Проверить состояние» (check() or a
- *           refresh), 'busy' — «Повторить». undo: fn shown as «Отменить» for 10 s after 'ok'.
+ *  Ops      WG.ops.run({key, label, call, done?, undo?, check?, open?}) → Promise<outcome>.
+ *           call() returns WG.admin(…) (or an outcome). A key that is running is not started
+ *           again — the same promise comes back. Strip (D1): only elapsed time; 'ok' (text: done
+ *           or label) fades after 5 s, other outcomes stay until «Понятно» even if the window
+ *           that started them is closed; 'unknown' offers «Проверить состояние» (check() + a
+ *           refresh), 'busy' — «Повторить», 'partial' lists outcome.steps [{state, text}].
+ *           undo: fn → «Отменить» for 10 s after 'ok'; open: {label, act} extra button.
+ *           Every finished op except 'busy' refreshes /api/status in the background.
  *           WG.ops.running(key) → bool
  *  Windows  WG.modal.open({title, eyebrow, body, footer, size:'sm'|'md'|'lg', onClose}) → handle
  *             body/footer: HTML string or Node. handle: {el, body, footer, alive(), close(),
@@ -96,7 +99,7 @@ const STR={ru:{
  'Nothing changed.':'Ничего не изменилось.','Done.':'Готово.',
  'The server refused the request.':'Сервер отклонил запрос.','The server answered with an error.':'Сервер ответил ошибкой.',
  'Cleanup after the change did not finish.':'Уборка после изменения не завершилась.',
- 'skipped':'пропущено','done':'выполнено',
+ 'skipped':'пропущено','done':'выполнено','applied only in part:':'применилось не полностью:',
  'Exit switching is blocked.':'Переключение выходов заблокировано.'
 }};
 function addStrings(lang,dict){STR[lang]=Object.assign(STR[lang]||{},dict||{})}
@@ -660,6 +663,128 @@ delegate('banner-act',el=>{
  if(a&&typeof a.act==='function')a.act();
 });
 
+/* ------------------------------------------------------------ operations strip (D1) */
+const OPS=new Map();            /* key → running entry */
+const RESULTS=[];               /* outcomes waiting for «Понятно» (ok ones fade by themselves) */
+let _opsTimer=null,_opSeq=0;
+const OP_TAG={ok:'Applied',warn:'Applied, but',failed:'Not applied',unknown:'Result unknown',busy:'Server busy',partial:'Partially'};
+const OP_IC={ok:'✓',warn:'✓!',failed:'×',unknown:'?',busy:'…',partial:'½'};
+const OP_OK_MS=5000,OP_UNDO_MS=10000;
+function asOutcome(v){
+ if(v&&typeof v==='object'&&OP_TAG[v.kind])return v;
+ if(v&&typeof v==='object'&&v.ok===true)return outcome('ok',v,'');
+ return outcome('failed',v&&typeof v==='object'?v:null,tr('The server answered with an error.')+' '+tr('Nothing changed.'));
+}
+function opsRun(o){
+ o=o||{};
+ const key=String(o.key||o.label||'op');
+ const running=OPS.get(key);
+ if(running)return running.promise;
+ for(let i=RESULTS.length-1;i>=0;i--)if(RESULTS[i].key===key)dropResult(RESULTS[i]);
+ const entry={key,label:String(o.label||''),start:Date.now()};
+ OPS.set(key,entry);
+ entry.promise=(async()=>{
+  let out;
+  try{out=asOutcome(await(typeof o.call==='function'?o.call():o.call))}
+  catch(e){out=outcome('unknown',null,tr('The connection dropped. The change may have applied — check before repeating.'))}
+  OPS.delete(key);
+  addResult(o,key,out);
+  if(out.kind!=='busy')kickTick();     /* refresh in the background — never awaited */
+  return out;
+ })();
+ renderOps();
+ return entry.promise;
+}
+function addResult(o,key,out){
+ const ttl=out.kind==='ok'?(typeof o.undo==='function'?OP_UNDO_MS:OP_OK_MS):0;
+ RESULTS.push({id:++_opSeq,key,opts:o,kind:out.kind,out,until:ttl?Date.now()+ttl:0,checked:false,el:null});
+ renderOps();
+}
+function dropResult(r){
+ const i=RESULTS.indexOf(r);if(i>=0)RESULTS.splice(i,1);
+ if(r.el)r.el.remove();
+}
+function opMessage(r){
+ const o=r.opts,out=r.out,label=String(o.label||'');
+ if(r.kind==='ok')return String(o.done||label);
+ if(r.kind==='warn')return String(o.done||label)+(out.message?' — '+out.message:'');
+ if(r.kind==='partial')return(label?label+' — ':'')+tr('applied only in part:');
+ return(label?label+': ':'')+(out.message||'');
+}
+function resultHTML(r){
+ const steps=r.kind==='partial'&&r.out.steps&&r.out.steps.length?'<ul class="op-steps">'+r.out.steps.map(s=>{
+  const st=s.state==='ok'?'ok':s.state==='failed'?'failed':'skipped';
+  return'<li class="is-'+st+'">'+(st==='ok'?'✓ ':st==='failed'?'× ':'— ')+esc(s.text)+'</li>';
+ }).join('')+'</ul>':'';
+ let acts='';
+ if(r.kind==='ok'){
+  if(typeof r.opts.undo==='function')acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-undo" data-live>'+esc(tr('Undo'))+'</button>';
+  acts+='<span class="op-note" data-op-ttl>'+esc(tr('disappears in {n} s',{n:Math.max(0,Math.ceil((r.until-Date.now())/1000))}))+'</span>';
+ }else{
+  if(r.kind==='unknown')acts+='<button type="button" class="btn btn-sm btn-primary" data-act="op-check">'+esc(tr('Check state'))+'</button>';
+  if(r.kind==='busy')acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-retry" data-live>'+esc(tr('Retry'))+'</button>';
+  if(r.opts.open&&r.opts.open.label)acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-open">'+esc(r.opts.open.label)+'</button>';
+  acts+='<button type="button" class="btn btn-sm btn-text" data-act="op-dismiss">'+esc(tr('Got it'))+'</button>';
+ }
+ return'<span class="op-ic" aria-hidden="true">'+OP_IC[r.kind]+'</span><span class="op-tag">'+esc(tr(OP_TAG[r.kind]))+'</span>'
+  +'<div class="op-msg">'+esc(opMessage(r))+steps
+  +(r.checked?'<div class="op-sub">'+esc(tr('State refreshed — check whether the change is there.'))+'</div>':'')+'</div>'
+  +'<div class="op-acts">'+acts+'</div>';
+}
+function runHTML(){
+ const list=[...OPS.values()];
+ return'<span class="op-bar" aria-hidden="true"></span><span class="op-tag">'+esc(tr('Running'))+' · '+list.length+'</span>'
+  +'<div class="op-msg">'+list.map(e=>esc(e.label)+' · <span class="op-time">'+fmtClock((Date.now()-e.start)/1000)+'</span>').join(' · ')+'</div>';
+}
+function renderOps(){
+ const box=$('ops');
+ if(box){
+  let run=box.querySelector('.op-run');
+  if(OPS.size){
+   if(!run){
+    run=doc.createElement('div');run.className='op op-run';run.setAttribute('aria-live','off');
+    box.insertBefore(run,box.firstChild);
+   }
+   run.innerHTML=runHTML();
+  }else if(run)run.remove();
+  RESULTS.forEach(r=>{
+   if(r.el&&r.el.isConnected!==false&&!r.dirty)return;
+   const fresh=!r.el;
+   if(fresh){
+    r.el=doc.createElement('div');
+    r.el.setAttribute('data-op',String(r.id));
+    if(r.kind==='failed'||r.kind==='unknown'||r.kind==='partial')r.el.setAttribute('role','alert');
+   }
+   r.el.className='op op-'+r.kind;
+   r.el.innerHTML=resultHTML(r);r.dirty=false;
+   if(fresh)box.appendChild(r.el);
+  });
+ }
+ if(!_opsTimer&&(OPS.size||RESULTS.some(r=>r.until)))_opsTimer=setTimeout(opsTick,1000);
+}
+function opsTick(){
+ _opsTimer=null;
+ const t=Date.now();
+ RESULTS.filter(r=>r.until&&r.until<=t).forEach(dropResult);
+ RESULTS.forEach(r=>{
+  if(!r.until||!r.el)return;
+  const n=r.el.querySelector('[data-op-ttl]');
+  if(n)n.textContent=tr('disappears in {n} s',{n:Math.max(0,Math.ceil((r.until-t)/1000))});
+ });
+ renderOps();
+}
+function resultOf(el){const box=el.closest('[data-op]'),id=box&&+box.getAttribute('data-op');return RESULTS.find(r=>r.id===id)||null}
+delegate('op-dismiss',el=>{const r=resultOf(el);if(r)dropResult(r)});
+delegate('op-retry',el=>{const r=resultOf(el);if(r){dropResult(r);opsRun(r.opts)}});
+delegate('op-open',el=>{const r=resultOf(el);if(r&&typeof r.opts.open.act==='function')r.opts.open.act()});
+delegate('op-undo',el=>{const r=resultOf(el);if(r){dropResult(r);r.opts.undo()}});
+delegate('op-check',el=>{
+ const r=resultOf(el);if(!r)return;
+ if(typeof r.opts.check==='function'){try{r.opts.check()}catch(e){}}
+ kickTick();
+ r.checked=true;r.dirty=true;renderOps();
+});
+
 /* ------------------------------------------------------------ theme */
 const THEMES=['light','dark','auto'];
 function themeGet(){const t=store('wgui-theme');return THEMES.indexOf(t)>=0?t:'light'}
@@ -823,6 +948,7 @@ Object.assign(WG,{
  on,emit,delegate,refresh:kickTick,unknown,dataAge,api,admin,targetText,reasonText,
  modal:{open:modalOpen,close:modalClose,current:()=>_modal},
  confirm:confirmBox,
+ ops:{run:opsRun,running:key=>OPS.has(String(key))},
  menu:{open:menuOpen,close:menuClose},
  router:{register,go,current:()=>_route},
  banner:{set:bannerSet,clear:bannerClear,render:renderBanners},

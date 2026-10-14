@@ -235,8 +235,8 @@ button.mi:hover,button.mi:focus-visible{background:var(--color-panel);outline:no
 .op-msg{font-family:var(--font-sans);font-size:var(--text-body);line-height:20px;color:var(--color-ink);min-width:0}
 .op-acts{display:flex;align-items:center;gap:10px;justify-content:flex-end}
 .op-note{font-family:var(--font-mono);font-size:var(--text-meta);color:var(--color-muted);white-space:nowrap;font-variant-numeric:tabular-nums}
-.op-run .op-ic{width:28px}
-.op-bar{position:relative;display:block;width:28px;height:3px;background:var(--color-line-strong);overflow:hidden;border-radius:2px}
+.op-run{grid-template-columns:96px 150px minmax(0,1fr)}
+.op-bar{position:relative;display:block;width:96px;height:3px;background:var(--color-line-strong);overflow:hidden;border-radius:2px}
 .op-bar::after{content:"";position:absolute;top:0;left:0;width:40%;height:100%;background:var(--color-ink);animation:opbar 1.4s ease-in-out infinite}
 @keyframes opbar{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
 .op-time{font-variant-numeric:tabular-nums}
@@ -250,6 +250,7 @@ button.mi:hover,button.mi:focus-visible{background:var(--color-panel);outline:no
 .op-unknown{background:var(--color-amber-bg);border:2px solid var(--color-ink)}
 .op-busy{background:var(--color-panel)}
 .op-steps{list-style:none;margin:6px 0 0;padding:0;font-family:var(--font-mono);font-size:var(--text-data);line-height:22px}
+.op-sub{margin-top:4px;font-family:var(--font-mono);font-size:var(--text-meta);color:var(--color-muted)}
 .op-steps .is-ok{color:var(--color-ok-text)}.op-steps .is-failed{color:var(--color-danger)}.op-steps .is-skipped{color:var(--color-muted)}
 
 /* ---------------------------------------------------------------- dashboard (A1–A5) */
@@ -452,7 +453,8 @@ button.mi:hover,button.mi:focus-visible{background:var(--color-panel);outline:no
  .dlg-b{padding:0 16px 16px}
  .dlg-f{padding:12px 16px calc(12px + var(--safe-b))}
  .dlg-f .btn{flex:1 1 auto}
- .op{grid-template-columns:20px minmax(0,1fr);padding:10px 12px}
+ .op,.op-run{grid-template-columns:28px minmax(0,1fr);padding:10px 12px}
+ .op-bar{width:28px}
  .op-msg{grid-column:1 / -1}
  .op-acts{grid-column:1 / -1;justify-content:flex-start;flex-wrap:wrap}
  .op-acts .btn{min-height:44px}
