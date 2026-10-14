@@ -237,6 +237,33 @@ class TestJournalHelpers(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestExitsHelpers(unittest.TestCase):
+    def test_single_failed_exit_does_not_mark_the_healthy_route_down(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());
+          for(const failed of ['nl','us']){
+            const healthy=failed==='nl'?'us':'nl',s=JSON.parse(JSON.stringify(WG.state));
+            s.tunnel.state='down';s.tunnel.affected_clients=2;
+            s.tunnel.exits[failed]={ok:false,health:'down',health_since:s.now-300,checked_age:2,fails:3,affected_clients:2};
+            const md=P.diagramModel(s),st=P.situation(s);
+            if(md.exits.find(e=>e.key===healthy).tone!=='ink')throw new Error('healthy route was marked down: '+JSON.stringify(md));
+            if(md.exits.find(e=>e.key===failed).tone!=='bad')throw new Error('failed route lost its warning');
+            if(st.text.includes('Both exits')||!st.text.includes(healthy.toUpperCase()+' is available'))throw new Error('wrong outage scope: '+st.text);
+          }
+        """))
+
+    def test_unverified_exit_checks_do_not_claim_both_exits_pass(self):
+        run_pages(self, wrap(r"""
+          await feed(snapshot());
+          for(const health of ['warn','unknown']){
+            const s=JSON.parse(JSON.stringify(WG.state));s.tunnel.state='up';
+            s.tunnel.exits.us={ok:false,health:health==='warn'?'up':'unknown',checked_age:health==='warn'?1:-1,fails:health==='warn'?1:0,affected_clients:0};
+            const st=P.situation(s),md=P.diagramModel(s),expected=health==='warn'?'check 1/3':'status unknown';
+            if(st.tone==='ok'||st.text.includes('Both exits pass'))throw new Error('unverified check became success: '+JSON.stringify(st));
+            if(!st.text.includes(expected))throw new Error('missing check state: '+st.text);
+            if(md.exits.find(e=>e.key==='us').tone!=='u')throw new Error('unverified route must be neutral: '+JSON.stringify(md));
+          }
+        """))
+
     def test_situation_offers_revert_only_when_the_source_is_healthy(self):
         run_pages(self, wrap(r"""
           await feed(snapshot());

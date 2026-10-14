@@ -203,7 +203,7 @@ function diagramModel(s){
   thr:(s.thr&&s.thr.cur)||null,host:s.host||null,
   exits:xs.map(x=>({key:x.key,clients:x.clients,health:x.health,ratio:x.ratio,used:x.used,quota:x.quota,t:x.t,
    main:x.key===mainKey&&x.clients>0,w:wireWidth(sum?x.clients/sum:0),
-   tone:u?'u':(m==='crash'||x.health==='down')?'bad':'ink'}))};
+   tone:u?'u':x.health==='down'?'bad':x.health==='ok'?'ink':'u'}))};
 }
 function exitChip(e,s){
  const t=e.t||{};
@@ -336,20 +336,25 @@ function situation(s){
  if(m==='offline')return{tone:'u',text:tr('No connection with the panel: the scheme shows {t}; actions are off.',{t:WG.fmtTime(s.dataAt)})};
  if(m==='stale')return{tone:'u',text:tr('Data is stale: the scheme shows the state at {t}; things may be different now.',{t:WG.fmtTime(s.dataAt)})};
  const dist=distText(xs);
- if(m==='crash'){
+ const down=xs.filter(x=>x.health==='down');
+ if(down.length===xs.length){
   const since=Math.max.apply(null,xs.map(x=>+(x.t&&x.t.health_since)||0));
   return{tone:'bad',text:tr('Both exits do not answer since {t}: clients reach the entry but not the internet',{t:since?WG.fmtTime(since):'—'})
    +(s.rud?tr(' — only RU sites work (split).'):'.')};
  }
- const down=xs.filter(x=>x.health==='down');
  if(down.length){
   const x=down[0],since=+(x.t&&x.t.health_since)||0,n=+(x.t&&x.t.affected_clients)||0;
-  if(!n)return{tone:'warn',text:tr('{exit} does not answer since {t}; no enabled clients are on it.',{exit:XL(x.key),t:since?WG.fmtTime(since):'—'})};
+  const other=' '+xs.filter(e=>e.key!==x.key).map(WG.dashboard.exitStatusText).join(' · ')+'.';
+  if(!n)return{tone:'warn',text:tr('{exit} does not answer since {t}; no enabled clients are on it.',{exit:XL(x.key),t:since?WG.fmtTime(since):'—'})+other};
   let text=tr('{exit} does not answer since {t}: {n} without an exit.',{exit:XL(x.key),t:since?WG.fmtTime(since):'—',n:WG.count(n,'client')});
+  text+=other;
   if(n&&pol.health_failover===false)text+=' '+tr('Automatic failover is off — move the clients by hand.');
   else if(n&&pol.health_blocked)text+=' '+tr('Automatic switch did not run: {r}',{r:WG.reasonText(pol.health_blocked.code||pol.health_blocked)});
   return{tone:'bad',text};
  }
+ const unverified=xs.filter(x=>x.health==='warn'||x.health==='unknown');
+ if(unverified.length)return{tone:unverified.some(x=>x.health==='warn')?'warn':'u',
+  text:dist+'. '+unverified.map(WG.dashboard.exitStatusText).join(' · ')+'.'};
  const ls=pol.last_switch;
  if(ls&&typeof ls==='object'&&!ls.revert_of&&+ls.changed>0&&+ls.ts>0&&now-ls.ts<SWITCH_RECENT_S
   &&(ls.reason==='health'||ls.reason==='quota')&&WG.EXITS.indexOf(ls.source)>=0&&WG.EXITS.indexOf(ls.target)>=0){
@@ -372,7 +377,7 @@ function situation(s){
  return{tone:'ok',text:tr('{dist}. Both exits pass their checks',{dist})+(s.rud?tr(', RU sites open straight from the entry.'):'.')};
 }
 function situationHTML(s){
- const st=situation(s),off=!!WG.state.offline;
+ const st=situation(s),off=WG.unknown();
  return'<div class="xs-now-in is-'+st.tone+'"><span class="tag xs-now-tag">'+esc(tr('Now'))+'</span>'
   +'<p class="xs-now-t">'+esc(st.text)+'</p><div class="xs-now-acts">'
   +(st.revert?'<button type="button" class="btn btn-sm btn-primary" data-act="xs-revert" data-id="'+st.revert.id+'" data-live'+(off?' disabled':'')+'>'
@@ -939,7 +944,7 @@ function visibleJournal(){
  return journalViews(_j.events,_j.filter,{now:nowTs(s),lastSwitch:s.exit_policy&&s.exit_policy.last_switch,peerName:pk=>{const p=WG.peer(pk);return p?p.name:''}});
 }
 function journalRowHTML(v){
- const off=!!WG.state.offline;
+ const off=WG.unknown();
  return'<li class="jr-row'+(v.hot?' is-hot':'')+'"><time class="jr-t" datetime="'+esc(new Date(v.ts*1000).toISOString())+'">'+esc(WG.fmtTime(v.ts))+'</time>'
   +'<span class="jr-tagw"><span class="tag jr-tag is-'+v.tone+'">'+esc(v.tag)+'</span></span>'
   +'<div class="jr-main"><p class="jr-title">'+esc(v.title)+'</p>'+(v.detail?'<p class="jr-detail">'+esc(v.detail)+'</p>':'')+'</div>'
@@ -1002,7 +1007,7 @@ WG.delegate('jr-export',()=>{
 let _prevRoute=null;
 WG.on('route',name=>{_prevRoute=name});
 function splitHTML(s){
- const m=mode(s),u=isUnknownMode(m),on=!!s.rud,off=!!WG.state.offline;
+ const m=mode(s),u=isUnknownMode(m),on=!!s.rud,off=WG.unknown();
  const state=u?['u',tr('State unknown: no fresh data.')]:on?['ok',tr('On: RU subnets leave straight from the entry with a Russian IP.')]:['off',tr('Off: all traffic goes through the NL and US exits.')];
  return pageHead(tr('Split tunnel'),tr('RU sites directly'),'<button type="button" class="btn btn-primary" data-act="sp-open" data-live'+(off?' disabled':'')+'>'+icon('split',16)+esc(tr('Configure split'))+'</button>')
   +'<section class="sp-state is-'+state[0]+'"><span class="dot is-'+(state[0]==='ok'?'on':state[0]==='u'?'u':'off')+'" aria-hidden="true"></span><p>'+esc(state[1])+'</p></section>'
@@ -1016,7 +1021,7 @@ function renderSplit(el,ctx){
  ctx.on('status',upd);
  upd();
  /* opened from the navigation: go straight to the settings window (not on a cold load of #/split) */
- if(_prevRoute&&_prevRoute!=='split'&&!WG.state.offline)setTimeout(()=>{if(el.isConnected!==false&&WG.router.current()==='split')WG.actions.splitSettings()},0);
+ if(_prevRoute&&_prevRoute!=='split'&&!WG.unknown())setTimeout(()=>{if(el.isConnected!==false&&WG.router.current()==='split'&&!WG.unknown())WG.actions.splitSettings()},0);
 }
 WG.delegate('sp-open',()=>WG.actions.splitSettings());
 

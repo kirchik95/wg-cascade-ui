@@ -11,7 +11,8 @@ const {tr,esc,icon}=WG;
 WG.addStrings('ru',{
  'Open exit settings':'Открыть настройки выходов','Open split tunnel':'Открыть сплит-туннель',
  'State':'Состояние','Cascade':'Каскад','Now':'Сейчас','Exit':'Выход','Working':'Работает','Failure':'Сбой','Outage':'Авария',
- 'Unknown':'Неизвестно','Loading…':'Загрузка…','split on':'сплит вкл','split off':'сплит выкл',
+ 'Unknown':'Неизвестно','Checking':'Проверяем','Loading…':'Загрузка…','split on':'сплит вкл','split off':'сплит выкл',
+ '{exit} is available':'{exit} доступен','{exit}: check {n}/3':'{exit}: проверка {n}/3','{exit}: status unknown':'{exit}: состояние неизвестно',
  'last data {t}':'последние данные {t}','both exits down · {t}':'оба выхода недоступны · {t}',
  '{exit} not responding · {n} without exit':'{exit} не отвечает · без выхода: {n}',
  'OK':'ОК','NO ANSWER':'НЕТ ОТВЕТА','CHECK {n}/3':'ПРОВЕРКА {n}/3','check {t}':'проверка {t}','no data':'нет данных',
@@ -35,6 +36,7 @@ WG.addStrings('ru',{
 });
 
 const ONLINE_S=180;              /* server ONLINE_S: a handshake younger than this is «online» */
+const HEALTH_MAX_AGE=60;         /* exit_policy.HEALTH_MAX_AGE */
 const ROW_LIMIT=10;               /* rows before «ещё N» while no search/filter is active */
 const FILTERS=['all','nl','us','offline'];
 let _filter=(function(){let v=null;try{v=localStorage.getItem('wgui-clients-filter')}catch(e){}return FILTERS.indexOf(v)>=0?v:'all'})();
@@ -45,7 +47,8 @@ function mode(s){
  if(!s.loaded)return s.offline?'offline':'loading';
  if(s.offline)return'offline';
  if(s.stale)return'stale';
- if(s.tunnel&&s.tunnel.state==='down')return'crash';
+ /* tunnel.state describes affected clients; one failed exit can put every client offline. */
+ if(WG.EXITS.every(k=>exitInfo(s,k).health==='down'))return'crash';
  return'live';
 }
 const isUnknown=m=>m==='offline'||m==='stale'||m==='loading';
@@ -54,7 +57,7 @@ function exitInfo(s,key){
  const p=(s.exit_policy&&s.exit_policy.exits&&s.exit_policy.exits[key])||null;
  const used=p?+p.used||0:0,quota=p?+p.quota||0:0;
  let health='unknown';
- if(t&&!isUnknown(mode(s))&&+t.checked_age>=0){
+ if(t&&s.loaded&&!s.offline&&!s.stale&&+t.checked_age>=0&&+t.checked_age<=HEALTH_MAX_AGE){
   if(t.ok)health='ok';
   else if(t.health==='down')health='down';
   else health='warn';
@@ -62,11 +65,17 @@ function exitInfo(s,key){
  return{key,t,p,used,quota,ratio:quota>0?used/quota:0,clients:p?+p.clients||0:0,health,
   exhausted:!!(p&&(p.exhausted||(quota>0&&used>=quota)))};
 }
+function exitStatusText(x){
+ const exit=exitLabel(x.key);
+ if(x.health==='ok')return tr('{exit} is available',{exit});
+ if(x.health==='down')return tr('{exit} is down',{exit});
+ if(x.health==='warn')return tr('{exit}: check {n}/3',{exit,n:Math.min(3,+(x.t&&x.t.fails)||1)});
+ return tr('{exit}: status unknown',{exit});
+}
 function now(s){return +s.now||Math.round(Date.now()/1000)}
 function peerExitDown(s,p,m){
  if(isUnknown(m)||!p.enabled)return false;
- const e=s.tunnel&&s.tunnel.exits&&s.tunnel.exits[p.exit==='us'?'us':'nl'];
- return !!(e&&!e.ok);
+ return exitInfo(s,p.exit==='us'?'us':'nl').health==='down';
 }
 /* Was the client online when the data was taken? In a stale snapshot the server has
    already aged handshakes, so «online» is false; the age at snapshot time tells. */
@@ -141,9 +150,13 @@ function gaugesHTML(s,m){
  else if(m==='crash'){
   const since=Math.max(+(nl.t&&nl.t.health_since)||0,+(us.t&&us.t.health_since)||0);
   state=tr('Outage');tone='bad';sub=tr('both exits down · {t}',{t:since?WG.fmtAgo(now(s)-since,{suffix:false}):'—'});
- }else if(s.tunnel&&s.tunnel.state==='degraded'){
-  const bad=[nl,us].filter(x=>x.t&&!x.t.ok)[0]||us;
+ }else if([nl,us].some(x=>x.health==='down')){
+  const bad=[nl,us].find(x=>x.health==='down'),other=bad===nl?us:nl;
   state=tr('Failure');tone='bad';sub=tr('{exit} not responding · {n} without exit',{exit:exitLabel(bad.key),n:+(bad.t&&bad.t.affected_clients)||0});
+  sub+=' · '+exitStatusText(other);
+ }else if([nl,us].some(x=>x.health!=='ok')){
+  state=tr([nl,us].some(x=>x.health==='unknown')?'Unknown':'Checking');tone='u';
+  sub=[nl,us].map(exitStatusText).join(' · ');
  }else{
   state=tr('Working');tone='ok';
   sub='RU → NL '+nl.clients+' · US '+us.clients+' · '+tr(s.rud?'split on':'split off');
@@ -181,9 +194,10 @@ function schemeHTML(s,m){
  const main=xs[0].clients>=xs[1].clients?xs[0]:xs[1];
  const branch=x=>{
   const share=x.clients/total,w=2+Math.round(4*share);
-  const tone=x.health==='down'?' is-bad':x.ratio>=.7?' is-warn':'';
+  const tone=x.health==='down'?' is-bad':x.health==='warn'||x.ratio>=.7?' is-warn':'';
   const txt=exitLabel(x.key)+' · '+(x===main?WG.count(x.clients,'client'):x.clients)+' · '
-   +(x.health==='down'?tr('down'):tr('ok'))+(x.ratio>=.7?' · '+tr('{p}% of quota',{p:Math.floor(x.ratio*100)}):'');
+   +(x.health==='ok'?tr('ok'):x.health==='down'?tr('down'):x.health==='warn'?tr('CHECK {n}/3',{n:Math.min(3,+(x.t&&x.t.fails)||1)}):tr('Unknown'))
+   +(x.ratio>=.7?' · '+tr('{p}% of quota',{p:Math.floor(x.ratio*100)}):'');
   return'<div class="sc-br"><span class="sc-line" style="height:'+w+'px"></span><span class="sc-box'+(x===main?' is-main':'')+tone+'">'+esc(txt)+'</span></div>';
  };
  return'<span class="label sc-lab">'+esc(tr('Scheme'))+'</span>'
@@ -225,11 +239,11 @@ function visiblePeers(peers){
 /* A row is a fixed set of cells; each cell is patched only when its own content changes,
    so the «12 с назад» tick never re-creates the buttons a keyboard user is on. */
 function rowCells(s,m,p){
- const u=isUnknown(m),off=!!s.offline,nowTs=now(s),ex=expiry(p,nowTs),down=peerExitDown(s,p,m);
+ const u=isUnknown(m),off=u,nowTs=now(s),ex=expiry(p,nowTs),down=peerExitDown(s,p,m);
  const on=!u&&p.online,was=u&&(m==='offline'?p.online:wasOnline(s,p));
  const dot=!p.enabled?'is-dis':u?(was?'is-u':'is-off'):on?(down?'is-warn':'is-on'):'is-off';
  const ep=String(p.endpoint||'').replace(/:\d+$/,'').replace(/^\[|\]$/g,'');
- const expHTML=ex.kind==='soon'?'<span class="is-warn">'+esc(ex.text)+' · <button type="button" class="linkbtn" data-act="cl-extend" data-live>'+esc(tr('extend'))+'</button></span>'
+ const expHTML=ex.kind==='soon'?'<span class="is-warn">'+esc(ex.text)+' · <button type="button" class="linkbtn" data-act="cl-extend" data-live'+(off?' disabled':'')+'>'+esc(tr('extend'))+'</button></span>'
   :ex.kind==='expired'?'<span class="is-bad">'+esc(ex.text)+'</span>':esc(ex.text);
  const sub=!p.enabled?esc(tr('disabled')):(ep&&ex.kind!=='soon'&&ex.kind!=='expired'?esc(ep)+' · ':'')+expHTML;
  const rate=(p.spark&&p.spark.length)?+p.spark[p.spark.length-1]:0;
@@ -350,7 +364,7 @@ function update(s){
  let empty='';
  if(!s.loaded)empty='<p class="ct-msg">'+esc(tr('Waiting for the first data…'))+'</p>';
  else if(!peers.length)empty='<p class="ct-title">'+esc(tr('No clients yet'))+'</p><p class="ct-msg">'+esc(tr('Add the first device — the config and QR code appear right away.'))+'</p>'
-  +'<button type="button" class="btn btn-primary" data-act="add-client" data-live'+(s.offline?' disabled':'')+'>'+icon('add',16)+esc(tr('Add client'))+'</button>';
+  +'<button type="button" class="btn btn-primary" data-act="add-client" data-live'+(WG.unknown()?' disabled':'')+'>'+icon('add',16)+esc(tr('Add client'))+'</button>';
  else if(!list.length)empty='<p class="ct-title">'+esc(tr('Nobody matches'))+'</p><button type="button" class="btn btn-outline" data-act="cl-reset">'+esc(tr('Reset filters'))+'</button>';
  setHTML('e',_ui.empty,empty);_ui.empty.hidden=!empty;
  const rest=list.length-shown.length;
@@ -392,7 +406,7 @@ function clientMenu(p){
    :{icon:'power',label:tr('Turn on'),act:()=>WG.actions.toggleEnabled(pk)},
   {type:'sep'},
   {icon:'delete',label:tr('Delete client…'),danger:true,act:()=>WG.actions.deleteClient(pk)}
- ];
+ ].map(it=>it.act&&isUnknown(m)?Object.assign({},it,{disabled:true}):it);
 }
 
 /* ------------------------------------------------------------ plaques (DS-2, D-priority)
@@ -452,16 +466,20 @@ function deriveBanners(s){
  }else if(m==='live'){
   WG.EXITS.map(k=>exitInfo(s,k)).forEach(x=>{
    const aff=+(x.t&&x.t.affected_clients)||0;
-   if(!x.t||x.t.ok||!aff)return;
+   if(x.health!=='down')return;
    const since=+x.t.health_since||0,hb=pol.health_blocked;
    let extra='';
    if(pol.health_failover===false)extra=' '+tr('Automatic failover is off.');
    else if(hb)extra=' '+tr('Automatic switch did not run: {r}',{r:WG.reasonText(hb.code||hb)});
    want['down-'+x.key]={level:'crash',tag:tr('Failure {exit}',{exit:exitLabel(x.key)}),icon:'error',
     note:since?WG.fmtAgo(nowTs-since,{suffix:false}):'',
-    text:tr('{exit} does not answer since {t}: {n} enabled without an exit.',{exit:exitLabel(x.key),t:since?WG.fmtTime(since):'—',n:aff})+extra,
+    text:tr('{exit} does not answer since {t}: {n} enabled without an exit.',{exit:exitLabel(x.key),t:since?WG.fmtTime(since):'—',n:aff})
+     +' '+exitStatusText(exitInfo(s,x.key==='nl'?'us':'nl'))+'.'+extra,
     actions:[toExits]};
   });
+  const unverified=WG.EXITS.map(k=>exitInfo(s,k)).filter(x=>x.health==='warn'||x.health==='unknown');
+  if(unverified.length&&!Object.keys(want).some(k=>k.indexOf('down-')===0))want.checks={level:'info',tag:tr(unverified.some(x=>x.health==='unknown')?'Unknown':'Checking'),icon:'unknown',
+   text:unverified.map(exitStatusText).join(' · '),actions:[toExits]};
  }
  const ls=pol.last_switch;
  if(ls&&typeof ls==='object'&&!ls.revert_of&&ls.changed!==false&&+ls.ts>0&&nowTs-ls.ts<SWITCH_BANNER_S
@@ -474,7 +492,7 @@ function deriveBanners(s){
    const canRevert=healthy&&n>0&&+ls.event_id>0;
    want.failover={level:'failover',tag:tr('Failure {exit}',{exit:from}),icon:'warning',
     text:tr('{at} — {n} moved {from} → {to}. {from} failed its checks several times in a row.',{at,n:who,from,to}),
-    note:isUnknown(m)?'':healthy?tr('{exit} healthy again since {t}',{exit:from,t:since?WG.fmtTime(since):'—'}):tr('{exit} still down',{exit:from}),
+    note:isUnknown(m)?'':healthy?tr('{exit} healthy again since {t}',{exit:from,t:since?WG.fmtTime(since):'—'}):src.health==='down'?tr('{exit} still down',{exit:from}):exitStatusText(src),
     actions:[canRevert?{label:tr('Move {n} back to {exit}',{n,exit:from}),act:()=>WG.actions.revertSwitch(+ls.event_id),primary:true,live:true}:toExits],
     dismiss:'switch:'+(ls.event_id||ls.ts)};
   }else{
@@ -497,7 +515,7 @@ function deriveBanners(s){
    actions:[{label:tr('Configure'),act:()=>WG.actions.exitsSettings(),live:true}],
    dismiss:'quota:'+x.key+':'+(x.exhausted?'full':'90')+':'+new Date(nowTs*1000).toISOString().slice(0,7)};
  });
- ['offline','stale','crash','down-nl','down-us','failover','blocked','quota-nl','quota-us'].forEach(id=>{
+ ['offline','stale','crash','down-nl','down-us','checks','failover','blocked','quota-nl','quota-us'].forEach(id=>{
   if(want[id])WG.banner.set(id,want[id],true);else WG.banner.clear(id,true);
  });
  WG.banner.render();
@@ -522,5 +540,5 @@ WG.router.register('split',{title:tr('Split'),icon:'split',render:placeholder('s
 WG.router.register('usage',{title:tr('Usage'),icon:'usage',mobileTab:true,render:placeholder('usage',tr('Usage'))});
 WG.router.register('journal',{title:tr('Journal'),icon:'journal',render:placeholder('journal',tr('Journal'))});
 
-WG.dashboard={mode,exitInfo,rowHTML,renderRows,visiblePeers,gaugesHTML,schemeHTML,clientMenu,expiry,hostText};
+WG.dashboard={mode,exitInfo,exitStatusText,rowHTML,renderRows,visiblePeers,gaugesHTML,schemeHTML,clientMenu,expiry,hostText};
 })();

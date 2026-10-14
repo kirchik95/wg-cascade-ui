@@ -65,6 +65,45 @@ class TestFrontendPolling(unittest.TestCase):
         })().catch(e=>{console.error(e);process.exitCode=1;});
         """)
 
+    def test_r11_unknown_outcome_waits_for_a_successful_fresh_check(self):
+        run_node(self, r"""
+        process.exitCode=1;(async()=>{
+          await feed(snapshot());
+          await WG.ops.run({key:'change',label:'change',call:()=>Promise.resolve({kind:'unknown',message:'No answer'})});
+          let respond;
+          context.fetch=()=>new Promise(r=>{respond=r;});
+          element('ops').querySelector('[data-act="op-check"]').click();
+          runTimers(0);await flush();
+          let line=element('ops').querySelector('.op-unknown');
+          if(line.innerHTML.includes('State refreshed'))throw new Error('refresh was claimed before any response');
+          if(!line.querySelector('[data-act="op-check"]').disabled)throw new Error('duplicate check is still enabled');
+          respond(response(snapshot({stale:true,snapshot_age:120})));await flush(30);
+          line=element('ops').querySelector('.op-unknown');
+          if(line.innerHTML.includes('State refreshed'))throw new Error('stale response was called fresh');
+          context.fetch=()=>Promise.reject(new Error('offline'));
+          line.querySelector('[data-act="op-check"]').click();runTimers(0);await flush(30);
+          line=element('ops').querySelector('.op-unknown');
+          if(!WG.state.offline||line.innerHTML.includes('State refreshed'))throw new Error('failed refresh was called successful');
+          if(!line.innerHTML.includes('Could not refresh'))throw new Error('failed check needs an honest explanation');
+          context.fetch=()=>Promise.resolve(response(snapshot()));
+          line.querySelector('[data-act="op-check"]').click();runTimers(0);await flush(30);
+          line=element('ops').querySelector('.op-unknown');
+          if(!line||!line.innerHTML.includes('State refreshed'))throw new Error('fresh check must be acknowledged while outcome stays unknown');
+          process.exitCode=0;console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_ops_done_label_uses_the_actual_outcome(self):
+        run_node(self, r"""
+        process.exitCode=1;(async()=>{
+          await WG.ops.run({key:'moved',label:'Moving 4',done:o=>'Moved '+o.data.changed,
+            call:()=>Promise.resolve({kind:'ok',data:{changed:1}})});
+          const text=visibleText(element('ops').querySelector('.op-ok').innerHTML);
+          if(!text.includes('Moved 1')||text.includes('o.data'))throw new Error('result label did not use server count: '+text);
+          process.exitCode=0;console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
     def test_hung_status_fetch_times_out_and_next_tick_requests_again(self):
         run_node(self, r"""
         process.exitCode=1;(async()=>{

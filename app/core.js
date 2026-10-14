@@ -18,7 +18,7 @@
  *  Data     WG.state      last /api/status payload + {loaded, fetchedAt (ms), dataAt (unix s),
  *                         offline, stale, timedOut, fails, retryAt (ms)}
  *           WG.on('status', fn) → unsubscribe; fn(WG.state) after every poll, failed ones too.
- *           Other events: 'route' (name). WG.refresh() polls now and resets the backoff.
+ *           Other events: 'route' (name), 'ops' (running keys changed). WG.refresh() polls now.
  *           WG.unknown()  true while data must not be trusted (offline or stale snapshot)
  *           WG.api(path, {timeout}?) → Promise<json>; 12 s deadline; 401 → /login
  *           WG.admin(body) → Promise<{kind, data, message, steps?}>,
@@ -31,6 +31,7 @@
  *           that started them is closed; 'unknown' offers «Проверить состояние» (check() + a
  *           refresh), 'busy' — «Повторить», 'partial' lists outcome.steps [{state, text}].
  *           undo: fn → «Отменить» for 10 s after 'ok'; open: {label, act} extra button.
+ *           done may be a string or fn(outcome) for a result based on the server answer.
  *           Every finished op except 'busy' refreshes /api/status in the background.
  *           WG.ops.running(key) → bool
  *  Windows  WG.modal.open({title, eyebrow, body, footer, size:'sm'|'md'|'lg', onClose}) → handle
@@ -103,7 +104,11 @@ const STR={ru:{
  'Exit switching is blocked.':'Переключение выходов заблокировано.'
 }};
 function addStrings(lang,dict){STR[lang]=Object.assign(STR[lang]||{},dict||{})}
-addStrings('ru',{'Fresh status is unavailable — nothing was sent.':'Свежих данных нет — запрос не отправлен.'});
+addStrings('ru',{
+ 'Fresh status is unavailable — nothing was sent.':'Свежих данных нет — запрос не отправлен.',
+ 'Checking state…':'Проверяем состояние…',
+ 'Could not refresh state — the result is still unknown.':'Не удалось обновить состояние — результат по-прежнему неизвестен.'
+});
 function tr(key,vars){
  const table=STR[LANG];
  let s=table&&Object.prototype.hasOwnProperty.call(table,key)?table[key]:key;
@@ -714,13 +719,16 @@ function addResult(o,key,out){
  renderOps();
 }
 function dropResult(r){
+ if(r.stopCheck)r.stopCheck();
  const i=RESULTS.indexOf(r);if(i>=0)RESULTS.splice(i,1);
  if(r.el)r.el.remove();
 }
 function opMessage(r){
  const o=r.opts,out=r.out,label=String(o.label||'');
- if(r.kind==='ok')return String(o.done||label);
- if(r.kind==='warn')return String(o.done||label)+(out.message?' — '+out.message:'');
+ if(r.kind==='ok'||r.kind==='warn'){
+  const done=typeof o.done==='function'?o.done(out):o.done;
+  return String(done||label)+(r.kind==='warn'&&out.message?' — '+out.message:'');
+ }
  if(r.kind==='partial')return(label?label+' — ':'')+tr('applied only in part:');
  return(label?label+': ':'')+(out.message||'');
 }
@@ -734,14 +742,15 @@ function resultHTML(r){
   if(typeof r.opts.undo==='function')acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-undo" data-live>'+esc(tr('Undo'))+'</button>';
   acts+='<span class="op-note" data-op-ttl>'+esc(tr('disappears in {n} s',{n:Math.max(0,Math.ceil((r.until-Date.now())/1000))}))+'</span>';
  }else{
-  if(r.kind==='unknown')acts+='<button type="button" class="btn btn-sm btn-primary" data-act="op-check">'+esc(tr('Check state'))+'</button>';
+  if(r.kind==='unknown')acts+='<button type="button" class="btn btn-sm btn-primary" data-act="op-check"'+(r.checking?' disabled':'')+'>'+esc(tr(r.checking?'Checking state…':'Check state'))+'</button>';
   if(r.kind==='busy')acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-retry" data-live>'+esc(tr('Retry'))+'</button>';
   if(r.opts.open&&r.opts.open.label)acts+='<button type="button" class="btn btn-sm btn-outline" data-act="op-open">'+esc(r.opts.open.label)+'</button>';
   acts+='<button type="button" class="btn btn-sm btn-text" data-act="op-dismiss">'+esc(tr('Got it'))+'</button>';
  }
  return'<span class="op-ic" aria-hidden="true">'+OP_IC[r.kind]+'</span><span class="op-tag">'+esc(tr(OP_TAG[r.kind]))+'</span>'
   +'<div class="op-msg">'+esc(opMessage(r))+steps
-  +(r.checked?'<div class="op-sub">'+esc(tr('State refreshed — check whether the change is there.'))+'</div>':'')+'</div>'
+  +(r.checked?'<div class="op-sub">'+esc(tr('State refreshed — check whether the change is there.'))+'</div>':'')
+  +(r.checkError?'<div class="op-sub">'+esc(tr('Could not refresh state — the result is still unknown.'))+'</div>':'')+'</div>'
   +'<div class="op-acts">'+acts+'</div>';
 }
 function runHTML(){
@@ -792,10 +801,16 @@ delegate('op-retry',el=>{const r=resultOf(el);if(r){dropResult(r);opsRun(r.opts)
 delegate('op-open',el=>{const r=resultOf(el);if(r&&typeof r.opts.open.act==='function')r.opts.open.act()});
 delegate('op-undo',el=>{const r=resultOf(el);if(r){dropResult(r);r.opts.undo()}});
 delegate('op-check',el=>{
- const r=resultOf(el);if(!r)return;
+ const r=resultOf(el);if(!r||r.checking)return;
+ r.checking=true;r.checked=false;r.checkError=false;
+ r.stopCheck=on('status',s=>{
+  r.stopCheck();r.stopCheck=null;r.checking=false;
+  r.checked=!!(s.loaded&&!s.offline&&!s.stale);r.checkError=!r.checked;
+  r.dirty=true;renderOps();
+ });
  if(typeof r.opts.check==='function'){try{r.opts.check()}catch(e){}}
  kickTick();
- r.checked=true;r.dirty=true;renderOps();
+ r.dirty=true;renderOps();
 });
 
 /* ------------------------------------------------------------ theme */
