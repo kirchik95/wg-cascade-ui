@@ -223,8 +223,8 @@ async function toggleExit(pub,cur){
  if(el){el.disabled=true;el.classList.add('busy');}
  const r=await admin({op:'setexit',pubkey:pub,exit:next});
  if(el){el.disabled=false;el.classList.remove('busy');}
- if(!r||!r.ok){toast((r&&r.error)||'failed');return;}
- toast((r.name||'')+' → '+next.toUpperCase());
+ if(!r||!r.ok){toast(typeof adminError==='function'?adminError(r):((r&&r.error)||'failed'));return;}
+ toast((r.name||'')+' → '+next.toUpperCase()+(r.warning&&typeof targetText==='function'?' · '+targetText(r.warning):''));
  tick();
 }
 function setExitFilter(f){

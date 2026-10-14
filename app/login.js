@@ -11,9 +11,31 @@
   document.querySelectorAll('[data-tip]').forEach(function(e){var k=e.getAttribute('data-tip');if(R[k])e.setAttribute('data-tip',R[k]);});
  }
 })();
-(function(){var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
- if(location.search.indexOf('e=2')>=0){e.textContent=ru?'Слишком много попыток — подождите несколько минут':'Too many attempts — try again in a few minutes';e.style.display='block';e.setAttribute('role','alert')}
- else if(location.search.indexOf('e=1')>=0){e.style.display='block';e.setAttribute('role','alert')}
+function plural(n,one,few,many){var a=Math.abs(n)%100,b=a%10;
+ if(a>10&&a<20)return many;if(b===1)return one;if(b>=2&&b<=4)return few;return many}
+/* ?e=1&left=N (wrong password) / ?e=2&retry=S (throttled): the server counts both. */
+function loginMessage(search,ru){
+ var q={};(search||'').replace(/^\?/,'').split('&').forEach(function(kv){var p=kv.split('=');if(p[0])q[p[0]]=p[1]||''});
+ var num=function(v){return /^\d+$/.test(v||'')?parseInt(v,10):null};
+ if(q.e==='2'){
+  var s=num(q.retry);
+  if(s===null)return ru?'Слишком много попыток — подождите несколько минут':'Too many attempts — try again in a few minutes';
+  var m=Math.max(1,Math.ceil(s/60));
+  return ru?'Слишком много попыток. Повторите через '+m+' '+plural(m,'минуту','минуты','минут')
+           :'Too many attempts. Try again in '+m+' minute'+(m===1?'':'s');
+ }
+ if(q.e==='1'){
+  var base=ru?'Неверный логин или пароль':'Invalid username or password',n=num(q.left);
+  if(n===null)return base;
+  return base+(ru?' · осталось '+n+' '+plural(n,'попытка','попытки','попыток')
+                 :' · '+n+' attempt'+(n===1?'':'s')+' left');
+ }
+ return '';
+}
+if(typeof module!=='undefined')module.exports={loginMessage:loginMessage,plural:plural};
+(function(){if(typeof document==='undefined')return;var e=document.getElementById('err'),ru;try{ru=(localStorage.getItem('wgui-lang')||'ru')==='ru'}catch(x){ru=true}
+ var m=loginMessage(location.search,ru);
+ if(m){e.textContent=m;e.style.display='block';e.setAttribute('role','alert')}
 })();
 (function(){
  var btn=document.getElementById('pwtoggle'),inp=document.getElementById('pw');

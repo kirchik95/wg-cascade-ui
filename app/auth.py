@@ -1,5 +1,5 @@
 """Auth, sessions, CSRF, login throttle, body-size checks for wg-ui."""
-import base64, hashlib, hmac, os, threading, time
+import base64, hashlib, hmac, math, os, threading, time
 
 USER        = os.environ.get("WGUI_USER", "admin")
 SALT        = os.environ.get("WGUI_SALT", "")
@@ -135,6 +135,23 @@ def login_blocked(ip):
         else:
             _fails.pop(ip, None)
         return len(ts) >= LOGIN_MAX
+
+
+def login_state(ip, now=None):
+    """(attempts left, seconds until unblocked) for `ip` in the sliding window.
+
+    The block lifts when the failures inside the window drop below LOGIN_MAX,
+    i.e. when the LOGIN_MAX-th newest failure leaves it — not a fixed delay from
+    the last attempt. Blocked attempts are not recorded, so they do not extend it.
+    """
+    now = time.time() if now is None else now
+    with _fails_lock:
+        ts = sorted(t for t in _fails.get(ip, []) if now - t < LOGIN_WIN)
+    left = max(0, LOGIN_MAX - len(ts))
+    retry = 0
+    if len(ts) >= LOGIN_MAX:
+        retry = max(1, int(math.ceil(ts[len(ts) - LOGIN_MAX] + LOGIN_WIN - now)))
+    return left, retry
 
 
 def login_failed(ip):

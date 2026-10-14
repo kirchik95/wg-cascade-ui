@@ -5,7 +5,7 @@ Read: per-client status, cascade (wg-do) tunnel health, live throughput chart.
 Write (via narrow root helper /opt/wg-ui/wg-admin.py): add / rename / enable /
 disable / delete clients, fetch config+QR. CSRF-protected.
 """
-import os, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
+import os, re, ssl, json, time, hmac, sqlite3, subprocess, threading, sys, ipaddress, contextlib, socket
 import http.client
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +20,7 @@ import auth
 from auth import (
     BODY_ADMIN_MAX, BODY_LOGIN_MAX, LOGIN_MAX, SESSION_TTL,
     bump_session_gen, check_body_length, check_token, creds_ok, csrf_for,
-    login_blocked, login_failed, login_ok, make_token,
+    login_blocked, login_failed, login_ok, login_state, make_token,
 )
 
 # Re-export auth mutables so existing tests can patch wgui.USER / SECRET / …
@@ -284,6 +284,41 @@ def policy_inputs(tunnel_data=None, peers=None):
             for key in exit_policy.EXITS
         }
     return policy, usage, assignment_counts(peers), health, warning
+
+
+_TARGET_MESSAGES = {
+    "target_unhealthy": "The target exit is down: it failed several health checks in a row.",
+    "target_exhausted": "The target exit monthly quota is exhausted.",
+}
+
+def assign_target_check(target, now=None):
+    """Server-side guard for putting clients on `target` (add / setexit).
+
+    Returns (block, warning). block = {"code", "error"} only for a confirmed-down
+    (debounced health "down") or quota-exhausted target. Missing or old health
+    evidence, or a single failed probe without a confirmed down, is a warning —
+    right after a restart health is unknown and adding clients must keep working.
+    """
+    policy, _ = load_exit_policy()
+    stamp = int(time.time()) if now is None else int(now)
+    with _lock:
+        u = _exit_month_usage.get(target) or {}
+        usage = {target: int(u.get("rx", 0)) + int(u.get("tx", 0))}
+        eg = dict(_egress.get(target) or {})
+        state = (_health.get(target) or {}).get("state")
+    age = stamp - int(eg["at"]) if eg.get("at") else -1
+    found = exit_policy.target_block(target, policy, usage,
+                                     {target: {"ok": bool(eg.get("ok")), "checked_age": age}})
+    code = (found or {}).get("code")
+    if code == "target_exhausted":
+        return {"code": code, "error": _TARGET_MESSAGES[code]}, None
+    if state == "down":
+        return {"code": "target_unhealthy", "error": _TARGET_MESSAGES["target_unhealthy"]}, None
+    if code == "target_stale":
+        return None, "target_stale"
+    if code == "target_unhealthy":
+        return None, "target_unverified"
+    return None, None
 
 
 def exit_policy_status(tunnel_data=None, peers=None):
@@ -838,6 +873,10 @@ def health_tick():
     res = _probe_egress()
     now = int(time.time())
     _record_probe(res, now)
+    try:
+        record_probe_history(res, now)
+    except sqlite3.Error as exc:
+        log_event("health_history", ok=False, error=str(exc)[:200])
     with _lock:
         _health_runtime["loop_at"] = now
     return evaluate_health_failover()
@@ -900,6 +939,8 @@ def _exit_status(key, iface, expect_ip, peer):
         "ok": ok,
         "health": hl.get("state", "unknown"),
         "health_since": hl.get("since", 0),
+        "fails": int(hl.get("fails", 0)),    # consecutive failed probes (debounce progress)
+        "oks": int(hl.get("oks", 0)),        # consecutive passed probes
         "checked_age": age,
     }
 
@@ -1084,6 +1125,8 @@ def db_init():
         # Month/daily aggregates filter on day across all clients; the (pubkey, day)
         # PK cannot serve that, so without this index they scan the whole history.
         c.execute("CREATE INDEX IF NOT EXISTS ix_usage_day ON usage(day)")
+        c.execute("CREATE TABLE IF NOT EXISTS health_hourly(exit TEXT, hour_ts INTEGER, "
+                  "ok INTEGER DEFAULT 0, fail INTEGER DEFAULT 0, PRIMARY KEY(exit, hour_ts))")
         c.commit()
         c.execute("PRAGMA optimize")
         c.close()
@@ -1128,6 +1171,38 @@ def log_connections(eps):
         return
     for pub in event_pubs:
         _conn_prev[pub] = nxt[pub]
+
+HEALTH_HISTORY_DAYS = 7
+
+def record_probe_history(res, now):
+    """Fold one probe round into hourly per-exit ok/fail counters (one upsert per exit)."""
+    hour = int(now) - int(now) % 3600
+    with _db(write=True) as c:
+        for key in exit_policy.EXITS:
+            if key not in res:
+                continue
+            ok_ = bool(res[key][0])
+            c.execute("INSERT INTO health_hourly(exit,hour_ts,ok,fail) VALUES(?,?,?,?) "
+                      "ON CONFLICT(exit,hour_ts) DO UPDATE SET ok=ok+?,fail=fail+?",
+                      (key, hour, int(ok_), int(not ok_), int(ok_), int(not ok_)))
+
+def health_history(hours=24, now=None):
+    """{exit: [{ts, ok, fail}] * hours}, oldest first; the last bucket is the current
+    hour. Hours without probes stay ok=0/fail=0 so gaps are not painted as healthy.
+    Raises sqlite3.Error (callers answer 503)."""
+    stamp = int(time.time() if now is None else now)
+    last = stamp - stamp % 3600
+    first = last - (hours - 1) * 3600
+    out = {key: [{"ts": first + i * 3600, "ok": 0, "fail": 0} for i in range(hours)]
+           for key in exit_policy.EXITS}
+    with _db() as c:
+        rows = c.execute("SELECT exit, hour_ts, ok, fail FROM health_hourly "
+                         "WHERE hour_ts>=? AND hour_ts<=?", (first, last)).fetchall()
+    for r in rows:
+        if r["exit"] in out:
+            slot = out[r["exit"]][(r["hour_ts"] - first) // 3600]
+            slot["ok"], slot["fail"] = r["ok"] or 0, r["fail"] or 0
+    return out
 
 def connections_for(pub, limit=20):
     """Raises sqlite3.Error on failure — callers report 'unavailable', not 'no data'."""
@@ -1220,8 +1295,8 @@ def _month_bounds(now=None, month=None):
     return start, "%04d-%02d-01" % (year, number)
 
 
-def exit_usage_month(now=None):
-    month, next_month = _month_bounds(now=now)
+def exit_usage_month(now=None, month=None):
+    month, next_month = _month_bounds(now=now, month=month)
     out = {key: {"rx": 0, "tx": 0} for key in exit_policy.EXITS}
     with _db() as c:
         rows = c.execute("SELECT exit,SUM(rx) rx,SUM(tx) tx FROM exit_usage "
@@ -1284,8 +1359,8 @@ def seed_exit_usage_from_registry(month=None):
 
 # The read helpers below raise sqlite3.Error instead of returning empty data:
 # "the DB failed" must not look like "no traffic" (or zero the cached month totals).
-def usage_month(now=None):
-    month, next_month = _month_bounds(now=now)
+def usage_month(now=None, month=None):
+    month, next_month = _month_bounds(now=now, month=month)
     with _db() as c:
         rows = c.execute("SELECT pubkey, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? AND day<? "
                          "GROUP BY pubkey", (month, next_month)).fetchall()
@@ -1301,6 +1376,54 @@ def usage_daily(days=30):
         rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? GROUP BY day "
                          "ORDER BY day", (cutoff["day"],)).fetchall()
     return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows]
+
+def usage_daily_month(month):
+    """Per-day client totals inside one calendar month ("YYYY-MM")."""
+    start, end = _month_bounds(month=month)
+    with _db() as c:
+        rows = c.execute("SELECT day, SUM(rx) rx, SUM(tx) tx FROM usage WHERE day>=? AND day<? "
+                         "GROUP BY day ORDER BY day", (start, end)).fetchall()
+    return [{"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0} for r in rows]
+
+def exit_usage_daily(now=None, month=None):
+    """{exit: [{day, rx, tx}, ...]} for one calendar month, from the exit peer counters."""
+    start, end = _month_bounds(now=now, month=month)
+    out = {key: [] for key in exit_policy.EXITS}
+    with _db() as c:
+        rows = c.execute("SELECT exit, day, rx, tx FROM exit_usage WHERE day>=? AND day<? "
+                         "ORDER BY day", (start, end)).fetchall()
+    for r in rows:
+        if r["exit"] in out:
+            out[r["exit"]].append({"day": r["day"], "rx": r["rx"] or 0, "tx": r["tx"] or 0})
+    return out
+
+MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+
+def parse_month(value):
+    """"YYYY-MM" -> the same string; anything else -> ValueError (the API answers 400)."""
+    if not isinstance(value, str) or not MONTH_RE.match(value):
+        raise ValueError("month must be YYYY-MM")
+    return value
+
+def history_payload(month=None, now=None):
+    """/api/history body. Without `month` the client series keep their rolling
+    30-day window (the current UI chart); the month totals and the exit series
+    cover the current calendar month. Raises sqlite3.Error (callers answer 503)."""
+    reg = load_registry()
+    names = {c["pubkey"]: c["name"] for c in reg}
+    if month is None:
+        label = time.strftime("%Y-%m", time.localtime(time.time() if now is None else now))
+        mu = usage_month(now=now)
+        daily = usage_daily(30)
+    else:
+        label = month
+        mu = usage_month(month=month)
+        daily = usage_daily_month(month)
+    clients = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
+                      for k, v in mu.items()], key=lambda x: -(x["rx"] + x["tx"]))
+    return {"month": label, "daily": daily, "clients": clients,
+            "exits_daily": exit_usage_daily(now=now, month=month),
+            "exits_month": exit_usage_month(now=now, month=month)}
 
 def usage_daily_for(pub, days=30):
     with _db() as c:
@@ -1319,6 +1442,8 @@ def db_maintenance(registry=None, now=None):
     with _db(write=True) as c:
         c.execute("DELETE FROM usage WHERE day<?", (cutoff,))
         c.execute("DELETE FROM exit_usage WHERE day<?", (cutoff,))
+        c.execute("DELETE FROM health_hourly WHERE hour_ts<?",
+                  (int(stamp) - HEALTH_HISTORY_DAYS * 86400,))
         if keep:
             marks = ",".join("?" * len(keep))
             c.execute("DELETE FROM counters WHERE pubkey NOT IN (%s)" % marks, keep)
@@ -1498,20 +1623,25 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json(500, {"error": str(e)})
             if path.startswith("/api/history"):
-                pub = parse_qs(urlparse(self.path).query).get("pub", [""])[0]
+                qs = parse_qs(urlparse(self.path).query)
+                pub = qs.get("pub", [""])[0]
+                month = None
+                if "month" in qs:
+                    try:
+                        month = parse_month(qs["month"][0])
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
                 try:
                     if pub:   # per-client daily series (config modal chart)
                         return self._json(200, {"daily": usage_daily_for(pub, 30)})
-                    reg = load_registry()
-                    names = {c["pubkey"]: c["name"] for c in reg}
-                    mu = usage_month()
-                    daily = usage_daily(30)
+                    return self._json(200, history_payload(month=month))
                 except sqlite3.Error as e:
                     return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
-                cl = sorted([{"name": names.get(k, k[:8]), "rx": v["rx"], "tx": v["tx"]}
-                             for k, v in mu.items()], key=lambda x: -(x["rx"] + x["tx"]))
-                return self._json(200, {"month": time.strftime("%Y-%m"),
-                                        "daily": daily, "clients": cl})
+            if path.startswith("/api/health-history"):
+                try:
+                    return self._json(200, {"probe_s": PROBE_S, "exits": health_history(24)})
+                except sqlite3.Error as e:
+                    return self._json(503, {"error": "history unavailable", "detail": str(e)[:120]})
             if path.startswith("/api/audit"):
                 return self._json(200, {"events": audit_tail(60)})
             if path.startswith("/api/connections"):
@@ -1535,7 +1665,8 @@ class H(BaseHTTPRequestHandler):
             ip = self.client_address[0]
             if login_blocked(ip):
                 log_event("login", ok=False, reason="throttled", ip=ip)
-                return self._send(303, b"", None, {"Location": "/login?e=2"})
+                return self._send(303, b"", None,
+                                  {"Location": "/login?e=2&retry=%d" % login_state(ip)[1]})
             try:
                 form = parse_qs(self._body(BODY_LOGIN_MAX).decode("utf-8", "replace"))
             except ValueError:
@@ -1556,7 +1687,9 @@ class H(BaseHTTPRequestHandler):
             login_failed(ip)
             log_event("login", ok=False, reason="bad_creds", ip=ip)
             time.sleep(1.0)
-            return self._send(303, b"", None, {"Location": "/login?e=1"})
+            left, retry = login_state(ip)
+            dest = ("/login?e=2&retry=%d" % retry) if retry else ("/login?e=1&left=%d" % left)
+            return self._send(303, b"", None, {"Location": dest})
         if path == "/logout-all":
             user = self._user()
             if not user:
@@ -1588,6 +1721,7 @@ class H(BaseHTTPRequestHandler):
             op = b.get("op")
             pub = str(b.get("pubkey", ""))
             name = str(b.get("name", ""))
+            target_warning = None
             if op == "add":
                 try: exp = max(0, int(b.get("expires") or 0))
                 except Exception: exp = 0
@@ -1596,6 +1730,11 @@ class H(BaseHTTPRequestHandler):
                     exit_ = normalize_exit(exit_)
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
+                blocked, target_warning = assign_target_check(exit_)
+                if blocked:
+                    log_event("admin", op=op, ok=False, user=user, ip=self.client_address[0],
+                              reason=blocked["code"])
+                    return self._json(409, dict(blocked, ok=False, target=exit_))
                 argv = ["add", name, str(exp), exit_]
             elif op == "setexpiry":
                 try: exp = max(0, int(b.get("expires") or 0))
@@ -1607,6 +1746,11 @@ class H(BaseHTTPRequestHandler):
                     exit_ = normalize_exit(exit_)
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
+                blocked, target_warning = assign_target_check(exit_)
+                if blocked:
+                    log_event("admin", op=op, ok=False, user=user, ip=self.client_address[0],
+                              reason=blocked["code"])
+                    return self._json(409, dict(blocked, ok=False, target=exit_))
                 argv = ["setexit", pub, exit_]
             elif op == "setexitall":
                 raw_target = b.get("exit")
@@ -1684,6 +1828,8 @@ class H(BaseHTTPRequestHandler):
                 res = save_exit_policy(argv)
             else:
                 res = call_admin(argv)
+            if target_warning and res.get("ok"):
+                res["warning"] = target_warning
             log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                       ip=self.client_address[0], name=name or None)
             return self._json(200 if res.get("ok") else 400, res)
