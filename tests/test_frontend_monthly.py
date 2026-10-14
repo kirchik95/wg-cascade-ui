@@ -355,6 +355,7 @@ async function feed(snap){
   await flush();
 }
 function bannerText(){return visibleText(element('banner').innerHTML);}
+function rowsHTML(body){return body.children.map(r=>r.children.map(c=>c.innerHTML).join('')).join('');}
 """
 
 
@@ -447,7 +448,7 @@ class TestFrontendDashboard(unittest.TestCase):
           s.tunnel.state='unknown';
           await feed(s);
           const view=element('view');
-          const gauges=view.querySelector('.gauges').innerHTML,rows=view.querySelector('.ct-body').children.map(r=>r.innerHTML).join('');
+          const gauges=view.querySelector('.gauges').innerHTML,rows=rowsHTML(view.querySelector('.ct-body'));
           if(!visibleText(gauges).includes('Unknown'))throw new Error('stale must read Unknown');
           for(const bad of ['is-ok','is-bad','is-on"','dot is-warn'])
             if(gauges.includes(bad)||rows.includes(bad))throw new Error('stale data painted '+bad);
@@ -471,7 +472,7 @@ class TestFrontendDashboard(unittest.TestCase):
           await feed(s);
           const view=element('view');
           if(!visibleText(view.querySelector('.gauges').innerHTML).includes('Outage'))throw new Error('cascade must read Outage');
-          const row=view.querySelector('.ct-body').children[0].innerHTML;
+          const row=rowsHTML({children:[view.querySelector('.ct-body').children[0]]});
           if(!visibleText(row).includes('entry ok · no exit')||!row.includes('dot is-warn')||!row.includes('NL ×'))throw new Error('outage row wrong: '+visibleText(row));
           const html=element('banner').innerHTML;
           if(!/bn bn-crash/.test(html.slice(0,60)))throw new Error('outage plaque must be first: '+html.slice(0,120));
@@ -586,6 +587,10 @@ class TestFrontendDashboard(unittest.TestCase):
           rows[2].querySelector('[data-act="cl-enable"]').click();
           element('addbtn').click();
           if(seen.join()!=='qr:pk-a,on:pk-c,add')throw new Error('hooks: '+seen);
+          const qrBefore=rows[0].querySelector('[data-act="cl-qr"]'),later=snapshot();later.peers[0].age=19;
+          await feed(later);
+          if(element('view').querySelector('.ct-body').children[0].querySelector('[data-act="cl-qr"]')!==qrBefore||!qrBefore.isConnected)
+            throw new Error('a poll that only ages the handshake must keep the row buttons (keyboard focus)');
           timers.clear();
           context.fetch=()=>Promise.reject(new Error('offline'));
           await WG._poll.tick();await flush();
@@ -594,7 +599,7 @@ class TestFrontendDashboard(unittest.TestCase):
           if(!qr.disabled)throw new Error('row actions must be off without a connection');
           if(!bannerText().includes('No connection')||!bannerText().includes('Retry now'))throw new Error('offline plaque: '+bannerText());
           if(element('banner').querySelector('[data-act="banner-act"]').disabled)throw new Error('«Retry now» must work offline');
-          const rowsText=visibleText(element('view').querySelector('.ct-body').children.map(r=>r.innerHTML).join(''));
+          const rowsText=visibleText(rowsHTML(element('view').querySelector('.ct-body')));
           if(!rowsText.includes('kirill-iphone'))throw new Error('offline keeps the last data');
           console.log('__OK__');
         })().catch(e=>{console.error(e);process.exitCode=1;});

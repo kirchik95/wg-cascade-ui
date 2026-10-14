@@ -294,10 +294,12 @@ class TestFrontendPolling(unittest.TestCase):
         const origAll=root.querySelectorAll.bind(root),orig=root.querySelector.bind(root);
         root.querySelectorAll=sel=>{qsa++;return origAll(sel);};
         root.querySelector=sel=>{qs++;return orig(sel);};
-        root.children.forEach(c=>{c._w=c.innerHTMLWrites;});
+        const cellWrites=()=>root.children.map(r=>r.children.reduce((n,c)=>n+c.innerHTMLWrites,r.innerHTMLWrites));
+        const before=cellWrites();
         WG.dashboard.renderRows(root,s,'live',peers);           // pk100 is new and must land at index 98
         if(qsa+qs>4)throw new Error('root queried '+(qsa+qs)+' times for 250 rows');
-        root.children.forEach(c=>{if(c._w!==undefined&&c.innerHTMLWrites!==c._w)writes++;});
+        const after=cellWrites(),order0=root.children.map(c=>c.getAttribute('data-pk'));
+        order0.forEach((pk,i)=>{if(pk!=='pk100'&&after[i]!==before[i-(i>98?1:0)])writes++;});
         if(writes)throw new Error(writes+' unchanged rows were rewritten');
         const order=root.children.map(c=>c.getAttribute('data-pk'));
         if(order.length!==250||order[98]!=='pk100'||order[0]!=='pk2'||order[249]!=='pk251')

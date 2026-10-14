@@ -222,7 +222,9 @@ function visiblePeers(peers){
   return [p.name,p.ip,String(p.endpoint||'').split(':')[0]].some(v=>String(v||'').toLowerCase().indexOf(q)>=0);
  });
 }
-function rowHTML(s,m,p){
+/* A row is a fixed set of cells; each cell is patched only when its own content changes,
+   so the «12 с назад» tick never re-creates the buttons a keyboard user is on. */
+function rowCells(s,m,p){
  const u=isUnknown(m),off=!!s.offline,nowTs=now(s),ex=expiry(p,nowTs),down=peerExitDown(s,p,m);
  const on=!u&&p.online,was=u&&(m==='offline'?p.online:wasOnline(s,p));
  const dot=!p.enabled?'is-dis':u?(was?'is-u':'is-off'):on?(down?'is-warn':'is-on'):'is-off';
@@ -253,30 +255,39 @@ function rowHTML(s,m,p){
  const act=p.enabled
   ?'<button type="button" class="ibtn c-qr" data-act="cl-qr" data-live aria-label="'+esc(tr('Config and QR')+': '+p.name)+'"'+dis+'>'+icon('qr',14)+'</button>'
   :'<button type="button" class="btn btn-primary c-on" data-act="cl-enable" data-live'+dis+'>'+esc(tr('Enable'))+'</button>';
- return'<span class="c-dot" role="cell"><span class="dot '+dot+'"></span></span>'
-  +'<span class="c-name" role="cell"><span class="c-n">'+esc(p.name)+'</span><span class="c-sub d-only">'+sub+'</span>'
-  +'<span class="c-meta m-only">'+badge+'<span class="c-meta-t">'+meta+'</span></span></span>'
-  +'<span class="c-ip d-only" role="cell">'+esc(p.ip)+'</span>'
-  +'<span class="c-exit d-only" role="cell">'+badge+'</span>'
-  +'<span class="c-now d-only" role="cell">'+spark(p.spark,90,18,u||!on?'is-u':'')+'<span class="c-rate">'+nowCell+'</span></span>'
-  +'<span class="c-month d-only" role="cell">'+esc(WG.fmtBytes(month))+'</span>'
-  +'<span class="c-conn d-only '+connTone+'" role="cell">'+esc(conn)+'</span>'
-  +'<span class="c-act" role="cell">'+act
-  +'<button type="button" class="ibtn c-more" data-act="cl-menu" data-live aria-haspopup="menu" aria-expanded="false" aria-label="'+esc(tr('Client actions')+': '+p.name)+'"'+dis+'>'+icon('more',16)+'</button></span>';
+ return[
+  ['c-dot','<span class="dot '+dot+'"></span>'],
+  ['c-name','<span class="c-n">'+esc(p.name)+'</span><span class="c-sub d-only">'+sub+'</span>'
+   +'<span class="c-meta m-only">'+badge+'<span class="c-meta-t">'+meta+'</span></span>'],
+  ['c-ip d-only',esc(p.ip)],
+  ['c-exit d-only',badge],
+  ['c-now d-only',spark(p.spark,90,18,u||!on?'is-u':'')+'<span class="c-rate">'+nowCell+'</span>'],
+  ['c-month d-only',esc(WG.fmtBytes(month))],
+  ['c-conn d-only '+connTone,esc(conn)],
+  ['c-act',act+'<button type="button" class="ibtn c-more" data-act="cl-menu" data-live aria-haspopup="menu" aria-expanded="false" aria-label="'
+   +esc(tr('Client actions')+': '+p.name)+'"'+dis+'>'+icon('more',16)+'</button>']
+ ];
 }
-const ROWS=new Map();          /* pubkey → {el, sig}: rows are patched, never rebuilt */
+function rowHTML(s,m,p){return rowCells(s,m,p).map(c=>'<span class="'+c[0]+'" role="cell">'+c[1]+'</span>').join('')}
+const ROWS=new Map();          /* pubkey → {el, cells, sig}: rows are patched, never rebuilt */
 function renderRows(container,s,m,list){
  const keep=new Set();
  list.forEach((p,i)=>{
   keep.add(p.pubkey);
-  const html=rowHTML(s,m,p),cls='crow'+(p.enabled?'':' is-dis')+(peerExitDown(s,p,m)&&p.online?' is-down':'');
+  const cells=rowCells(s,m,p),cls='crow'+(p.enabled?'':' is-dis');
   let r=ROWS.get(p.pubkey);
   if(!r){
    const el=document.createElement('div');
    el.setAttribute('role','row');el.setAttribute('data-pk',p.pubkey);
-   r={el,sig:''};ROWS.set(p.pubkey,r);
+   r={el,cells:cells.map(()=>{const c=document.createElement('span');c.setAttribute('role','cell');el.appendChild(c);return c}),sig:[],cls:''};
+   ROWS.set(p.pubkey,r);
   }
-  if(r.sig!==cls+html){r.el.className=cls;r.el.innerHTML=html;r.sig=cls+html}
+  if(r.cls!==cls){r.el.className=cls;r.cls=cls}
+  cells.forEach((c,j)=>{
+   const key=c[0]+'|'+c[1];
+   if(r.sig[j]===key)return;
+   r.sig[j]=key;r.cells[j].className=c[0];r.cells[j].innerHTML=c[1];
+  });
   const at=container.children[i];
   if(at!==r.el)container.insertBefore(r.el,at||null);
  });
