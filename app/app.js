@@ -234,7 +234,7 @@ const TICK_MS=5000,TICK_HIDDEN_MS=15000,TICK_MAX_BACKOFF_MS=60000;
 /* Browser deadline per admin op: always above the server's own budget for that op,
    so the server's answer (success, rollback or "busy") arrives before we give up. */
 const ADMIN_TIMEOUT_MS={add:210000,rename:160000,enabled:160000,delete:160000,setexit:160000,
- setexpiry:160000,setexitall:100000,setexitpolicy:100000,splitsave:195000,splitserver:195000,export:60000};
+ setexpiry:160000,setexitall:100000,revertswitch:100000,setexitpolicy:100000,splitsave:195000,splitserver:195000,export:60000};
 const ADMIN_DEFAULT_TIMEOUT_MS=60000;
 /* i18n */
 let LANG=(function(){try{return localStorage.getItem('wgui-lang')||'ru'}catch(e){return'ru'}})();

@@ -1086,7 +1086,7 @@ class TestServerPolicy(unittest.TestCase):
 
     def test_admin_bulk_uses_409_without_mutating_guard_result(self):
         shared = {"ok": False, "code": "target_stale", "error": "target_stale", "http_status": 409}
-        self.patch("guarded_exit_switch", lambda target, reason: shared)
+        self.patch("guarded_exit_switch", lambda target, reason, **kw: shared)
         code, response = self.request({"op": "setexitall", "exit": "us"})
         self.assertEqual(code, 409)
         self.assertNotIn("http_status", response)
