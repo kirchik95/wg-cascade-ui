@@ -9,12 +9,16 @@ function renderAlert(t){
  if(!t||t.state==='up'){el.style.display='none';el.__k='';return}
  el.style.display='flex';
  const nl=exitOf(t,'nl'),us=exitOf(t,'us');
- const key=t.state+'|'+!!nl.ok+'|'+!!us.ok;
+ const affected=+t.affected_clients||0;
+ const key=t.state+'|'+!!nl.ok+'|'+!!us.ok+'|'+affected+'|'+LANG;
  if(el.__k===key)return;
  el.__k=key;
  const bad=t.state==='down';
  el.className='alert '+(bad?'bad':'warn');
- const detail=bad
+ const failing=['nl','us'].filter(k=>(+exitOf(t,k).affected_clients||0)>0).map(k=>k.toUpperCase()).join(', ');
+ const detail=affected
+  ?'<b>'+affected+'</b> '+tr('clients on a failing exit')+(failing?' ('+esc(failing)+')':'')+'.'
+  :bad
   ?tr('No fresh handshake on either exit link — client traffic fails closed.')
   :tr('One exit is down or unverified — clients on that path may fail.');
  el.innerHTML=ic('warn',17)+'<div><b>'+tr(bad?'Cascade is down':'Cascade degraded')+'</b> <span>'+detail+'</span></div>';
@@ -22,9 +26,11 @@ function renderAlert(t){
 }
 let _cascKey="";
 function exitQuota(key){
- if(typeof trafficTotals!=='function'||typeof peersByExit!=='function')return'—';
- const t=trafficTotals(peersByExit(_peers||[],key),'mrx','mtx');
- return fmtB((t.rx||0)+(t.tx||0));
+ /* Exit usage/quota come from the server-owned policy snapshot (exit peer counters),
+    not from summing clients by their current exit — moving clients must not move usage. */
+ const e=typeof _exitPolicy!=='undefined'&&_exitPolicy&&_exitPolicy.exits&&_exitPolicy.exits[key];
+ if(!e)return{used:'—',quota:''};
+ return{used:fmtB(+e.used||0),quota:fmtB(+e.quota||0)};
 }
 function cascHealth(t,nl,us){
  if(t.state==='down')return{cls:'bad',label:'Down'};
@@ -60,7 +66,7 @@ function exitCard(label,key,e){
   +'<div class="casc-exit-ip mono">'+esc(ip)+'</div>'
   +'</div></div>'
   +'<div class="casc-exit-r">'
-  +'<div class="casc-exit-q">'+esc(q)+' <span class="mq">/ 500 GiB</span></div>'
+  +'<div class="casc-exit-q">'+esc(q.used)+(q.quota?' <span class="mq">/ '+esc(q.quota)+'</span>':'')+'</div>'
   +'<div class="casc-exit-age">'+age+'</div>'
   +'</div></div>';
 }
@@ -72,7 +78,7 @@ function renderCascade(t,rud){
  const usIP=us.exit_seen||us.exit_ip||'—';
  const health=cascHealth(t,nl,us);
  const hs=entryHandshake(t,nl,us);
- const nlQ=exitQuota('nl'),usQ=exitQuota('us');
+ const nlQ=JSON.stringify(exitQuota('nl')),usQ=JSON.stringify(exitQuota('us'));
  const entryTip=tr('Entry node · Russia · VDSina');
  const key=[t.state,nlCls,usCls,entCls,nlIP,usIP,hs,nlQ,usQ,rud?1:0,health.label,LANG].join('|');
  if(key===_cascKey)return;

@@ -1,4 +1,4 @@
-const C='wgui-shell-v25';
+const C='wgui-shell-v26';
 const SHELL=[
  '/','/index.html','/login','/login.html',
  '/app.css','/app.js','/boot.js','/theme.js','/cascade.js','/clients.js','/login.js',

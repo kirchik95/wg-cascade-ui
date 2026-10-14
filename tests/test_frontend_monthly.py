@@ -363,7 +363,7 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
         self.assertIn("@media(max-width:560px)", css)
 
     def test_service_worker_cache_is_bumped(self):
-        self.assertIn("wgui-shell-v25", (ROOT / "app" / "sw.js").read_text())
+        self.assertIn("wgui-shell-v26", (ROOT / "app" / "sw.js").read_text())
         self.assertIn("cacheablePath", (ROOT / "app" / "sw.js").read_text())
 
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
@@ -395,6 +395,11 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
             if(policyHelpers.bulkTargetBlock(policy,'us')!=='target_unhealthy')throw new Error('unhealthy target allowed');
             const requestBody=policyHelpers.policyRequestBody(true,'500','750');
             if(JSON.stringify(requestBody)!==JSON.stringify({op:'setexitpolicy',auto_switch:true,quotas_gib:{nl:500,us:750}}))throw new Error('bad payload');
+            const failBody=policyHelpers.policyRequestBody(true,'500','750',false);
+            if(failBody.health_failover!==false)throw new Error('failover flag not sent');
+            for(const code of ['both_unhealthy','failover_cooldown']){
+              if(/^[_a-z]+$/.test(policyHelpers.policyReason(code)))throw new Error('raw failover code: '+code);
+            }
             const row=policyHelpers.exitPolicyRowHTML('us',policy.exits.us),rowText=visibleText(row);
             if(!row.includes('disabled')||!row.includes('role="progressbar"'))throw new Error('blocked target row missing');
             if(rowText.includes('target_unhealthy'))throw new Error('raw reason visible: '+rowText);

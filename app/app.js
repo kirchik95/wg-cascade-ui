@@ -130,7 +130,8 @@ function normalizeExitPolicy(policy){
   exits[key]={used:used,quota:quota,clients:clients,healthy:e.healthy===true,
    checked_age:checked,exhausted:e.exhausted===true};
  }
- return{auto_switch:policy.auto_switch,exits:exits,blocked:policy.blocked||null,
+ return{auto_switch:policy.auto_switch,health_failover:policy.health_failover!==false,
+  exits:exits,blocked:policy.blocked||null,health_blocked:policy.health_blocked||null,
   warning:policy.warning||null,last_switch:policy.last_switch||null};
 }
 const POLICY_EN={
@@ -139,6 +140,8 @@ const POLICY_EN={
  target_stale:'The target exit health check is stale.',
  target_exhausted:'The target exit quota is exhausted.',
  both_exhausted:'Both exit quotas are exhausted.',
+ both_unhealthy:'Both exits are failing health checks.',
+ failover_cooldown:'A failover ran recently; waiting before switching again.',
  counter_unavailable:'Current and target exit counter data is unavailable.',
  helper_failed:'The routing helper failed.',
  missing_policy:'Exit policy has not been saved.',
@@ -187,11 +190,13 @@ function renderExitPolicy(raw){
   el.classList.toggle('critical',ratio>=1);
   el.setAttribute&&el.setAttribute('aria-label',tr(key.toUpperCase()+' exit routing settings')+', '+fmtB(e.used)+' / '+fmtB(e.quota));
  });
+ const hblocked=policy.health_failover?policy.health_blocked:null;
  const blocked=policy.blocked,warning=policy.warning;
- const issue=blocked||warning;
+ const issue=hblocked||blocked||warning;
  if(issue){
   const code=typeof issue==='object'&&issue?issue.code:issue;
-  setPolicyAlert(blocked?'bad':'warn',String(code||''),tr(blocked?'Automatic exit switch blocked':'Exit policy warning'),policyReason(code));
+  const title=hblocked?'Automatic failover blocked':blocked?'Automatic exit switch blocked':'Exit policy warning';
+  setPolicyAlert(hblocked||blocked?'bad':'warn',String(code||''),tr(title),policyReason(code));
  }else setPolicyAlert('clear','','','');
  const event=policy.last_switch,ts=event&&Number(event.ts),target=event&&event.target;
  const validEvent=event&&Number.isFinite(ts)&&ts>0&&EXITS.includes(target);
@@ -199,6 +204,7 @@ function renderExitPolicy(raw){
  else if(validEvent&&ts>_lastSwitchTs){
   _lastSwitchTs=ts;
   if(event.reason==='quota')toast(tr('All clients switched to')+' '+target.toUpperCase()+': '+tr('quota reached'));
+  else if(event.reason==='health')toast(tr('All clients switched to')+' '+target.toUpperCase()+': '+String(event.source||'').toUpperCase()+' '+tr('failed health checks'));
  }
  return true;
 }
@@ -294,9 +300,9 @@ const RU={
  "Active connections will briefly reconnect":"Активные соединения кратковременно переподключатся",
  "Exit policy unavailable":"Политика выходов недоступна","Exit policy data is missing or invalid.":"Данные политики выходов отсутствуют или повреждены.",
  "Exit policy saved":"Настройки выходов сохранены","Quota must be a whole number from 1 to 1000000":"Квота должна быть целым числом от 1 до 1000000",
- "Automatic exit switch blocked":"Автопереключение выхода заблокировано","Exit policy warning":"Предупреждение настроек выходов",
+ "Automatic exit switch blocked":"Автопереключение выхода заблокировано","Automatic failover blocked":"Аварийное переключение заблокировано","Failover on outage":"Переключать при сбое","Move clients off an exit that fails health checks (no automatic return)":"Уводить клиентов с выхода, который не проходит проверки (обратно — вручную)","failed health checks":"не проходит проверки","clients on a failing exit":"клиентов на неработающем выходе","Exit policy warning":"Предупреждение настроек выходов",
  "target_unhealthy":"целевой выход недоступен","target_stale":"проверка целевого выхода устарела",
- "target_exhausted":"квота целевого выхода исчерпана","both_exhausted":"квоты обоих выходов исчерпаны",
+ "target_exhausted":"квота целевого выхода исчерпана","both_exhausted":"квоты обоих выходов исчерпаны","both_unhealthy":"оба выхода не проходят проверки","failover_cooldown":"переключение было недавно, ждём перед следующим",
  "counter_unavailable":"данные счётчиков текущего и целевого выходов недоступны",
  "helper_failed":"ошибка применения маршрутизации","missing_policy":"настройки ещё не сохранены","invalid_policy":"файл настроек повреждён",
  "invalid_target":"недопустимый целевой выход","no_clients_to_switch":"все клиенты уже используют этот выход",
@@ -665,10 +671,12 @@ function wholeGiB(value){
  const number=Number(raw);
  return Number.isSafeInteger(number)&&number>=1&&number<=1000000?number:null;
 }
-function policyRequestBody(enabled,nl,us){
+function policyRequestBody(enabled,nl,us,failover){
  const nlGiB=wholeGiB(nl),usGiB=wholeGiB(us);
  if(nlGiB===null||usGiB===null)return null;
- return{op:'setexitpolicy',auto_switch:!!enabled,quotas_gib:{nl:nlGiB,us:usGiB}};
+ const body={op:'setexitpolicy',auto_switch:!!enabled,quotas_gib:{nl:nlGiB,us:usGiB}};
+ if(typeof failover==='boolean')body.health_failover=failover;
+ return body;
 }
 function exitPolicyState(e){
  if(e.exhausted)return{key:'quota exhausted',cls:'bad'};
@@ -696,6 +704,7 @@ function openExitRouting(){
  openModal('<div class="mtitle" id="mtitle">'+ic('branch',18)+' '+tr('Exit routing')+'</div>'
   +'<div class="xpolicy">'+EXITS.map(key=>exitPolicyRowHTML(key,_exitPolicy.exits[key])).join('')+'</div>'
   +'<label class="xptoggle"><input id="xpauto" type="checkbox" role="switch" '+(_exitPolicy.auto_switch?'checked':'')+'><span><b>'+tr('Auto switch')+'</b><small>'+tr('Switch when quota is reached')+'</small></span></label>'
+  +'<label class="xptoggle"><input id="xpfail" type="checkbox" role="switch" '+(_exitPolicy.health_failover?'checked':'')+'><span><b>'+tr('Failover on outage')+'</b><small>'+tr('Move clients off an exit that fails health checks (no automatic return)')+'</small></span></label>'
   +'<div class="merr" id="xperr" role="alert"></div>'
   +'<div class="mrow"><button class="ghost" type="button" data-act="close">'+tr('Close')+'</button><button class="primary" id="xpsave" type="button" data-act="exit-policy-save">'+tr('Save')+'</button></div>');
  const modal=document.getElementById('modal');if(modal&&modal.classList)modal.classList.add('modal-wide');
@@ -705,7 +714,8 @@ async function saveExitPolicy(){
  const nl=document.getElementById('xpq-nl'),us=document.getElementById('xpq-us');
  const auto=document.getElementById('xpauto'),err=document.getElementById('xperr'),btn=document.getElementById('xpsave');
  if(!nl||!us||!auto||!err||!btn)return;
- const body=policyRequestBody(auto.checked,nl.value,us.value);
+ const fail=document.getElementById('xpfail');
+ const body=policyRequestBody(auto.checked,nl.value,us.value,fail?!!fail.checked:undefined);
  if(!body){err.textContent=tr('Quota must be a whole number from 1 to 1000000');return;}
  const operation={id:++_operationSeq,modal:_modalGeneration};
  _policySaving=operation;err.textContent='';const idle=btn.innerHTML;
