@@ -103,6 +103,7 @@ const STR={ru:{
  'Exit switching is blocked.':'Переключение выходов заблокировано.'
 }};
 function addStrings(lang,dict){STR[lang]=Object.assign(STR[lang]||{},dict||{})}
+addStrings('ru',{'Fresh status is unavailable — nothing was sent.':'Свежих данных нет — запрос не отправлен.'});
 function tr(key,vars){
  const table=STR[LANG];
  let s=table&&Object.prototype.hasOwnProperty.call(table,key)?table[key]:key;
@@ -291,6 +292,8 @@ function failMessage(data){
    answer is never "failed": the helper may still have committed. */
 async function admin(body){
  const op=body&&body.op,ms=adminTimeout(op);
+ if(!['getconf','splitinfo','export'].includes(op)&&unknown())
+  return outcome('failed',null,tr('Fresh status is unavailable — nothing was sent.'));
  let r;
  try{
   r=await timedFetch('/api/admin',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF':csrf()},
@@ -390,13 +393,13 @@ function dataAge(){
  if(!s.loaded)return -1;
  return Math.max(0,(+s.snapshot_age||0)+Math.round((Date.now()-s.fetchedAt)/1000));
 }
-/* Buttons marked data-live talk to the server: off while there is no connection. */
+/* Mutating controls require a loaded, fresh snapshot, even if the server answers. */
 function applyLiveLock(){
  const b=doc.body;if(!b)return;
  const off=WG.state.offline;
  b.classList.toggle('is-offline',!!off);
  b.classList.toggle('is-stale',!off&&!!WG.state.stale);
- (b.querySelectorAll?b.querySelectorAll('[data-live]'):[]).forEach(el=>{el.disabled=!!off});
+ (b.querySelectorAll?b.querySelectorAll('[data-live]'):[]).forEach(el=>{el.disabled=unknown()});
 }
 function renderAge(){
  const el=$('age');if(!el)return;
@@ -472,6 +475,7 @@ function modalOpen(o){
   }
  };
  _modal=h;
+ applyLiveLock();
  if(doc.body)doc.body.classList.add('has-modal');
  setTimeout(()=>{
   if(!h.alive())return;
@@ -619,7 +623,7 @@ function visibleBanners(){
 }
 function bannerHTML(b,i,compact){
  const acts=(b.actions||[]).map((a,j)=>'<button type="button" class="btn btn-sm '+(a.primary?'btn-primary':'btn-outline')+'" data-act="banner-act" data-b="'+esc(b.id)+'" data-j="'+j+'"'
-  +(a.live||a.primary?' data-live':'')+(a.disabled||((a.live||a.primary)&&WG.state.offline)?' disabled':'')+'>'+esc(a.label)+'</button>').join('')
+  +(a.live?' data-live':'')+(a.disabled||(a.live&&unknown())?' disabled':'')+'>'+esc(a.label)+'</button>').join('')
   +(b.dismiss?'<button type="button" class="btn btn-sm btn-text" data-act="banner-hide" data-b="'+esc(b.id)+'">'+esc(tr('Hide'))+'</button>':'');
  return '<section class="bn bn-'+esc(b.level)+(compact?' is-compact':'')+'" role="'+(b.level==='crash'?'alert':'status')+'" data-b="'+esc(b.id)+'">'
   +'<div class="bn-top"><span class="bn-tag">'+(b.icon?icon(b.icon,14):'')+'<span>'+esc(b.tag||'')+'</span></span>'
@@ -638,7 +642,7 @@ function renderCountdowns(){
 function renderBanners(){
  const el=$('banner');if(!el)return;
  const list=visibleBanners();
- const sig=JSON.stringify([_bannerOpen,WG.state.offline,list.map(b=>[b.id,b.level,b.tag,b.note,b.text,(b.actions||[]).map(a=>a.label+(a.disabled?'!':''))])]);
+ const sig=JSON.stringify([_bannerOpen,unknown(),list.map(b=>[b.id,b.level,b.tag,b.note,b.text,(b.actions||[]).map(a=>a.label+(a.disabled?'!':''))])]);
  if(sig===_bannerSig){
   /* same plaques: only move a countdown to its new target (a retry was rescheduled) */
   (el.querySelectorAll?el.querySelectorAll('[data-countdown]'):[]).forEach(n=>{
@@ -696,10 +700,12 @@ function opsRun(o){
   catch(e){out=outcome('unknown',null,tr('The connection dropped. The change may have applied — check before repeating.'))}
   OPS.delete(key);
   addResult(o,key,out);
+  emit('ops');
   if(out.kind!=='busy')kickTick();     /* refresh in the background — never awaited */
   return out;
  })();
  renderOps();
+ emit('ops');
  return entry.promise;
 }
 function addResult(o,key,out){
@@ -844,6 +850,7 @@ function renderRoute(force){
   view.appendChild(page);
   if(typeof def.render==='function'){try{def.render(page,ctx)}catch(e){if(root.console)console.error(e)}}
  }
+ applyLiveLock();
  doc.title=(def.title?def.title+' · ':'')+'WG Cascade';
  renderNav();
  if(prev&&prev!==name){

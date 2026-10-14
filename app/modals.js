@@ -41,6 +41,9 @@ WG.addStrings('ru',{
  'Creating {name}':'Создаю {name}','{name} created':'{name} создан',
  'You can close the window — the result stays in the operations line at the top.':'окно можно закрыть — итог останется в строке операций вверху панели',
  'No connection to the server — nothing was sent.':'Нет связи с сервером — ничего не отправлено.',
+ 'Wait for fresh data':'Дождитесь свежих данных',
+ 'Fresh data is required — nothing was sent.':'Нужны свежие данные — ничего не отправлено.',
+ 'Wait for the current change to finish':'Дождитесь окончания текущего изменения',
  'Check the client list before creating it again.':'Проверьте список клиентов, прежде чем создавать снова.',
  'Config and QR':'Конфиг и QR','History':'История','Client':'Клиент',
  'Install WireGuard on the device':'Установите WireGuard на устройство',
@@ -414,7 +417,7 @@ async function runSteps(steps){
  for(let i=0;i<steps.length;i++){
   const s=steps[i];
   let o;
-  try{o=explain(await s.call())}catch(e){o={kind:'unknown',data:null,message:tr('The connection dropped. The change may have applied — check before repeating.')}}
+  try{o=explain(await live(s.call)())}catch(e){o={kind:'unknown',data:null,message:tr('The connection dropped. The change may have applied — check before repeating.')}}
   if(o&&(o.kind==='ok'||o.kind==='warn')){
    done.push(s);last=o.data;
    if(o.kind==='warn'&&o.message)warns.push(o.message);
@@ -431,8 +434,9 @@ async function runSteps(steps){
  }
  return warns.length?{kind:'warn',data:last,message:warns.join(' ')}:{kind:'ok',data:last,message:''};
 }
-const live=fn=>()=>WG.state.offline
- ?Promise.resolve({kind:'failed',data:null,message:tr('No connection to the server — nothing was sent.')}):fn();
+const mutationBlock=()=>WG.unknown()?(WG.state.offline?tr('No connection'):tr('Wait for fresh data')):'';
+const live=fn=>()=>WG.unknown()
+ ?Promise.resolve({kind:'failed',data:null,message:tr(WG.state.offline?'No connection to the server — nothing was sent.':'Fresh data is required — nothing was sent.')}):fn();
 
 /* ------------------------------------------------------------ exit state for choosers */
 function exitView(k,s){
@@ -596,7 +600,7 @@ function addClient(){
  }
  function why(){
   const prob=nameProblem(inp.value,peersNow()),v=exitView(st.exit);
-  if(WG.state.offline)return tr('No connection');
+  if(mutationBlock())return mutationBlock();
   if(prob==='empty')return tr('Enter a name');
   if(prob)return tr('Fix the name');
   if(v.blocked)return blockedLabel(v);
@@ -833,7 +837,8 @@ function editClient(pubkey){
  }
  function why(){
   const prob=nameProblem(inp.value,peersNow(),pubkey);
-  if(WG.state.offline)return tr('No connection');
+  if(mutationBlock())return mutationBlock();
+  if(WG.ops.running('edit:'+pubkey))return tr('Wait for the current change to finish');
   if(prob==='empty')return tr('Enter a name');
   if(prob)return tr('Fix the name');
   if(st.exit!==orig.exit&&exitView(st.exit).blocked)return blockedLabel(exitView(st.exit));
@@ -880,6 +885,7 @@ function editClient(pubkey){
  h.el.addEventListener('input',e=>{if(e.target===inp){showOut(h,null);paintName();paintFoot()}});
  h.el.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target===inp){e.preventDefault();save()}});
  h.on('status',()=>{if(!st.busy){paintExit();paintFoot()}});
+ h.on('ops',paintFoot);
  h.on('second',()=>{if(!st.busy)paintTerm()});
  paint();
  setTimeout(()=>{if(h.alive()){try{inp.focus();inp.select()}catch(e){}}},0);
@@ -887,14 +893,17 @@ function editClient(pubkey){
 }
 
 /* ------------------------------------------------------------ on / off, delete (C6) */
-function toggleEnabled(pubkey){
+function setEnabled(pubkey,on){
  const p=WG.peer(pubkey);
  if(!p)return missing();
  const name=p.name;
- const run=on=>WG.ops.run({key:'enabled:'+pubkey,
+ return WG.ops.run({key:'enabled:'+pubkey,
   label:on?tr('Turning on {name}',{name}):tr('Turning off {name}',{name}),done:on?tr('{name} is on',{name}):tr('{name} is off',{name}),
-  call:live(()=>WG.admin({op:'enabled',pubkey,enabled:on}).then(explain)),undo:on?undefined:()=>run(true)});
- return run(!p.enabled);
+  call:live(()=>WG.admin({op:'enabled',pubkey,enabled:on}).then(explain)),undo:!on&&p.enabled?()=>setEnabled(pubkey,true):undefined});
+}
+function toggleEnabled(pubkey){
+ const p=WG.peer(pubkey);
+ return p?setEnabled(pubkey,!p.enabled):missing();
 }
 function deleteClient(pubkey){
  const p=WG.peer(pubkey);
@@ -907,10 +916,10 @@ function deleteClient(pubkey){
    +'<input class="input m-del-in" id="m-del" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus></div>'});
  h.setEyebrow(tr('Irreversible'),'danger');
  const inp=h.q('.m-del-in');
- const ok=()=>inp.value.trim()===name&&!WG.state.offline;
+ const ok=()=>inp.value.trim()===name&&!WG.unknown();
  function paintFoot(){
-  setFoot(h,'<div class="mf-tools">'+(p.enabled?btn('off',tr('Turn off instead'),{cls:'btn-outline-l'}):'')+'</div>'
-   +'<div class="mf-btns">'+btn('cancel',tr('Cancel'))+btn('del',WG.state.offline?tr('No connection'):tr('Delete'),{cls:'btn-danger',disabled:!ok()})+'</div>');
+  setFoot(h,'<div class="mf-tools">'+(p.enabled?btn('off',tr('Turn off instead'),{cls:'btn-outline-l',disabled:WG.unknown()}):'')+'</div>'
+   +'<div class="mf-btns">'+btn('cancel',tr('Cancel'))+btn('del',mutationBlock()||tr('Delete'),{cls:'btn-danger',disabled:!ok()})+'</div>');
  }
  function del(){
   if(!ok())return;
@@ -921,7 +930,7 @@ function deleteClient(pubkey){
  h.click(m=>{
   if(m==='cancel')return h.close();
   if(m==='del')return del();
-  if(m==='off'){h.close();return toggleEnabled(pubkey)}
+  if(m==='off'){h.close();return setEnabled(pubkey,false)}
  });
  h.el.addEventListener('input',e=>{if(e.target===inp)paintFoot()});
  h.el.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target===inp){e.preventDefault();del()}});
@@ -950,7 +959,7 @@ function switchExit(pubkey,target){
   body:'<div class="m-rows"></div><p class="m-note">'+esc(tr('The device reconnects — a break of a few seconds. The server checks the exit again before the move.'))+'</p>'});
  function paint(){
   patch(h.q('.m-rows'),stateRows(target));
-  const v=exitView(target),w=WG.state.offline?tr('No connection'):v.blocked?blockedLabel(v):'';
+  const v=exitView(target),w=mutationBlock()||(v.blocked?blockedLabel(v):'');
   setFoot(h,foot('',btn('cancel',tr('Cancel'),{af:true})+btn('go',w||tr('Move to {exit}',{exit:K}),{cls:'btn-primary',disabled:!!w})));
  }
  h.click(m=>{
@@ -1057,7 +1066,7 @@ function exitsSettings(draft){
   return b.auto!==st.auto||b.fail!==st.fail||WG.EXITS.some(k=>String(wholeGiB(st.q[k]))!==b.q[k]);
  }
  function why(){
-  if(WG.state.offline)return tr('No connection');
+  if(mutationBlock())return mutationBlock();
   if(WG.EXITS.some(quotaProblem))return tr('Fix the quota');
   if(!dirty())return tr('No changes');
   return'';
@@ -1067,7 +1076,7 @@ function exitsSettings(draft){
   return WG.EXITS.map(k=>{
    const mv=moving(peers,k),K=X(k),code=bulkBlock(pol,k);
    if(!mv.n)return btn('bulk',tr('All {n} already on {exit}',{n:mv.total,exit:K}),{cls:'btn-outline-l',k,disabled:true});
-   if(WG.state.offline)return btn('bulk',tr('All {n} to {exit}…',{n:mv.n,exit:K}),{cls:'btn-outline-l',k,disabled:true});
+   if(WG.unknown())return btn('bulk',tr('All {n} to {exit}…',{n:mv.n,exit:K}),{cls:'btn-outline-l',k,disabled:true});
    if(code==='target_exhausted')return btn('bulk',tr('{exit} quota is used up',{exit:K}),{cls:'btn-outline-l',k,disabled:true});
    if(code==='target_stale')return btn('bulk',tr('{exit} is not checked',{exit:K}),{cls:'btn-outline-l',k,disabled:true});
    if(code)return btn('bulk',tr('{exit} is unavailable',{exit:K}),{cls:'btn-outline-l',k,disabled:true});
@@ -1132,8 +1141,8 @@ function confirmBulk(target,draft){
   }
   patch(h.q('.m-fc'),fc+'<p class="m-note">'+esc(tr('Devices reconnect — a break of a few seconds.'))+'</p>');
   const code=bulkBlock(P,target);
-  const w=WG.state.offline?tr('No connection'):!mv.n?tr('All {n} already on {exit}',{n:mv.total,exit:K})
-   :code==='target_exhausted'?tr('{exit} quota is used up',{exit:K}):code==='target_stale'?tr('{exit} is not checked',{exit:K}):code?tr('{exit} is unavailable',{exit:K}):'';
+  const w=mutationBlock()||(!mv.n?tr('All {n} already on {exit}',{n:mv.total,exit:K})
+   :code==='target_exhausted'?tr('{exit} quota is used up',{exit:K}):code==='target_stale'?tr('{exit} is not checked',{exit:K}):code?tr('{exit} is unavailable',{exit:K}):'');
   setFoot(h,foot('',btn('back',tr('Cancel'),{af:true})+btn('go',w||tr('Move {n} to {exit}',{n:mv.n,exit:K}),{cls:'btn-primary',disabled:!!w})));
  }
  h.click(m=>{
@@ -1171,7 +1180,7 @@ function revertSwitch(eventId){
   patch(h.body,'<div class="sband">'+band+'</div><ul class="ml">'+plan.rows.map(r=>'<li class="is-'+r.state+'"><span class="ml-n">'+esc(r.name)+'</span><span class="ml-s">'
    +esc(r.state==='move'?F+' → '+K:r.state==='deleted'?tr('skipped · client deleted'):tr('skipped · already on {exit}',{exit:K}))+'</span></li>').join('')+'</ul>'
    +'<p class="m-note">'+esc(tr('Devices reconnect — a break of a few seconds.'))+'</p>');
-  const w=WG.state.offline?tr('No connection'):!plan.count?tr('Nobody to move back'):v.blocked?blockedLabel(v):'';
+  const w=mutationBlock()||(!plan.count?tr('Nobody to move back'):v.blocked?blockedLabel(v):'');
   setFoot(h,foot('',btn('cancel',tr('Cancel'),{af:true})+btn('go',w||tr('Move {n} back to {exit}',{n:plan.count,exit:K}),{cls:'btn-primary',disabled:!!w})));
  }
  h.click(m=>{
@@ -1236,7 +1245,7 @@ function splitSettings(){
  }
  function why(){
   const p=parsed();
-  if(WG.state.offline)return tr('No connection');
+  if(mutationBlock())return mutationBlock();
   if(p.errors.length)return tr('Fix line {n}',{n:p.errors[0].line});
   if(p.tooMany)return tr('No more than 500 lines');
   if(!dirty())return tr('No changes');
@@ -1256,7 +1265,7 @@ function splitSettings(){
   eh.hidden=!t;if(eh.textContent!==t)eh.textContent=t;
   h.q('.m-sx').setAttribute('aria-invalid',String(!!t));
   if(busy)return;
-  const w=why(),valid=!WG.state.offline;
+  const w=why(),valid=!WG.unknown();
   setFoot(h,'<div class="mf-tools">'+btn('refresh',tr('Refresh the RU list'),{cls:'btn-outline-l',ic:'refresh',disabled:!valid})+'</div>'
    +'<div class="mf-btns">'+btn('cancel',tr('Cancel'))+btn('apply',w||tr('Apply to all'),{cls:'btn-primary',disabled:!!w})+'</div>');
  }
@@ -1320,7 +1329,7 @@ function backup(){
  }
  function paintFoot(){
   if(busy||file)return;
-  const pw=h.q('.m-pw'),w=WG.state.offline?tr('No connection'):pw&&pw.value?'':tr('Enter the password');
+  const pw=h.q('.m-pw'),w=mutationBlock()||(pw&&pw.value?'':tr('Enter the password'));
   setFoot(h,foot('',btn('cancel',tr('Cancel'))+btn('make',w||tr('Make the archive'),{cls:'btn-primary',disabled:!!w})));
  }
  function step2(missingList){
@@ -1341,7 +1350,7 @@ function backup(){
  }
  async function make(){
   const pw=h.q('.m-pw');
-  if(busy||!pw||!pw.value||WG.state.offline)return;
+  if(busy||!pw||!pw.value||WG.unknown())return;
   busy=true;setLocked(h,true);showOut(h,null);
   const start=Date.now(),f=h.footer;f._html=null;f.classList.add('is-busy');
   f.innerHTML='<div class="mf-busy" role="status"><div class="mf-bt">'+esc(tr('Making the archive…'))+' <span class="mf-time">0:00</span></div><span class="mf-bar" aria-hidden="true"></span></div>'

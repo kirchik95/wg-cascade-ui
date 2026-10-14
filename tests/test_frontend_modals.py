@@ -74,8 +74,9 @@ class TestModalsStatic(unittest.TestCase):
         html = (APP / "login.html").read_text()
         for needle in ('class="lg-form" method="post" action="/login"', 'autocomplete="username"',
                        'autocomplete="current-password"', 'aria-describedby="err"', 'id="pwtoggle"',
-                       'data-act="lang" data-l="ru"', 'data-act="lang" data-l="en"', '<script src="/login.js">'):
+                       'data-act="lang" data-l="ru"', 'data-act="lang" data-l="en"'):
             self.assertIn(needle, html)
+        self.assertRegex(html, r'<script src="/login\.js(?:\?v=[^"\s]+)?"></script>')
         self.assertNotIn("theme.js", html)
         js = (APP / "login.js").read_text()
         self.assertIn("aria-invalid", js)
@@ -172,6 +173,7 @@ class TestModalKit(unittest.TestCase):
 
     def test_steps_stop_at_the_first_failure_and_say_what_applied(self):
         run(self, r"""
+        await feed(snapshot());
         const ok=d=>()=>Promise.resolve({kind:'ok',data:d||{},message:''});
         const bad=code=>()=>Promise.resolve({kind:'failed',data:{ok:false,code},message:'x'});
         let r=await K.runSteps([{text:'a',call:bad('target_exhausted')},{text:'b',call:ok()}]);
@@ -188,6 +190,20 @@ class TestModalKit(unittest.TestCase):
         eq(r.kind,'busy','busy before anything applied');
         """)
 
+    def test_steps_recheck_fresh_status_before_each_call(self):
+        run(self, r"""
+        for(const untrusted of [{loaded:false},{stale:true},{offline:true}]){
+          await feed(snapshot());
+          const calls=[];
+          const out=await K.runSteps([
+            {text:'first',call:()=>{calls.push('first');WG.state=Object.assign({},WG.state,untrusted);return Promise.resolve({kind:'ok',data:{committed:true}});}},
+            {text:'second',call:()=>{calls.push('second');return Promise.resolve({kind:'ok',data:{committed:true}});}}
+          ]);
+          eq(calls,['first'],'untrusted status stops a later call');
+          eq(out.kind,'partial','the already committed first step is reported');
+        }
+        """)
+
     def test_every_literal_text_has_a_russian_translation(self):
         js = (APP / "modals.js").read_text()
         keys = set(re.findall(r"\btr\('((?:[^'\\]|\\.)*)'", js))
@@ -201,6 +217,85 @@ class TestModalKit(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestModalWindows(unittest.TestCase):
+    def test_mutation_controls_require_loaded_fresh_status(self):
+        run(self, r"""
+        for(const untrusted of [{loaded:false},{stale:true},{offline:true}]){
+          await feed(snapshot());
+          WG.state=Object.assign({},WG.state,untrusted);
+          const info={ok:true,extra:[],server:{state:'off',ipset:0},meta:{}};
+          const event={id:42,ts:1790000000,kind:'exit_switch',data:{source:'us',target:'nl',reason:'health',members:[{pubkey:'pk-a',name:'kirill-iphone'}]}};
+          const handler=b=>response(b.op==='splitinfo'?info:{ok:true,committed:true});
+          handler.get=()=>response({event,events:[]});
+          const calls=admin(handler);
+          const disabled=sel=>{const b=q(sel);if(!b||!b.disabled)throw new Error(JSON.stringify(untrusted)+' allows '+sel);};
+          WG.actions.addClient();type(q('.m-name'),'fresh');disabled('[data-m="create"]');
+          WG.actions.editClient('pk-a');type(q('.m-name'),'renamed');disabled('[data-m="save"]');
+          WG.actions.deleteClient('pk-a');type(q('.m-del-in'),'kirill-iphone');disabled('[data-m="del"]');disabled('[data-m="off"]');
+          WG.actions.switchExit('pk-a','us');disabled('[data-m="go"]');
+          WG.actions.exitsSettings();type(q('[data-x="us"]').querySelector('.m-q'),'700');
+          disabled('[data-m="save"]');disabled('[data-m="bulk"][data-k="us"]');
+          WG.actions.revertSwitch(42);await flush(40);disabled('[data-m="go"]');
+          WG.actions.splitSettings();await flush(40);q('[data-m="on"]').click();
+          disabled('[data-m="apply"]');disabled('[data-m="refresh"]');
+          WG.actions.backup();type(q('.m-pw'),'password');disabled('[data-m="make"]');
+          const out=await WG.actions.toggleEnabled('pk-a');
+          eq(out.kind,'failed','direct toggle is blocked');
+          eq(calls.map(b=>b.op),['splitinfo'],'only the read operation may be sent');
+          WG.modal.close();
+        }
+        """)
+
+    def test_multistep_mutations_stop_when_status_becomes_untrusted(self):
+        run(self, r"""
+        for(const action of ['edit','split'])for(const untrusted of [{loaded:false},{stale:true},{offline:true}]){
+          await feed(snapshot());
+          let resolve;
+          const info={ok:true,extra:[],server:{state:'off',ipset:0},meta:{}};
+          const calls=admin(b=>b.op==='splitinfo'?response(info):new Promise(r=>{resolve=r;}));
+          if(action==='edit'){
+            WG.actions.editClient('pk-a');type(q('.m-name'),'renamed');q('[data-m="exit"][data-k="us"]').click();
+            q('[data-m="save"]').click();
+          }else{
+            WG.actions.splitSettings();await flush(40);q('[data-m="on"]').click();type(q('.m-sx'),'example.com');
+            q('[data-m="apply"]').click();
+          }
+          WG.state=Object.assign({},WG.state,untrusted);WG.emit('status',WG.state);
+          resolve(response({ok:true,committed:true}));await flush(60);
+          eq(calls.map(b=>b.op),action==='edit'?['rename']:['splitinfo','splitserver'],action+' does not send the next step');
+          const out=text(q('.m-out-box'));
+          if(!out.includes('Partially'))throw new Error(action+' lost the first committed step: '+out);
+          WG.modal.close();
+        }
+        """)
+
+    def test_reopened_edit_waits_for_running_operation_before_saving_its_draft(self):
+        run(self, r"""
+        await feed(snapshot());
+        let resolve;
+        const calls=admin(b=>b.op==='rename'?new Promise(r=>{resolve=r;}):response({ok:true,committed:true}));
+        WG.actions.editClient('pk-a');type(q('.m-name'),'renamed');q('[data-m="save"]').click();
+        WG.modal.close();
+        WG.actions.editClient('pk-a');q('[data-m="exit"][data-k="us"]').click();
+        if(!q('[data-m="save"]').disabled)throw new Error('reopened edit allows saving during the earlier operation');
+        q('.m-name').dispatchEvent(makeEvent('keydown',q('.m-name'),{key:'Enter'}));
+        resolve(response({ok:true,committed:true}));await flush(60);
+        if(!WG.modal.current())throw new Error('the earlier result closed the new draft');
+        if(q('[data-m="save"]').disabled)throw new Error('the operation completion did not unlock saving');
+        eq(calls.map(b=>b.op),['rename'],'the blocked draft did not send');
+        q('[data-m="save"]').click();await flush(60);
+        eq(calls[1],{op:'setexit',pubkey:'pk-a',exit:'us'},'the new draft is applied after its own save');
+        """)
+
+    def test_delete_turn_off_does_not_toggle_an_already_disabled_client_on(self):
+        run(self, r"""
+        await feed(snapshot());WG.actions.deleteClient('pk-a');
+        const s=snapshot();s.peers.find(p=>p.pubkey==='pk-a').enabled=false;await feed(s);
+        const calls=admin(()=>response({ok:true,committed:true}));
+        q('[data-m="off"]').click();await flush(40);
+        eq(calls,[{op:'enabled',pubkey:'pk-a',enabled:false}],'turn off remains an explicit disable after a status update');
+        if(element('ops').querySelector('[data-act="op-undo"]'))throw new Error('an already disabled client must not offer an undo that enables it');
+        """)
+
     def test_exit_settings_save_guards_and_outcomes(self):
         run(self, r"""
         await feed(snapshot());

@@ -12,6 +12,59 @@ from test_frontend_monthly import run_node
 
 @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
 class TestFrontendPolling(unittest.TestCase):
+    def test_r01_mutations_require_a_fresh_loaded_snapshot(self):
+        run_node(self, r"""
+        process.exitCode=1;(async()=>{
+          await flush();
+          if(!element('addbtn').disabled)throw new Error('initial add button permits a mutation without data');
+          const states=[{loaded:false,offline:false,stale:false},{loaded:true,offline:false,stale:true},{loaded:true,offline:true,stale:false}];
+          for(const state of states){
+            Object.assign(WG.state,state);
+            let posts=0;
+            context.fetch=()=>{posts++;return Promise.resolve(response({ok:true,committed:true}));};
+            const out=await WG.admin({op:'enabled',pubkey:'pk-a',enabled:false});
+            if(posts!==0||out.kind!=='failed')throw new Error('unsafe mutation sent: '+JSON.stringify(state));
+          }
+          await feed(snapshot({stale:true,snapshot_age:120}));
+          if(!element('addbtn').disabled)throw new Error('stale add button must be disabled');
+          await feed(snapshot());
+          if(element('addbtn').disabled)throw new Error('fresh data must unlock add');
+          let posts=0;
+          context.fetch=()=>{posts++;return Promise.resolve(response({ok:true,committed:true}));};
+          const out=await WG.admin({op:'enabled',pubkey:'pk-a',enabled:false});
+          if(posts!==1||out.kind!=='ok')throw new Error('fresh mutation refused');
+          process.exitCode=0;console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_ops_notifications_track_running_keys_for_open_forms(self):
+        run_node(self, r"""
+        process.exitCode=1;(async()=>{
+          let finish;const states=[];
+          WG.on('ops',()=>states.push(WG.ops.running('edit:pk-a')));
+          const p=WG.ops.run({key:'edit:pk-a',label:'save',call:()=>new Promise(r=>{finish=r;})});
+          if(states.join(',')!=='true')throw new Error('open forms were not told the key became busy');
+          finish({kind:'busy',data:null,message:'busy'});await p;
+          if(states.join(',')!=='true,false')throw new Error('open forms were not unlocked on completion');
+          process.exitCode=0;console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
+    def test_stale_banner_keeps_navigation_enabled_but_blocks_mutations(self):
+        run_node(self, r"""
+        process.exitCode=1;(async()=>{
+          await feed(snapshot({stale:true,snapshot_age:120}));
+          WG.banner.set('custom',{level:'info',text:'inspect',actions:[
+            {label:'Navigate',primary:true,act:()=>{}},{label:'Mutate',live:true,act:()=>{}}
+          ]});
+          element('banner').querySelector('[data-act="banner-more"]').click();
+          const actions=element('banner').querySelectorAll('[data-b="custom"][data-act="banner-act"]');
+          if(actions.length!==2||actions[0].disabled||!actions[1].disabled)
+            throw new Error('stale data must block writes, not navigation');
+          process.exitCode=0;console.log('__OK__');
+        })().catch(e=>{console.error(e);process.exitCode=1;});
+        """)
+
     def test_hung_status_fetch_times_out_and_next_tick_requests_again(self):
         run_node(self, r"""
         process.exitCode=1;(async()=>{
@@ -73,6 +126,7 @@ class TestFrontendPolling(unittest.TestCase):
     def test_admin_timeout_follows_operation_table_and_is_unknown_not_failed(self):
         run_node(self, r"""
         process.exitCode=1;(async()=>{
+          await feed(snapshot());
           timers.clear();
           let sent=null;
           context.fetch=(url,opts)=>{sent=opts;return new Promise(()=>{});};
@@ -96,6 +150,7 @@ class TestFrontendPolling(unittest.TestCase):
     def test_admin_answers_fold_into_six_outcomes(self):
         run_node(self, r"""
         process.exitCode=1;(async()=>{
+          await feed(snapshot());
           const cases=[
             [response({ok:true,name:'a'}),'ok'],
             [response({ok:true,warning:'target_stale'}),'warn'],
@@ -162,6 +217,7 @@ class TestFrontendPolling(unittest.TestCase):
     def test_ops_result_survives_closed_window_and_success_unlocks_before_refresh(self):
         run_node(self, r"""
         process.exitCode=1;(async()=>{
+          await feed(snapshot());
           const h=WG.modal.open({title:'Edit',body:'<button id="b1">x</button>'});
           let resolveAdmin,statusCalls=0;
           context.fetch=(url)=>{

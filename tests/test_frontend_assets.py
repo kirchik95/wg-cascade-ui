@@ -2,9 +2,12 @@
 """Front-end assets: everything the HTML shells load is served by wg-ui.py, cached by the
 service worker, and the self-hosted fonts come from an explicit list with a long cache."""
 import importlib.util
+import json
 import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +23,7 @@ wgui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wgui)
 
 
-def get(path):
+def get(path, authenticated=False):
     class Fake(wgui.H):
         def __init__(self):
             self.path = path
@@ -32,7 +35,7 @@ def get(path):
             self._out = b""
 
         def _user(self):
-            return None
+            return 'admin' if authenticated else None
 
         def send_response(self, code):
             self._code = code
@@ -57,21 +60,30 @@ def get(path):
 
 
 def shell_assets(name):
-    html = (APP / name).read_text()
+    code, _, body = get('/' if name == 'index.html' else '/login', authenticated=True)
+    if code != 200:
+        raise AssertionError('shell was not served: ' + name)
+    html = body.decode()
     refs = re.findall(r'<script src="(/[^"]+)"', html)
     refs += re.findall(r'<link rel="(?:stylesheet|preload)" href="(/[^"]+)"', html)
     return refs
 
 
 class TestFrontendAssets(unittest.TestCase):
+    @unittest.skipIf(shutil.which('node') is None, 'node is required to execute the service worker')
     def test_every_shell_asset_is_served_and_cached_offline(self):
-        sw = (APP / "sw.js").read_text()
+        code, _, body = get('/sw.js')
+        self.assertEqual(code, 200)
+        script = 'const self={addEventListener(){}};\n' + body.decode() + '\nconsole.log(JSON.stringify(SHELL));'
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cached = json.loads(result.stdout)
         for page in ("index.html", "login.html"):
             for ref in shell_assets(page):
                 code, hdrs, body = get(ref)
                 self.assertEqual(code, 200, "%s: %s" % (page, ref))
                 self.assertTrue(body, ref)
-                self.assertIn("'%s'" % ref, sw, "sw.js does not cache " + ref)
+                self.assertIn(ref, cached, "sw.js does not cache " + ref)
 
     def test_fonts_are_woff2_with_a_week_of_cache(self):
         self.assertEqual(len(wgui.FONTS), 4)
