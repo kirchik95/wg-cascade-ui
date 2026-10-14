@@ -213,7 +213,15 @@ const fmtTime=ts=>{const d=new Date(ts*1000),p=n=>(''+n).padStart(2,'0');return 
 const fmtLeft=s=>{const r=LANG==='ru';if(s<=0)return r?"истёк":"expired";if(s<3600)return(s/60|0)+(r?"м":"m left");if(s<86400)return(s/3600|0)+(r?"ч":"h left");return Math.ceil(s/86400)+(r?"д":"d left")};
 const mbit=bps=>(bps*8/1e6).toFixed(bps*8/1e6>=10?0:1);
 const esc=s=>String(s==null?'' :s).replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
-let _tickBusy=false,_tickAbort=null,_tickTimer=null,_tickSeq=0,_sparkIdx=-1;
+let _tickBusy=false,_tickAbort=null,_tickTimer=null,_tickSeq=0,_sparkIdx=-1,_tickFails=0;
+let _modalReqs=[];            /* in-flight helper GETs tied to the open modal; aborted on close */
+const GET_DEADLINE_MS=12000;  /* status/history/audit GET deadline — a stuck request must not stall polling */
+const TICK_MS=5000,TICK_HIDDEN_MS=15000,TICK_MAX_BACKOFF_MS=60000;
+/* Browser deadline per admin op: always above the server's own budget for that op,
+   so the server's answer (success, rollback or "busy") arrives before we give up. */
+const ADMIN_TIMEOUT_MS={add:210000,rename:160000,enabled:160000,delete:160000,setexit:160000,
+ setexpiry:160000,setexitall:100000,setexitpolicy:100000,splitsave:195000,splitserver:195000,export:60000};
+const ADMIN_DEFAULT_TIMEOUT_MS=60000;
 /* i18n */
 let LANG=(function(){try{return localStorage.getItem('wgui-lang')||'ru'}catch(e){return'ru'}})();
 const RU={
@@ -287,7 +295,7 @@ const RU={
  "Sign out everywhere?":"Выйти везде?","This revokes sessions on all devices. You'll need to sign in again.":"Сессии на всех устройствах будут сброшены. Потребуется войти снова.",
  "Sign out all devices":"Выйти на всех устройствах",
  "Creating…":"Создаю…","Saving…":"Сохраняю…","Refreshing…":"Обновляю…",
- "Connection lost — reconnecting…":"Нет связи — переподключение…",
+ "Connection lost — reconnecting…":"Нет связи — переподключение…","Server not responding — data may be stale":"Сервер не отвечает — данные могут быть устаревшими","no response — data may be stale":"нет ответа — данные могут быть устаревшими","no response from server — check the result before retrying":"сервер не ответил — проверьте результат, прежде чем повторять",
  "Session expired — sign in again":"Сессия истекла — войдите снова",
  "failed":"ошибка","Name is required":"Нужно имя","Name too long (max 32)":"Слишком длинное имя (макс. 32)",
  "Tap a day for details":"Нажми день для деталей",
@@ -391,10 +399,10 @@ function setStatusSub(prefix){
  sub.textContent=prefix+' · '+tr('panel read-only · writes via helper');
 }
 
-function setOffline(on){
+function setOffline(on,stale){
  const el=document.getElementById('offline');if(!el)return;
  if(on){if(el.classList&&el.classList.add)el.classList.add('show');else el.className=(el.className||'')+' show';
-  el.innerHTML=ic('warn',15)+'<span>'+tr('Connection lost — reconnecting…')+'</span>';}
+  el.innerHTML=ic('warn',15)+'<span>'+tr(stale?'Server not responding — data may be stale':'Connection lost — reconnecting…')+'</span>';}
  else{if(el.classList&&el.classList.remove)el.classList.remove('show');el.innerHTML='';}
 }
 function renderSampler(s){
@@ -541,21 +549,63 @@ function bindSpark(){
  });
  svg.addEventListener('blur',hideChartTip);
 }
+/* fetch with a hard deadline. read(response) runs inside the deadline too, so a body
+   that never finishes cannot hang the caller. Returns {promise, abort}; abort() rejects
+   with AbortError, the deadline with TimeoutError. Works without AbortController. */
+function timedFetch(url,opts,ms,read){
+ const ac=typeof AbortController!=='undefined'?new AbortController():null;
+ const o=Object.assign({},opts||{});if(ac)o.signal=ac.signal;
+ let timer=null,settled=false,rejectFn=null;
+ const fail=name=>{
+  if(settled)return;settled=true;clearTimeout(timer);
+  if(ac){try{ac.abort()}catch(e){}}
+  const err=new Error(name==='TimeoutError'?'timeout':'aborted');err.name=name;rejectFn(err);
+ };
+ const promise=new Promise((resolve,reject)=>{
+  rejectFn=reject;
+  timer=setTimeout(()=>fail('TimeoutError'),ms);
+  let f;try{f=fetch(url,o)}catch(e){settled=true;clearTimeout(timer);reject(e);return}
+  Promise.resolve(f).then(r=>read?read(r):r).then(
+   v=>{if(settled)return;settled=true;clearTimeout(timer);resolve(v)},
+   e=>{if(settled)return;settled=true;clearTimeout(timer);reject(e)});
+ });
+ return{promise,abort:()=>fail('AbortError')};
+}
+function respOk(r){return typeof r.ok==='boolean'?r.ok:(r.status>=200&&r.status<300)}
+/* GET JSON for the open modal: aborted automatically when the modal closes or is replaced. */
+function modalJSON(url){
+ const req=timedFetch(url,{cache:'no-store'},GET_DEADLINE_MS,r=>{
+  if(r.status===401){location.href="/login";throw new Error('session expired')}
+  if(!respOk(r))throw new Error('HTTP '+r.status);
+  return r.json();
+ });
+ _modalReqs.push(req);
+ const done=()=>{_modalReqs=_modalReqs.filter(x=>x!==req)};
+ req.promise.then(done,done);
+ return req.promise;
+}
+function cancelModalRequests(){
+ const reqs=_modalReqs;_modalReqs=[];
+ reqs.forEach(req=>{try{req.abort()}catch(e){}});
+}
 async function tick(){
  if(_tickBusy)return;
+ if(document.hidden)return;     /* hidden tab: no fetch, no DOM work; refreshed on return */
  _tickBusy=true;
- if(_tickAbort){try{_tickAbort.abort()}catch(e){}}
- const ac=typeof AbortController!=='undefined'?new AbortController():null;
- _tickAbort=ac;
  const seq=++_tickSeq;
+ const req=timedFetch("/api/status",{cache:"no-store"},GET_DEADLINE_MS,async r=>{
+  if(r.status===401||!respOk(r))return{r,d:null};
+  return{r,d:await r.json()};
+ });
+ _tickAbort=req;
  try{
-  const r=await fetch("/api/status",{cache:"no-store",signal:ac?ac.signal:undefined});
+  const res=await req.promise;
   if(seq!==_tickSeq)return;
+  const r=res.r;
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return}
-  const ok=typeof r.ok==='boolean'?r.ok:(r.status>=200&&r.status<300);
-  if(!ok)throw new Error('status '+r.status);
-  const d=await r.json();
-  if(seq!==_tickSeq)return;
+  if(!respOk(r))throw new Error('status '+r.status);
+  const d=res.d;
+  _tickFails=0;
   setOffline(false);
   _peers=d.peers||[];
   renderAlert(d.tunnel);renderHealthChip(d.tunnel);renderSampler(d.sampler);renderCascade(d.tunnel,d.rud);renderHost(d.host);renderClients(d.peers);renderExitPolicy(d.exit_policy);
@@ -571,24 +621,44 @@ async function tick(){
  }catch(e){
   if(e&&e.name==='AbortError')return;
   if(seq!==_tickSeq)return;
-  setOffline(true);const rc=tr('reconnecting…');document.getElementById('upd').textContent=rc;setStatusSub(rc);
+  _tickFails++;
+  const timedOut=e&&e.name==='TimeoutError';
+  setOffline(true,timedOut);
+  const rc=tr(timedOut?'no response — data may be stale':'reconnecting…');
+  document.getElementById('upd').textContent=rc;setStatusSub(rc);
  }finally{
+  if(_tickAbort===req)_tickAbort=null;
   if(seq===_tickSeq)_tickBusy=false;
  }
+}
+/* 5 s while healthy; exponential backoff with ±20% jitter after failures, capped at 60 s. */
+function nextTickDelay(){
+ if(document.hidden)return TICK_HIDDEN_MS;
+ if(!_tickFails)return TICK_MS;
+ const base=Math.min(TICK_MAX_BACKOFF_MS,TICK_MS*Math.pow(2,_tickFails-1));
+ return Math.round(base*(0.8+Math.random()*0.4));
 }
 function scheduleTick(ms){
  if(_tickTimer)clearTimeout(_tickTimer);
  _tickTimer=setTimeout(async()=>{
-  await tick();
-  scheduleTick(document.hidden?15000:5000);
+  _tickTimer=null;
+  try{await tick()}finally{scheduleTick(nextTickDelay())}
  },ms);
 }
+/* Network back / tab visible again: drop any stuck request, reset backoff, refresh now. */
+function kickTick(){
+ _tickFails=0;
+ if(_tickAbort){try{_tickAbort.abort()}catch(e){}}
+ scheduleTick(0);
+}
 /* admin */
+function adminTimeout(op){
+ return Object.prototype.hasOwnProperty.call(ADMIN_TIMEOUT_MS,op)?ADMIN_TIMEOUT_MS[op]:ADMIN_DEFAULT_TIMEOUT_MS;
+}
 async function admin(body){
  try{
   const opts={method:"POST",headers:{"Content-Type":"application/json","X-CSRF":CSRF},body:JSON.stringify(body),cache:"no-store"};
-  if(typeof AbortSignal!=='undefined'&&AbortSignal.timeout)opts.signal=AbortSignal.timeout(30000);
-  const r=await fetch("/api/admin",opts);
+  const r=await timedFetch("/api/admin",opts,adminTimeout(body&&body.op)).promise;
   if(r.status===401){toast('Session expired — sign in again');location.href="/login";return{ok:false,error:"session expired"}}
   let data=null;
   try{data=await r.json()}catch(e){data=null}
@@ -600,6 +670,7 @@ async function admin(body){
   if(!data||typeof data!=='object')return{ok:false,error:'failed'};
   return data;
  }catch(e){
+  if(e&&e.name==='TimeoutError')return{ok:false,error:tr('no response from server — check the result before retrying')};
   return{ok:false,error:tr('failed')};
  }
 }
@@ -624,6 +695,7 @@ function setBackdropInert(on){
 }
 function openModal(h){
  closeMenus();
+ cancelModalRequests();
  const m=document.getElementById('modal');if(!m)return;
  const bg=mbg(),alreadyOpen=bg&&bg.classList&&bg.classList.contains('show');
  if(!alreadyOpen)_prevFocus=document.activeElement;
@@ -642,6 +714,7 @@ function openModal(h){
  },30);
 }
 function closeModal(){
+ cancelModalRequests();
  const bg=mbg(),wasOpen=bg&&bg.classList&&bg.classList.contains('show');
  if(wasOpen)_modalGeneration++;
  if(bg&&bg.classList)bg.classList.remove('show');
@@ -800,17 +873,19 @@ async function doAdd(){const n=document.getElementById('cn').value.trim();const 
   showResult(r);tick();
  }catch(e){me.textContent=tr('failed');b.disabled=false;b.innerHTML=idle;}
 }
-function showResult(r){
+function cfgExtraHTML(r){
  let dh='';
  if(r.daily&&r.daily.length>1){const c=dayChart(r.daily,90);
   dh='<div class="ulh">'+ic('chart',13)+' '+tr('Daily traffic · 30 days')+'</div>'+c.head+c.svg+c.dates;}
+ return dh+(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' '+tr('Recent connections')+'</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'');
+}
+function showResult(r){
  openModal(
  mTitle('check',esc(r.name)+'<span class="mip">'+esc(r.ip)+'</span>')
  +(r.split?'<div class="splitnote">'+ic('branch')+'<span>'+tr('Split-tunnel: RU & local IPs go direct, the rest via the cascade. Large config — import the .conf file (too big for QR), then re-import to apply.')+'</span></div>':'')
  +(r.qr?'<div class="qrwrap"><img src="data:image/png;base64,'+r.qr+'" alt="WireGuard QR for '+esc(r.name)+'"></div>':'')
  +'<pre class="conf">'+esc(r.conf)+'</pre>'
- +dh
- +(r.conns&&r.conns.length?'<div class="ulh">'+ic('hist',13)+' '+tr('Recent connections')+'</div><div class="connlist">'+r.conns.map(c=>'<div class="connrow"><span>'+fmtTime(c.ts)+'</span><span class="mono">'+esc(c.endpoint||'—')+'</span></div>').join('')+'</div>':'')
+ +'<div id="cfgextra">'+cfgExtraHTML(r)+'</div>'
  +'<div class="mrow"><button class="ghost" type="button" data-act="copy">'+ic('copy')+' '+tr('Copy')+'</button>'
  +'<button class="ghost" type="button" data-act="dl">'+ic('dl')+' .conf</button>'
  +'<button class="primary" type="button" data-act="close">'+tr('Done')+'</button></div>');
@@ -818,13 +893,19 @@ function showResult(r){
 function copyConf(){navigator.clipboard.writeText(window.__cf).then(()=>toast('Config copied'),()=>toast('Copy failed'))}
 function dlConf(){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([window.__cf],{type:'text/plain'}));
  a.download=window.__cn+'.conf';a.click();URL.revokeObjectURL(a.href)}
+/* The config (what the user came for) shows at once; history/connections fill in
+   afterwards and are dropped if the modal was closed or replaced meanwhile. */
 async function showCfg(pub){const r=await admin({op:'getconf',pubkey:pub});if(!r||!r.ok){toast((r&&r.error)||'failed');return}
- try{const q='?pub='+encodeURIComponent(pub);
-  const [h,u]=await Promise.all([
-   fetch('/api/connections'+q,{cache:'no-store'}).then(x=>x.json()),
-   fetch('/api/history'+q,{cache:'no-store'}).then(x=>x.json())]);
-  r.conns=h.connections||[];r.daily=u.daily||[]}catch(e){}
- showResult(r)}
+ showResult(r);
+ const gen=_modalGeneration,q='?pub='+encodeURIComponent(pub);
+ const fill=()=>{
+  if(gen!==_modalGeneration)return;
+  const box=document.getElementById('cfgextra');if(!box)return;
+  box.innerHTML=cfgExtraHTML(r);applyI18n(box);
+ };
+ modalJSON('/api/connections'+q).then(h=>{r.conns=h.connections||[];fill()},()=>{});
+ modalJSON('/api/history'+q).then(u=>{r.daily=u.daily||[];fill()},()=>{});
+}
 function openExport(){
  closeMenus();
  openModal(mTitle('dl',tr('Download backup'))
@@ -850,7 +931,9 @@ async function doExport(){
 function aopcls(op){if(op==='delete'||op==='disable'||op==='expire')return'bad';if(op==='add'||op==='enable'||op==='setexit')return'ok';return''}
 async function openAudit(){
  openModal(mTitle('list',tr('Audit log'))+'<div id="aubody" class="mtext">'+tr('loading…')+'</div>');
- let r;try{r=await(await fetch('/api/audit',{cache:'no-store'})).json()}catch(e){document.getElementById('aubody').textContent=tr('failed to load');return}
+ const gen=_modalGeneration;
+ let r;try{r=await modalJSON('/api/audit')}catch(e){if(gen===_modalGeneration&&document.getElementById('aubody'))document.getElementById('aubody').textContent=tr('failed to load');return}
+ if(gen!==_modalGeneration)return;
  const ev=r.events||[];
  let h=ev.length?'<div class="connlist">'+ev.map(e=>'<div class="aurow"><span class="aop '+aopcls(e.op)+'">'+esc(e.op)+'</span><span class="ad">'+esc(e.detail||'')+'</span><span class="at">'+fmtTime(e.ts)+'</span></div>').join('')+'</div>':'<p class="mtext">'+tr('No admin actions logged yet.')+'</p>';
  h+='<div class="mrow"><button class="primary" type="button" data-act="close">'+tr('Done')+'</button></div>';
@@ -858,7 +941,9 @@ async function openAudit(){
 }
 async function openUsage(){
  openModal(mTitle('chart',tr('Usage')+' <span class="mip" id="umo"></span>')+'<div id="ubody" class="mtext">'+tr('loading…')+'</div>');
- let r;try{r=await(await fetch('/api/history',{cache:'no-store'})).json()}catch(e){document.getElementById('ubody').textContent=tr('failed to load');return}
+ const gen=_modalGeneration;
+ let r;try{r=await modalJSON('/api/history')}catch(e){if(gen===_modalGeneration&&document.getElementById('ubody'))document.getElementById('ubody').textContent=tr('failed to load');return}
+ if(gen!==_modalGeneration)return;
  document.getElementById('umo').textContent=r.month;renderUsage(r);
 }
 function dayChart(d,H){

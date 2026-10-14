@@ -163,6 +163,14 @@ class FakeElement {
     connectTree(child, this.isConnected);
     return child;
   }
+  insertBefore(child,ref){
+    if(child.parentElement) child.parentElement.removeChild(child);
+    const index = ref ? this.children.indexOf(ref) : -1;
+    if(index >= 0) this.children.splice(index,0,child); else this.children.push(child);
+    child.parentElement = this;
+    connectTree(child, this.isConnected);
+    return child;
+  }
   removeChild(child){
     const index = this.children.indexOf(child);
     if(index >= 0) this.children.splice(index,1);
@@ -363,7 +371,7 @@ class TestFrontendMonthlyTraffic(unittest.TestCase):
         self.assertIn("@media(max-width:560px)", css)
 
     def test_service_worker_cache_is_bumped(self):
-        self.assertIn("wgui-shell-v26", (ROOT / "app" / "sw.js").read_text())
+        self.assertIn("wgui-shell-v27", (ROOT / "app" / "sw.js").read_text())
         self.assertIn("cacheablePath", (ROOT / "app" / "sw.js").read_text())
 
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute frontend helpers")
