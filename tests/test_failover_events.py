@@ -181,5 +181,195 @@ class TestSwitchEvents(ServerCase):
         self.assertEqual(wgui._health_runtime["last_switch_at"], 0)
 
 
+class TestSetExitMany(HelperCase):
+    def test_moves_only_listed_clients_and_reports_skips(self):
+        self.write([client(0, "nl"), client(1, "nl"), client(2, "us"), client(3, "nl")])
+        result = wgadmin.setexitmany_data("us", ",".join([PUBS[0], PUBS[2], PUBS[5], PUBS[1]]), "revert")
+        self.assertEqual(result["changed"], 2)
+        self.assertEqual([m["pubkey"] for m in result["changed_clients"]], [PUBS[0], PUBS[1]])
+        self.assertEqual({(s["pubkey"], s["reason"]) for s in result["skipped"]},
+                         {(PUBS[2], "already_on_target"), (PUBS[5], "not_found")})
+        exits = {c["pubkey"]: c.get("exit", "nl") for c in self.read()}
+        self.assertEqual(exits, {PUBS[0]: "us", PUBS[1]: "us", PUBS[2]: "us", PUBS[3]: "nl"})
+        self.assertEqual(self.calls.count("sync"), 1)
+        self.assertIn(("flush", ["10.10.0.2", "10.10.0.3"]), self.calls)
+        audits = [c for c in self.calls if isinstance(c, tuple) and c[0] == "setexitmany"]
+        self.assertEqual(len(audits), 1)
+        self.assertIn("revert -> us 2 client(s)", audits[0][1])
+
+    def test_noop_touches_nothing(self):
+        self.write([client(0, "us")])
+        result = wgadmin.setexitmany_data("us", PUBS[0])
+        self.assertEqual((result["changed"], result["changed_clients"]), (0, []))
+        self.assertEqual(self.calls, [])
+
+    def test_rejects_bad_input_before_reading_registry(self):
+        self.write([client(0)])
+        for exit_, csv, label in (("de", PUBS[0], "manual"), ("us", "", "manual"),
+                                  ("us", "not-a-key", "manual"), ("us", PUBS[0] + "," + PUBS[0], "manual"),
+                                  ("us", PUBS[0], "quota"),
+                                  ("us", ",".join([PUBS[0]] * (wgadmin.SETEXITMANY_MAX + 1)), "manual")):
+            with self.subTest(exit=exit_, label=label):
+                with self.assertRaises(ValueError):
+                    wgadmin.setexitmany_data(exit_, csv, label)
+        self.assertEqual(self.calls, [])
+
+    def test_failed_apply_rolls_back_registry(self):
+        original = [client(0, "nl"), client(1, "nl")]
+        self.write(original)
+        state = {"n": 0}
+
+        def sync():
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("iptables-restore failed")
+        self.patch("run_exit_sync_or_raise", sync)
+        with self.assertRaises(RuntimeError):
+            wgadmin.setexitmany_data("us", PUBS[0])
+        self.assertEqual(self.read(), original)
+        self.assertEqual(state["n"], 2)                     # apply + rollback re-sync
+
+    def test_failed_rollback_is_unknown(self):
+        self.write([client(0, "nl")])
+        self.patch("run_exit_sync_or_raise", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        with self.assertRaises(wgadmin.RollbackFailed):
+            wgadmin.setexitmany_data("us", PUBS[0])
+
+    def test_cli_dispatch_and_budget(self):
+        seen = []
+        self.patch("op_setexitmany", lambda *a: seen.append(a) or sys.exit(0))
+        self.patch("acquire_lock", lambda path, wait=None: None)
+        old_argv = sys.argv
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        for argv in (["wg-admin.py", "setexitmany", "us", PUBS[0]],
+                     ["wg-admin.py", "setexitmany", "us", PUBS[0], "revert"]):
+            sys.argv = argv
+            with self.assertRaises(SystemExit):
+                wgadmin.main()
+        self.assertEqual(seen, [("us", PUBS[0]), ("us", PUBS[0], "revert")])
+        self.assertIn("setexitmany", wgadmin.MUTATING_OPS)
+        self.assertGreaterEqual(wgui.ADMIN_TIMEOUTS["setexitmany"], wgadmin.OP_BUDGETS["setexitmany"] + 10)
+
+
+class TestRevertSwitch(ServerCase):
+    def setUp(self):
+        super().setUp()
+        self.registry = [client(0, "nl"), client(1, "nl"), client(2, "us"), client(3, "nl")]
+        self.patch("load_registry", lambda: [dict(c) for c in self.registry])
+        self.patch("policy_inputs", lambda *a, **k: self.inputs())
+        self.calls = []
+
+        def call_admin(argv, timeout=None):
+            self.calls.append(argv)
+            pubs = argv[2].split(",")
+            moved = [{"pubkey": p, "name": next(c["name"] for c in self.registry if c["pubkey"] == p),
+                      "from": "nl"} for p in pubs]
+            return {"ok": True, "committed": True, "changed": len(moved), "changed_clients": moved,
+                    "skipped": []}
+        self.patch("call_admin", call_admin)
+        # failover moved c0, c1, c2 and c4 from US to NL; since then c2 went back
+        # by hand and c4 was deleted
+        self.event_id = wgui.record_event("exit_switch", subject="us->nl", actor="system", data={
+            "source": "us", "target": "nl", "reason": "health", "changed": 4,
+            "members": [{"pubkey": PUBS[i], "name": "c%d" % i, "from": "us"} for i in (0, 1, 2, 4)]})
+
+    def test_moves_back_exactly_the_remaining_group(self):
+        res = wgui.revert_switch(self.event_id, actor="admin", ip="192.0.2.9")
+        self.assertTrue(res["ok"])
+        self.assertEqual(self.calls, [["setexitmany", "us", PUBS[0] + "," + PUBS[1], "revert"]])
+        self.assertEqual([m["pubkey"] for m in res["changed"]], [PUBS[0], PUBS[1]])
+        self.assertEqual({(s["pubkey"], s["reason"]) for s in res["skipped"]},
+                         {(PUBS[2], "already_on_target"), (PUBS[4], "deleted")})
+        self.assertEqual(res["revert_of"], self.event_id)
+        rev = wgui.event_by_id(res["event_id"])
+        self.assertEqual((rev["data"]["reason"], rev["data"]["revert_of"], rev["actor"]),
+                         ("revert", self.event_id, "admin"))
+        last = wgui._policy_runtime["last_switch"]
+        self.assertEqual((last["reason"], last["target"], last["revert_of"]), ("revert", "us", self.event_id))
+
+    def test_reassigned_members_are_not_dragged_along(self):
+        self.registry[0] = client(0, "us")             # moved back by hand since
+        self.registry[1] = client(1, "us")
+        res = wgui.revert_switch(self.event_id)
+        self.assertTrue(res["noop"])
+        self.assertEqual(self.calls, [])
+
+    def test_destination_guard_blocks_with_409(self):
+        cases = ((self.inputs(us_ok=False), "target_unhealthy"),
+                 (self.inputs(us_used=500 * exit_policy.GIB), "target_exhausted"))
+        for inputs, code in cases:
+            with self.subTest(code=code):
+                self.patch("policy_inputs", lambda *a, _i=inputs, **k: _i)
+                res = wgui.revert_switch(self.event_id)
+                self.assertEqual((res["code"], res["http_status"], res["committed"]), (code, 409, False))
+        self.assertEqual(self.calls, [])
+
+    def test_destination_without_counters_is_blocked(self):
+        with wgui._lock:
+            wgui._exit_totals.update({"us": None})
+        res = wgui.revert_switch(self.event_id)
+        self.assertEqual(res["code"], "counter_unavailable")
+        self.assertEqual(self.calls, [])
+
+    def test_unknown_and_unrevertable_events(self):
+        self.assertEqual(wgui.revert_switch(999_999)["http_status"], 404)
+        login = wgui.record_event("login", data={"ok": True})
+        self.assertEqual(wgui.revert_switch(login)["http_status"], 404)
+        legacy = wgui.record_event("exit_switch", data={"source": "us", "target": "nl", "changed": 3})
+        self.assertEqual(wgui.revert_switch(legacy)["code"], "event_not_revertable")
+
+    def test_helper_failure_passes_commit_state_through(self):
+        self.patch("call_admin", lambda argv, timeout=None: {"ok": False, "error": "timeout", "committed": "unknown"})
+        res = wgui.revert_switch(self.event_id)
+        self.assertEqual((res["ok"], res["committed"], res["revert_of"]), (False, "unknown", self.event_id))
+        self.assertIsNone(wgui._policy_runtime["last_switch"])
+
+
+class TestRevertHttp(TestRevertSwitch):
+    def request(self, body):
+        raw = json.dumps(body).encode()
+
+        class Fake(wgui.H):
+            def __init__(self):
+                self.path = "/api/admin"
+                self.command = "POST"
+                self.client_address = ("192.0.2.30", 1)
+                self.headers = {"X-CSRF": wgui.csrf_for("admin"), "Content-Length": str(len(raw))}
+                self.rfile = io.BytesIO(raw)
+                self._code = None
+                self._out = b""
+
+            def _user(self):
+                return "admin"
+
+            def send_response(self, code):
+                self._code = code
+
+            def send_header(self, key, value):
+                pass
+
+            def end_headers(self):
+                pass
+
+        h = Fake()
+        h.wfile = type("W", (), {"write": lambda _s, b: setattr(h, "_out", h._out + b)})()
+        h.do_POST()
+        return h._code, json.loads(h._out.decode())
+
+    def test_http_contract(self):
+        code, body = self.request({"op": "revertswitch", "event_id": self.event_id})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(body["changed"]), 2)
+        self.assertNotIn("http_status", body)
+        journal = [e for e in wgui.events_page(limit=20) if e["kind"] == "admin"][0]
+        self.assertEqual((journal["subject"], journal["data"]["revert_of"], journal["data"]["changed"]),
+                         ("revertswitch", self.event_id, 2))
+        for bad in ({"op": "revertswitch"}, {"op": "revertswitch", "event_id": "1"},
+                    {"op": "revertswitch", "event_id": True}, {"op": "revertswitch", "event_id": 0}):
+            with self.subTest(body=bad):
+                self.assertEqual(self.request(bad)[0], 400)
+        self.assertEqual(self.request({"op": "revertswitch", "event_id": 424242})[0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()

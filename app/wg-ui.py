@@ -521,6 +521,81 @@ def restore_last_switch(now=None):
             _health_runtime["last_switch_at"] = time.monotonic() - elapsed
     return value
 
+def _skip_rows(rows):
+    out = []
+    for r in rows or []:
+        if isinstance(r, dict) and isinstance(r.get("pubkey"), str):
+            out.append({"pubkey": r["pubkey"], "name": str(r.get("name") or ""),
+                        "reason": str(r.get("reason") or "skipped")})
+    return out
+
+def revert_switch(event_id, actor="system", ip=None):
+    """Move back exactly the clients a journaled exit switch moved.
+
+    Only members that still exist and still sit on the event's target return;
+    the rest are reported in `skipped` (deleted / reassigned / already back).
+    The way back passes the same guard as a bulk switch: the destination must
+    be healthy, fresh, under quota and have live counters.
+    """
+    try:
+        ev = event_by_id(event_id)
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": "events unavailable", "detail": str(exc)[:120], "http_status": 503}
+    if not ev or ev["kind"] != "exit_switch":
+        return {"ok": False, "error": "event_not_found", "code": "event_not_found", "http_status": 404}
+    data = ev["data"]
+    moved_to = data.get("target")
+    members = [m for m in (data.get("members") or [])
+               if isinstance(m, dict) and isinstance(m.get("pubkey"), str)]
+    if moved_to not in exit_policy.EXITS or not members:
+        # Older events carry no membership: there is no group to send back.
+        return {"ok": False, "error": "event_not_revertable", "code": "event_not_revertable",
+                "http_status": 409}
+    back_to = "us" if moved_to == "nl" else "nl"
+    with _policy_lock:
+        try:
+            registry = load_registry()
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "http_status": 503}
+        by_pub = {c["pubkey"]: c for c in registry}
+        candidates, skipped = [], []
+        for m in members:
+            c = by_pub.get(m["pubkey"])
+            if c is None:
+                skipped.append({"pubkey": m["pubkey"], "name": str(m.get("name") or ""), "reason": "deleted"})
+            elif client_exit(c) != moved_to:
+                reason = "already_on_target" if client_exit(c) == back_to else "reassigned"
+                skipped.append({"pubkey": c["pubkey"], "name": c["name"], "reason": reason})
+            else:
+                candidates.append(c)
+        if not candidates:
+            return {"ok": True, "committed": False, "noop": True, "exit": back_to, "changed": [],
+                    "skipped": skipped, "event_id": None, "revert_of": ev["id"]}
+        policy, usage, assignments, health, warning = policy_inputs()
+        blocked = exit_policy.target_block(back_to, policy, usage, health)
+        if blocked:
+            return dict(_blocked_result(dict(blocked, source=moved_to)), committed=False, skipped=skipped)
+        availability = counter_availability()
+        incomplete = _counter_block(moved_to, back_to, {key: (availability.get(key) or key != back_to)
+                                                        for key in exit_policy.EXITS})
+        if incomplete:
+            return dict(_blocked_result(incomplete), committed=False, skipped=skipped)
+        result = call_admin(["setexitmany", back_to, ",".join(c["pubkey"] for c in candidates), "revert"])
+        if not result.get("ok"):
+            result = dict(result)
+            result["skipped"] = skipped
+            result["revert_of"] = ev["id"]
+            return result
+        skipped += _skip_rows(result.get("skipped"))
+        event = _publish_switch(moved_to, back_to, "revert", result, actor, ip,
+                                extra={"revert_of": ev["id"]})
+        out = {"ok": True, "committed": result.get("committed", True), "exit": back_to,
+               "changed": _switch_members(result), "skipped": skipped,
+               "event_id": event["event_id"], "revert_of": ev["id"]}
+        if result.get("cleanup_warning"):
+            out["cleanup_warning"] = result["cleanup_warning"]
+        return out
+
 def guarded_exit_switch(target, reason, actor="system", ip=None):
     with _policy_lock:
         return _guarded_exit_switch_locked(target, reason, actor=actor, ip=ip)
@@ -1089,7 +1164,7 @@ def status():
 # (wg-admin.py OP_BUDGETS, lock wait and rollback included) plus ~10 s, so the
 # helper decides how an operation ends and reports it, instead of being killed.
 ADMIN_TIMEOUTS = {
-    "setexitall": 90,
+    "setexitall": 90, "setexitmany": 90,
     "rename": 150, "setenabled": 150, "delete": 150, "setexit": 150,
     "expire": 150, "regenerate": 150,
     "add": 195,
@@ -1334,7 +1409,7 @@ def _events_maintenance(c, stamp):
 # codes, backup archives, passwords, split entry lists — stays out by design.
 _ADMIN_EVENT_REQ = ("name", "pubkey", "exit", "enabled", "expires", "refresh", "split", "event_id")
 _ADMIN_EVENT_RES = ("ok", "committed", "busy", "timeout", "code", "changed", "name", "exit",
-                    "event_id", "cleanup_warning")
+                    "event_id", "revert_of", "cleanup_warning")
 
 def admin_event_data(op, body, res):
     data = {"op": op}
@@ -1840,6 +1915,18 @@ class H(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json(400, {"ok": False, "error": str(e)})
                 res = guarded_exit_switch(target, "manual", actor=user, ip=self.client_address[0])
+                log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
+                          ip=self.client_address[0], name=None)
+                record_event("admin", subject=op, actor=user, ip=self.client_address[0],
+                             data=admin_event_data(op, b, res))
+                payload = dict(res)
+                http_status = payload.pop("http_status", 200 if payload.get("ok") else 400)
+                return self._json(http_status, payload)
+            elif op == "revertswitch":
+                event_id = b.get("event_id")
+                if type(event_id) is not int or event_id <= 0:
+                    return self._json(400, {"ok": False, "error": "invalid event_id"})
+                res = revert_switch(event_id, actor=user, ip=self.client_address[0])
                 log_event("admin", op=op, ok=bool(res.get("ok")), user=user,
                           ip=self.client_address[0], name=None)
                 record_event("admin", subject=op, actor=user, ip=self.client_address[0],

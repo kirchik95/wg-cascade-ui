@@ -12,6 +12,7 @@ Usage: wg-admin.py <op> [args]
   setenabled <pubkey> <0|1>    -> {}
   setexit <pubkey> <nl|us>     -> {name,exit}
   setexitall <nl|us> <manual|quota|health> -> {exit,changed,changed_clients,source_counts}
+  setexitmany <nl|us> <pubkey,...> [manual|revert] -> {exit,changed,changed_clients,skipped}
   setexitpolicy <0|1 auto> <nl-gib> <us-gib> <0|1 failover> -> {auto_switch,health_failover,quotas_gib}
   delete <pubkey>              -> {}
   getconf <pubkey>             -> {name,ip,conf,qr,exit}
@@ -88,7 +89,7 @@ IFACE_RE = re.compile(r'^[A-Za-z0-9_-]{1,15}$')
 # service waits ~10 s longer (wg-ui.py ADMIN_TIMEOUTS) and the browser longer
 # still, so the helper — not a killed sudo — decides how an operation ends.
 OP_BUDGETS = {
-    "setexitall": 80,
+    "setexitall": 80, "setexitmany": 80,
     "rename": 140, "setenabled": 140, "delete": 140, "setexit": 140,
     "expire": 140, "regenerate": 140,
     "add": 185,
@@ -98,7 +99,7 @@ DEFAULT_BUDGET = 60
 LOCK_WAIT = 4.0          # seconds to wait for another helper before answering "busy"
 ROLLBACK_RESERVE = 30.0  # kept free while applying so a rollback can always run
 CLEANUP_BUDGET = 10.0    # post-commit conntrack cleanup, whole batch
-MUTATING_OPS = frozenset({"add", "rename", "setenabled", "delete", "setexit", "setexitall",
+MUTATING_OPS = frozenset({"add", "rename", "setenabled", "delete", "setexit", "setexitall", "setexitmany",
                           "expire", "regenerate", "setexpiry", "setexitpolicy",
                           "splitsave", "splitserver", "blockipv6"})
 
@@ -600,6 +601,50 @@ def _commit_exit_moves(clients, original_bytes, changed):
     except Exception as e:
         return "conntrack cleanup skipped: %s" % e
 
+SETEXITMANY_MAX = 256
+
+def setexitmany_data(target, pubs_csv, label="manual"):
+    """Move exactly the listed clients to `target`, atomically (same commit and
+    rollback path as setexitall). Listed clients that are gone or already on
+    the target are reported in `skipped`, not treated as errors: the caller
+    decided the group earlier and the registry may have moved on since."""
+    target = _normalize_exit(target)
+    if label not in ("manual", "revert"):
+        raise ValueError("invalid switch label")
+    pubs = [p for p in (pubs_csv or "").split(",") if p]
+    if not pubs or len(pubs) > SETEXITMANY_MAX:
+        raise ValueError("client list must hold 1..%d pubkeys" % SETEXITMANY_MAX)
+    if any(not PUB_RE.match(p) for p in pubs):
+        raise ValueError("invalid pubkey")
+    if len(set(pubs)) != len(pubs):
+        raise ValueError("duplicate pubkey")
+    with open(CLIENTS_JSON, "rb") as f:
+        original_bytes = f.read()
+    clients = json.loads(original_bytes)
+    by_pub = {c.get("pubkey"): c for c in clients}
+    changed, skipped = [], []
+    for pub in pubs:
+        c = by_pub.get(pub)
+        if c is None:
+            skipped.append({"pubkey": pub, "name": "", "reason": "not_found"})
+            continue
+        old = client_exit(c)
+        if old == target:
+            skipped.append({"pubkey": pub, "name": c.get("name", ""), "reason": "already_on_target"})
+            continue
+        changed.append((c, old))
+        _assign_exit(c, target)
+    if not changed:
+        return {"exit": target, "changed": 0, "changed_clients": [], "skipped": skipped}
+    warning = _commit_exit_moves(clients, original_bytes, [c for c, _ in changed])
+    names = ", ".join(c.get("name", "") for c, _ in changed)
+    audit("setexitmany", "%s -> %s %d client(s): %s" % (label, target, len(changed), names[:200]))
+    result = {"exit": target, "changed": len(changed), "changed_clients": _moved(changed),
+              "skipped": skipped}
+    if warning:
+        result["cleanup_warning"] = warning
+    return result
+
 class RollbackFailed(RuntimeError):
     pass
 
@@ -719,6 +764,15 @@ def op_setexit(pub, exit_):
 def op_setexitall(target, reason):
     try:
         result = setexitall_data(target, reason)
+    except RollbackFailed as e:
+        die(str(e), committed="unknown")
+    except (RuntimeError, ValueError) as e:
+        die(str(e), committed=False)
+    ok(result)
+
+def op_setexitmany(target, pubs_csv, label="manual"):
+    try:
+        result = setexitmany_data(target, pubs_csv, label)
     except RollbackFailed as e:
         die(str(e), committed="unknown")
     except (RuntimeError, ValueError) as e:
@@ -941,6 +995,7 @@ def main():
     elif op == "setexpiry"  and len(a) >= 2: op_setexpiry(a[0], a[1])
     elif op == "setexit"    and len(a) >= 2: op_setexit(a[0], a[1])
     elif op == "setexitall" and len(a) == 2: op_setexitall(a[0], a[1])
+    elif op == "setexitmany" and len(a) in (2, 3): op_setexitmany(*a)
     elif op == "setexitpolicy" and len(a) == 4: op_setexitpolicy(a[0], a[1], a[2], a[3])
     elif op == "expire":                  op_expire()
     elif op == "export":                  op_export()
